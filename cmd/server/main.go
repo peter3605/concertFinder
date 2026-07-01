@@ -14,7 +14,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/config"
+	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/spotify"
 )
 
 func main() {
@@ -27,6 +30,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pool, err := db.Connect(dbCtx, cfg.DatabaseURL)
+	dbCancel()
+	if err != nil {
+		logger.Error("db connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -37,6 +49,23 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+
+	if encKey, err := auth.DecodeKey(cfg.EncryptionKey); err != nil {
+		logger.Warn("auth routes disabled: ENCRYPTION_KEY missing or invalid", "err", err)
+	} else {
+		deps := &auth.Deps{
+			Pool:          pool,
+			EncKey:        encKey,
+			ClientID:      cfg.SpotifyClientID,
+			RedirectURI:   cfg.SpotifyRedirectURI,
+			CookieDomain:  cfg.SessionCookieDomain,
+			Handshakes:    auth.NewHandshakeStore(),
+			SpotifyClient: spotify.NewClient(&http.Client{Timeout: 10 * time.Second}),
+			HTTPClient:    &http.Client{Timeout: 10 * time.Second},
+			PostLoginURL:  "/",
+		}
+		r.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
