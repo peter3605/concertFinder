@@ -15,10 +15,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/peterho/concertfinder/internal/auth"
+	"github.com/peterho/concertfinder/internal/bandsintown"
+	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/spotify"
+	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
 func main() {
@@ -76,15 +79,32 @@ func main() {
 		}
 		r.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
 
-		affinityH := &webhttp.AffinityHandler{
+		affinitySvc := &webhttp.AffinityService{
 			Pool:    pool,
 			Tokens:  tokenSvc,
 			Spotify: spotifyClient,
 			TTL:     24 * time.Hour,
 		}
+		ticketHTTP := &http.Client{Timeout: 10 * time.Second}
+		tmClient := ticketmaster.NewClient(ticketHTTP, cfg.TicketmasterAPIKey)
+		bitClient := bandsintown.NewClient(ticketHTTP, cfg.BandsintownAppID)
+
+		affinityH := &webhttp.AffinityHandler{Service: affinitySvc}
+		concertsH := &webhttp.ConcertsHandler{
+			Affinity: affinitySvc,
+			Pool:     pool,
+			TM:       tmClient,
+			BIT:      bitClient,
+			Location: concerts.Location{
+				Latitude:    cfg.UserLatitude,
+				Longitude:   cfg.UserLongitude,
+				RadiusMiles: cfg.UserRadiusMiles,
+			},
+		}
 		r.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
 			r.Get("/affinity", affinityH.Get)
+			r.Get("/concerts", concertsH.Get)
 		})
 	}
 
