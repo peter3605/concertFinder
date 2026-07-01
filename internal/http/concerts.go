@@ -19,11 +19,13 @@ const concertsRequestBudget = 15 * time.Second
 
 // ConcertsHandler serves /me/concerts.
 type ConcertsHandler struct {
-	Affinity *AffinityService
-	Pool     *pgxpool.Pool
-	TM       *ticketmaster.Client
-	BIT      *bandsintown.Client
-	Location concerts.Location
+	Affinity         *AffinityService
+	Pool             *pgxpool.Pool
+	TM               *ticketmaster.Client
+	BIT              *bandsintown.Client
+	Location         concerts.Location
+	Fallback         concerts.Fallbacker // nil = Phase 1 behavior
+	MinFallbackScore float64
 }
 
 type concertsResponse struct {
@@ -49,11 +51,13 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	found, err := concerts.Search(ctx, concerts.SearchDeps{
-		Pool:        h.Pool,
-		TM:          h.TM,
-		BIT:         h.BIT,
-		CacheTTL:    4 * time.Hour,
-		Parallelism: 10,
+		Pool:             h.Pool,
+		TM:               h.TM,
+		BIT:              h.BIT,
+		CacheTTL:         4 * time.Hour,
+		Parallelism:      10,
+		Fallback:         h.Fallback,
+		MinFallbackScore: h.MinFallbackScore,
 	}, artists, h.Location)
 	if err != nil {
 		slog.Error("concerts: search failed", "err", err, "user", u.ID)

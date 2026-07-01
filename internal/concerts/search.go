@@ -26,13 +26,22 @@ type Location struct {
 	RadiusMiles int     `json:"radius_miles"`
 }
 
+// Fallbacker is the small-artist coverage escalation from design §5.4.
+// Implemented by internal/fallback.Chain. Nil-safe: if unset, the fallback
+// stage is skipped entirely.
+type Fallbacker interface {
+	FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc Location) []Concert
+}
+
 // SearchDeps holds the wired-up clients + DB pool for the fan-out.
 type SearchDeps struct {
-	Pool        *pgxpool.Pool
-	TM          *ticketmaster.Client
-	BIT         *bandsintown.Client
-	CacheTTL    time.Duration // §7.3 = 4 hours
-	Parallelism int           // §8.1 = 10
+	Pool             *pgxpool.Pool
+	TM               *ticketmaster.Client
+	BIT              *bandsintown.Client
+	CacheTTL         time.Duration // §7.3 = 4 hours
+	Parallelism      int           // §8.1 = 10
+	Fallback         Fallbacker    // nil = Phase 1 behavior (no fallback)
+	MinFallbackScore float64       // artists with Score < this bypass the fallback
 }
 
 // Search fans out to TM + BIT for each artist, respects ctx, and returns
@@ -156,6 +165,9 @@ func searchOne(ctx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Lo
 	}
 	for _, e := range bitEvents {
 		out = append(out, bitEventToConcert(e, a))
+	}
+	if len(out) == 0 && d.Fallback != nil && a.Score >= d.MinFallbackScore {
+		out = append(out, d.Fallback.FindEvents(ctx, a, loc)...)
 	}
 	return out, nil
 }

@@ -76,7 +76,7 @@ func (c *Client) ArtistEvents(ctx context.Context, artistName string, lat, lng f
 			v.Longitude = f
 		}
 		if v.Latitude != 0 && v.Longitude != 0 && radiusMiles > 0 {
-			if haversineMiles(lat, lng, v.Latitude, v.Longitude) > float64(radiusMiles) {
+			if HaversineMiles(lat, lng, v.Latitude, v.Longitude) > float64(radiusMiles) {
 				continue
 			}
 		}
@@ -93,8 +93,8 @@ func (c *Client) ArtistEvents(ctx context.Context, artistName string, lat, lng f
 	return out, nil
 }
 
-// haversineMiles returns great-circle distance between two lat/lng points.
-func haversineMiles(lat1, lng1, lat2, lng2 float64) float64 {
+// HaversineMiles returns great-circle distance between two lat/lng points.
+func HaversineMiles(lat1, lng1, lat2, lng2 float64) float64 {
 	const earthMiles = 3958.8
 	rad := math.Pi / 180
 	dLat := (lat2 - lat1) * rad
