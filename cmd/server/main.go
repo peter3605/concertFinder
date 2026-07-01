@@ -43,6 +43,14 @@ func main() {
 	}
 	defer pool.Close()
 
+	migCtx, migCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := db.Migrate(migCtx, pool, "migrations"); err != nil {
+		migCancel()
+		logger.Error("migrations failed", "err", err)
+		os.Exit(1)
+	}
+	migCancel()
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
