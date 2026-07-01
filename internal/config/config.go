@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds runtime configuration sourced from process environment.
@@ -22,6 +23,12 @@ type Config struct {
 	UserLatitude        float64
 	UserLongitude       float64
 	UserRadiusMiles     int
+
+	// Phase 2 fallback chain (design §5.4). Off by default.
+	Phase2Enabled      bool
+	Phase2MinScore     float64
+	BraveSearchAPIKey  string
+	SongkickAPIKey     string
 }
 
 // Load reads configuration from the environment.
@@ -50,6 +57,15 @@ func Load() (*Config, error) {
 	} else {
 		c.UserRadiusMiles = 50
 	}
+
+	c.Phase2Enabled = os.Getenv("PHASE2_FALLBACKS_ENABLED") == "1" || strings.EqualFold(os.Getenv("PHASE2_FALLBACKS_ENABLED"), "true")
+	if f, err := strconv.ParseFloat(os.Getenv("PHASE2_MIN_SCORE"), 64); err == nil {
+		c.Phase2MinScore = f
+	} else {
+		c.Phase2MinScore = 2.0
+	}
+	c.BraveSearchAPIKey = os.Getenv("BRAVE_SEARCH_API_KEY")
+	c.SongkickAPIKey = os.Getenv("SONGKICK_API_KEY")
 	for k, v := range map[string]string{
 		"SPOTIFY_CLIENT_ID":     c.SpotifyClientID,
 		"SPOTIFY_REDIRECT_URI":  c.SpotifyRedirectURI,

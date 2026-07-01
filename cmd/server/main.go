@@ -19,6 +19,7 @@ import (
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/fallback"
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
@@ -98,6 +99,22 @@ func main() {
 		bitClient := bandsintown.NewClient(ticketHTTP, cfg.BandsintownAppID)
 
 		affinityH := &webhttp.AffinityHandler{Service: affinitySvc}
+
+		var fallbackChain concerts.Fallbacker
+		if cfg.Phase2Enabled {
+			fallbackChain = &fallback.Chain{
+				Pool:     pool,
+				Fetcher:  fallback.NewFetcher(pool),
+				Brave:    fallback.NewBraveClient(cfg.BraveSearchAPIKey),
+				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+			}
+			logger.Info("phase 2 fallbacks enabled",
+				"min_score", cfg.Phase2MinScore,
+				"brave_key_set", cfg.BraveSearchAPIKey != "",
+				"songkick_key_set", cfg.SongkickAPIKey != "",
+			)
+		}
+
 		concertsH := &webhttp.ConcertsHandler{
 			Affinity: affinitySvc,
 			Pool:     pool,
@@ -108,6 +125,8 @@ func main() {
 				Longitude:   cfg.UserLongitude,
 				RadiusMiles: cfg.UserRadiusMiles,
 			},
+			Fallback:         fallbackChain,
+			MinFallbackScore: cfg.Phase2MinScore,
 		}
 		r.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
