@@ -17,6 +17,7 @@ import (
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
+	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/spotify"
 )
 
@@ -53,6 +54,15 @@ func main() {
 	if encKey, err := auth.DecodeKey(cfg.EncryptionKey); err != nil {
 		logger.Warn("auth routes disabled: ENCRYPTION_KEY missing or invalid", "err", err)
 	} else {
+		spotifyHTTP := &http.Client{Timeout: 30 * time.Second}
+		spotifyClient := spotify.NewClient(spotifyHTTP)
+		oauthHTTP := &http.Client{Timeout: 10 * time.Second}
+		tokenSvc := &auth.TokenService{
+			Pool:       pool,
+			EncKey:     encKey,
+			ClientID:   cfg.SpotifyClientID,
+			HTTPClient: oauthHTTP,
+		}
 		deps := &auth.Deps{
 			Pool:          pool,
 			EncKey:        encKey,
@@ -60,11 +70,22 @@ func main() {
 			RedirectURI:   cfg.SpotifyRedirectURI,
 			CookieDomain:  cfg.SessionCookieDomain,
 			Handshakes:    auth.NewHandshakeStore(),
-			SpotifyClient: spotify.NewClient(&http.Client{Timeout: 10 * time.Second}),
-			HTTPClient:    &http.Client{Timeout: 10 * time.Second},
+			SpotifyClient: spotifyClient,
+			HTTPClient:    oauthHTTP,
 			PostLoginURL:  "/",
 		}
 		r.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
+
+		affinityH := &webhttp.AffinityHandler{
+			Pool:    pool,
+			Tokens:  tokenSvc,
+			Spotify: spotifyClient,
+			TTL:     24 * time.Hour,
+		}
+		r.Route("/me", func(r chi.Router) {
+			r.Use(auth.RequireUser(pool))
+			r.Get("/affinity", affinityH.Get)
+		})
 	}
 
 	srv := &http.Server{
