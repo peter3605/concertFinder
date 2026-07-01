@@ -1,0 +1,19 @@
+:root {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: dark;
+  background: #0f1115;
+  color: #e8e8ea;
+}
+
+body { margin: 0; }
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+footer {
+  margin-top: 3rem;
+  opacity: 0.6;
+}
