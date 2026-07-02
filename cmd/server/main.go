@@ -23,6 +23,7 @@ import (
 	"github.com/peterho/concertfinder/internal/fallback"
 	"github.com/peterho/concertfinder/internal/geocoding"
 	webhttp "github.com/peterho/concertfinder/internal/http"
+	"github.com/peterho/concertfinder/internal/search"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
@@ -122,6 +123,9 @@ func main() {
 			Longitude:   cfg.UserLongitude,
 			RadiusMiles: cfg.UserRadiusMiles,
 		}
+		searches := search.NewManager()
+		defer searches.Shutdown()
+
 		concertsH := &webhttp.ConcertsHandler{
 			Affinity:         affinitySvc,
 			Pool:             pool,
@@ -130,6 +134,7 @@ func main() {
 			FallbackLocation: fallbackLoc,
 			Fallback:         fallbackChain,
 			MinFallbackScore: cfg.Phase2MinScore,
+			Searches:         searches,
 		}
 		locationH := &webhttp.LocationHandler{
 			Pool:             pool,

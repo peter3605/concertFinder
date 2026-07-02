@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type Me = { id: string; spotify_user_id: string; display_name: string };
 
@@ -18,6 +18,8 @@ type Concert = {
 type Location = { latitude: number; longitude: number; radius_miles: number; display_name?: string };
 type Facet = { value: string; count: number };
 type ConcertsResponse = {
+  search_id: string;
+  complete: boolean;
   location: Location;
   count: number;
   concerts: Concert[];
@@ -59,15 +61,20 @@ function buildQuery(f: { genre?: string; dateFrom?: string; dateTo?: string; wee
   return s ? `?${s}` : '';
 }
 
-async function fetchConcerts(query: string): Promise<ConcertsState> {
+async function fetchConcerts(query: string, searchId?: string): Promise<ConcertsState> {
   try {
-    const r = await fetch(`/api/me/concerts${query}`, { credentials: 'same-origin' });
+    const suffix = searchId
+      ? (query ? `${query}&id=${searchId}` : `?id=${searchId}`)
+      : query;
+    const r = await fetch(`/api/me/concerts${suffix}`, { credentials: 'same-origin' });
     if (!r.ok) return { kind: 'error', message: `HTTP ${r.status}` };
     return { kind: 'loaded', data: (await r.json()) as ConcertsResponse };
   } catch (e) {
     return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
   }
 }
+
+const POLL_INTERVAL_MS = 2000;
 
 function groupByMonth(concerts: Concert[]) {
   const groups = new Map<string, Concert[]>();
@@ -261,8 +268,17 @@ export default function App() {
       .then((l: Location | null) => setLocation(l));
   }, [auth.kind]);
 
+  // Streaming: each fresh trigger (filters or location change) starts a new
+  // search. If the server returns complete: false we poll the same search_id
+  // every 2s until complete. `generation` guards against stale poll callbacks
+  // after the user changes filters mid-search.
+  const generation = useRef(0);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (auth.kind !== 'signed_in') return;
+    const myGen = ++generation.current;
+    if (pollTimer.current) clearTimeout(pollTimer.current);
     setConcerts({ kind: 'loading' });
     const q = buildQuery({
       genre: filters.genre,
@@ -270,7 +286,30 @@ export default function App() {
       dateTo: filters.dateTo,
       weekday: filters.weekday,
     });
-    fetchConcerts(q).then(setConcerts);
+
+    const schedulePoll = (searchId: string) => {
+      pollTimer.current = setTimeout(async () => {
+        if (myGen !== generation.current) return;
+        const next = await fetchConcerts(q, searchId);
+        if (myGen !== generation.current) return;
+        setConcerts(next);
+        if (next.kind === 'loaded' && !next.data.complete) {
+          schedulePoll(next.data.search_id);
+        }
+      }, POLL_INTERVAL_MS);
+    };
+
+    fetchConcerts(q).then((initial) => {
+      if (myGen !== generation.current) return;
+      setConcerts(initial);
+      if (initial.kind === 'loaded' && !initial.data.complete) {
+        schedulePoll(initial.data.search_id);
+      }
+    });
+
+    return () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
   }, [auth.kind, filters, location?.latitude, location?.longitude, location?.radius_miles]);
 
   async function logout() {
@@ -318,6 +357,7 @@ export default function App() {
             <>
               <p className="meta">
                 {concerts.data.count} show{concerts.data.count === 1 ? '' : 's'} match
+                {!concerts.data.complete && <span className="spinner"> · still searching…</span>}
               </p>
               {concerts.data.count === 0 && <p>No matches. Try clearing filters or widening the radius.</p>}
               {groupByMonth(concerts.data.concerts).map((g) => (

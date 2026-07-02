@@ -106,6 +106,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 
 .meta { opacity: 0.75; margin-bottom: 1rem; }
+.spinner { opacity: 0.7; font-style: italic; }
 
 .month h2 {
   font-size: 1rem;
