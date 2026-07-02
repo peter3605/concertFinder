@@ -45,9 +45,22 @@ type SearchDeps struct {
 }
 
 // Search fans out to TM + BIT for each artist, respects ctx, and returns
-// deduped concerts sorted by date. Per-artist errors are logged but do not
-// fail the whole search — partial results are the design intent (§6.1).
+// deduped concerts sorted by date. Backwards-compatible wrapper over
+// StreamSearch for callers that want blocking-full behavior.
 func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, loc Location) ([]Concert, error) {
+	m := NewMerger()
+	if err := StreamSearch(ctx, d, artists, loc, m); err != nil {
+		return nil, err
+	}
+	return m.All(), nil
+}
+
+// StreamSearch drives the same §8.1 fan-out but writes results into a
+// caller-supplied Merger as each artist completes. Returns when every
+// artist goroutine has finished (or ctx expires). Callers that want to
+// expose intermediate state to a client (streaming poll endpoint) share the
+// merger with a reader.
+func StreamSearch(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, loc Location, m *Merger) error {
 	if d.Parallelism <= 0 {
 		d.Parallelism = 10
 	}
@@ -55,7 +68,6 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 		d.CacheTTL = 4 * time.Hour
 	}
 	sem := make(chan struct{}, d.Parallelism)
-	results := make(chan []Concert, len(artists))
 
 	var wg sync.WaitGroup
 	for _, a := range artists {
@@ -73,29 +85,20 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 			}
 			defer func() { <-sem }()
 
-			concerts, err := searchOne(ctx, d, a, loc)
+			batch, err := searchOne(ctx, d, a, loc)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					slog.Warn("artist search failed", "artist", a.Name, "err", err)
 				}
 				return
 			}
-			select {
-			case results <- concerts:
-			case <-ctx.Done():
+			for _, c := range batch {
+				m.Add(c)
 			}
 		}()
 	}
-
-	go func() { wg.Wait(); close(results) }()
-
-	m := NewMerger()
-	for batch := range results {
-		for _, c := range batch {
-			m.Add(c)
-		}
-	}
-	return m.All(), nil
+	wg.Wait()
+	return nil
 }
 
 // searchOne resolves + queries TM and BIT for one artist in parallel.

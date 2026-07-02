@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -78,9 +79,11 @@ func SortLinks(links []TicketLink) {
 	})
 }
 
-// Merger accumulates concerts, deduping incrementally. Safe to call from a
-// single collector goroutine. Not safe for concurrent Add.
+// Merger accumulates concerts, deduping incrementally. Safe for concurrent
+// use — streaming search has a fan-out goroutine calling Add while the HTTP
+// handler calls All() for snapshots.
 type Merger struct {
+	mu    sync.RWMutex
 	byKey map[string]*Concert
 }
 
@@ -94,6 +97,8 @@ func (m *Merger) Add(c Concert) {
 	if c.DedupKey == "" {
 		c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	existing, ok := m.byKey[c.DedupKey]
 	if !ok {
 		SortLinks(c.Links)
@@ -107,7 +112,6 @@ func (m *Merger) Add(c Concert) {
 		}
 	}
 	SortLinks(existing.Links)
-	// Fill empty fields from the newcomer if useful.
 	if existing.State == "" {
 		existing.State = c.State
 	}
@@ -126,8 +130,11 @@ func (m *Merger) Add(c Concert) {
 	}
 }
 
-// All returns concerts sorted ascending by date, then artist name.
+// All returns concerts sorted ascending by date, then artist name. Values are
+// copied out under the read lock so the caller can iterate without contention.
 func (m *Merger) All() []Concert {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make([]Concert, 0, len(m.byKey))
 	for _, c := range m.byKey {
 		out = append(out, *c)
