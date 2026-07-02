@@ -25,14 +25,14 @@ func (c *Client) RecentlyPlayed(ctx context.Context, accessToken string) ([]Rece
 // TopArtists fetches the caller's top artists across all three time ranges.
 // Spotify caps this at 50 per range, so one request per range suffices.
 func (c *Client) TopArtists(ctx context.Context, accessToken string) (TopArtistsByRange, error) {
-	fetch := func(tr TimeRange) ([]ArtistRef, error) {
+	fetch := func(tr TimeRange) ([]TopArtist, error) {
 		u := fmt.Sprintf("%s/me/top/artists?time_range=%s&limit=50", APIBase, tr)
 		body, err := c.doGETRetry(ctx, u, accessToken)
 		if err != nil {
 			return nil, err
 		}
 		var page struct {
-			Items []ArtistRef `json:"items"`
+			Items []TopArtist `json:"items"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, fmt.Errorf("decode top artists (%s): %w", tr, err)

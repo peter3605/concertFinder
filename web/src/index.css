@@ -8,7 +8,7 @@
 body { margin: 0; }
 
 main {
-  max-width: 780px;
+  max-width: 820px;
   margin: 0 auto;
   padding: 2rem 1rem;
 }
@@ -20,9 +20,7 @@ header {
   gap: 1rem;
   margin-bottom: 1rem;
 }
-
 header h1 { margin: 0; font-size: 1.5rem; }
-
 .user { display: flex; align-items: center; gap: 0.75rem; }
 
 button {
@@ -33,9 +31,81 @@ button {
   border-radius: 999px;
   font-weight: 600;
   cursor: pointer;
+  font-size: 0.9rem;
+}
+button.linkish {
+  background: transparent;
+  color: #1db954;
+  padding: 0.2rem 0.4rem;
+  font-weight: 500;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+
+.location-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  background: #191b21;
+  border: 1px solid #2a2d33;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+.location-bar.editing input[type=text] {
+  flex: 1 1 auto;
+  min-width: 12rem;
+}
+.location-bar input, .location-bar select {
+  background: #0f1115;
+  color: #e8e8ea;
+  border: 1px solid #2a2d33;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.location-bar input[type=number] { width: 4rem; }
+.location-bar label { display: inline-flex; align-items: center; gap: 0.3rem; }
+.location-bar .err { color: #ff8080; }
+
+.filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  background: #14161c;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+}
+.filter-bar .genres { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.pill {
+  background: transparent;
+  color: #e8e8ea;
+  border: 1px solid #2a2d33;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.pill.active {
+  background: #1db954;
+  color: #0f1115;
+  border-color: #1db954;
+}
+.pill em { font-style: normal; opacity: 0.6; margin-left: 0.2rem; }
+.filter-bar .daterow { display: flex; flex-wrap: wrap; gap: 0.8rem; font-size: 0.85rem; }
+.filter-bar .daterow label { display: inline-flex; align-items: center; gap: 0.3rem; }
+.filter-bar .daterow input, .filter-bar .daterow select {
+  background: #0f1115;
+  color: #e8e8ea;
+  border: 1px solid #2a2d33;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
 }
 
-.meta { opacity: 0.75; margin-bottom: 1.5rem; }
+.meta { opacity: 0.75; margin-bottom: 1rem; }
 
 .month h2 {
   font-size: 1rem;
@@ -48,17 +118,21 @@ button {
 }
 
 .month ul { list-style: none; padding: 0; margin: 0; }
+.month li { padding: 0.75rem 0; border-bottom: 1px solid #1c1e24; }
 
-.month li {
-  padding: 0.75rem 0;
-  border-bottom: 1px solid #1c1e24;
-}
-
-.row { display: flex; flex-direction: column; gap: 0.2rem; }
-
+.row { display: flex; flex-direction: column; gap: 0.25rem; }
 .who strong { color: #ffffff; }
 .day { opacity: 0.7; }
 .where { opacity: 0.8; font-size: 0.9rem; }
+
+.tags { display: flex; gap: 0.3rem; }
+.tag {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.5rem;
+  background: #1c1e24;
+  border-radius: 999px;
+  opacity: 0.75;
+}
 
 .links { display: flex; gap: 0.5rem; margin-top: 0.35rem; }
 .links a {

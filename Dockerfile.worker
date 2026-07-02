@@ -3,11 +3,10 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download || true
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
 
 FROM gcr.io/distroless/static-debian12
-COPY --from=build /out/server /server
+COPY --from=build /out/worker /worker
 COPY --from=build /src/migrations /migrations
-EXPOSE 8080
 USER nonroot:nonroot
-ENTRYPOINT ["/server"]
+ENTRYPOINT ["/worker"]
