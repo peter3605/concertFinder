@@ -31,6 +31,19 @@ services:
       db:
         condition: service_healthy
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
   web:
     build:
       context: ./web

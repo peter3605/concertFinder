@@ -167,7 +167,15 @@ func searchOne(ctx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Lo
 		out = append(out, bitEventToConcert(e, a))
 	}
 	if len(out) == 0 && d.Fallback != nil && a.Score >= d.MinFallbackScore {
-		out = append(out, d.Fallback.FindEvents(ctx, a, loc)...)
+		fb := d.Fallback.FindEvents(ctx, a, loc)
+		// Fallback emits concerts with only artist name/ID; attach genres from
+		// the ScoredArtist so downstream filters still work.
+		for i := range fb {
+			if len(fb[i].Artist.Genres) == 0 && len(a.Genres) > 0 {
+				fb[i].Artist.Genres = a.Genres
+			}
+		}
+		out = append(out, fb...)
 	}
 	return out, nil
 }
@@ -219,9 +227,13 @@ func loadOrFetchBIT(ctx context.Context, d SearchDeps, artistID, name string, lo
 	return evs, nil
 }
 
+func artistRefFromScored(a spotify.ScoredArtist) ArtistRef {
+	return ArtistRef{ID: a.ID, Name: a.Name, Genres: a.Genres}
+}
+
 func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 	c := Concert{
-		Artist:    ArtistRef{ID: a.ID, Name: a.Name},
+		Artist:    artistRefFromScored(a),
 		Date:      e.Start,
 		Venue:     e.Venue.Name,
 		City:      e.Venue.City,
@@ -237,7 +249,7 @@ func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 
 func bitEventToConcert(e bandsintown.Event, a spotify.ScoredArtist) Concert {
 	c := Concert{
-		Artist:    ArtistRef{ID: a.ID, Name: a.Name},
+		Artist:    artistRefFromScored(a),
 		Date:      e.Datetime,
 		Venue:     e.Venue.Name,
 		City:      e.Venue.City,

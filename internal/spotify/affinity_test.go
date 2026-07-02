@@ -17,9 +17,9 @@ func TestScoreArtists_FormulaMatchesDesign(t *testing.T) {
 	src := Sources{
 		Followed: []ArtistRef{a},
 		Top: TopArtistsByRange{
-			Short:  []ArtistRef{a},
-			Medium: []ArtistRef{b},
-			Long:   []ArtistRef{a},
+			Short:  []TopArtist{{ArtistRef: a, Genres: []string{"rock", "art rock"}}},
+			Medium: []TopArtist{{ArtistRef: b}},
+			Long:   []TopArtist{{ArtistRef: a, Genres: []string{"rock"}}},
 		},
 		SavedAlbums: []SavedAlbum{
 			{Album: AlbumRef{Artists: []ArtistRef{a}}},
@@ -96,6 +96,31 @@ func TestScoreArtists_TieBreakByName(t *testing.T) {
 	got := ScoreArtists(src)
 	if got[0].Name != "Aaron" || got[1].Name != "Mary" || got[2].Name != "Zed" {
 		t.Errorf("tie-break order wrong: %+v", got)
+	}
+}
+
+func TestScoreArtists_UnionsGenresAcrossRanges(t *testing.T) {
+	a := ArtistRef{ID: "a", Name: "A"}
+	src := Sources{
+		Top: TopArtistsByRange{
+			Short:  []TopArtist{{ArtistRef: a, Genres: []string{"rock", "art rock"}}},
+			Medium: []TopArtist{{ArtistRef: a, Genres: []string{"rock", "post-rock"}}},
+			Long:   []TopArtist{{ArtistRef: a}},
+		},
+	}
+	got := ScoreArtists(src)
+	if len(got) != 1 {
+		t.Fatalf("wrong len: %+v", got)
+	}
+	// Union should be sorted, dedup'd.
+	want := []string{"art rock", "post-rock", "rock"}
+	if len(got[0].Genres) != len(want) {
+		t.Fatalf("genres wrong: %+v", got[0].Genres)
+	}
+	for i, g := range want {
+		if got[0].Genres[i] != g {
+			t.Errorf("genres[%d]: got %q, want %q", i, got[0].Genres[i], g)
+		}
 	}
 }
 

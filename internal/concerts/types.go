@@ -29,8 +29,9 @@ type TicketLink struct {
 
 // ArtistRef is the artist identity carried through dedup.
 type ArtistRef struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Genres []string `json:"genres,omitempty"`
 }
 
 // Concert is the canonical shape returned to the frontend. One row per

@@ -38,45 +38,60 @@ type Sources struct {
 }
 
 type ScoredArtist struct {
-	ID    string  `json:"id"`
-	Name  string  `json:"name"`
-	Score float64 `json:"score"`
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Score  float64  `json:"score"`
+	Genres []string `json:"genres,omitempty"`
 }
 
 // ScoreArtists applies the §4.3 formula and returns the top MaxScoredArtists
 // sorted by descending score. Ties broken by artist name for determinism.
+// Genres are captured from top-artist entries (currently the only genre
+// source) and unioned per artist.
 func ScoreArtists(s Sources) []ScoredArtist {
 	type accum struct {
-		name  string
-		score float64
+		name   string
+		score  float64
+		genres map[string]struct{}
 	}
 	scores := map[string]*accum{}
 
-	bump := func(a ArtistRef, delta float64) {
+	bump := func(a ArtistRef, delta float64) *accum {
 		if a.ID == "" {
-			return
+			return nil
 		}
 		if cur, ok := scores[a.ID]; ok {
 			cur.score += delta
 			if cur.name == "" && a.Name != "" {
 				cur.name = a.Name
 			}
+			return cur
+		}
+		fresh := &accum{name: a.Name, score: delta, genres: map[string]struct{}{}}
+		scores[a.ID] = fresh
+		return fresh
+	}
+	bumpTop := func(t TopArtist, delta float64) {
+		acc := bump(t.ArtistRef, delta)
+		if acc == nil {
 			return
 		}
-		scores[a.ID] = &accum{name: a.Name, score: delta}
+		for _, g := range t.Genres {
+			acc.genres[g] = struct{}{}
+		}
 	}
 
 	for _, a := range s.Followed {
 		bump(a, weightFollowed)
 	}
-	for tr, list := range map[TimeRange][]ArtistRef{
+	for tr, list := range map[TimeRange][]TopArtist{
 		ShortTerm:  s.Top.Short,
 		MediumTerm: s.Top.Medium,
 		LongTerm:   s.Top.Long,
 	} {
 		w := weightTop * timeRangeWeights[tr]
 		for _, a := range list {
-			bump(a, w)
+			bumpTop(a, w)
 		}
 	}
 	for _, sa := range s.SavedAlbums {
@@ -107,7 +122,15 @@ func ScoreArtists(s Sources) []ScoredArtist {
 
 	out := make([]ScoredArtist, 0, len(scores))
 	for id, a := range scores {
-		out = append(out, ScoredArtist{ID: id, Name: a.name, Score: a.score})
+		var genres []string
+		if len(a.genres) > 0 {
+			genres = make([]string, 0, len(a.genres))
+			for g := range a.genres {
+				genres = append(genres, g)
+			}
+			sort.Strings(genres)
+		}
+		out = append(out, ScoredArtist{ID: id, Name: a.name, Score: a.score, Genres: genres})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {

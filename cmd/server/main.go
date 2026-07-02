@@ -14,12 +14,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/peterho/concertfinder/internal/affinity"
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/fallback"
+	"github.com/peterho/concertfinder/internal/geocoding"
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
@@ -88,7 +90,7 @@ func main() {
 		}
 		r.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
 
-		affinitySvc := &webhttp.AffinityService{
+		affinitySvc := &affinity.Service{
 			Pool:    pool,
 			Tokens:  tokenSvc,
 			Spotify: spotifyClient,
@@ -115,23 +117,31 @@ func main() {
 			)
 		}
 
+		fallbackLoc := concerts.Location{
+			Latitude:    cfg.UserLatitude,
+			Longitude:   cfg.UserLongitude,
+			RadiusMiles: cfg.UserRadiusMiles,
+		}
 		concertsH := &webhttp.ConcertsHandler{
-			Affinity: affinitySvc,
-			Pool:     pool,
-			TM:       tmClient,
-			BIT:      bitClient,
-			Location: concerts.Location{
-				Latitude:    cfg.UserLatitude,
-				Longitude:   cfg.UserLongitude,
-				RadiusMiles: cfg.UserRadiusMiles,
-			},
+			Affinity:         affinitySvc,
+			Pool:             pool,
+			TM:               tmClient,
+			BIT:              bitClient,
+			FallbackLocation: fallbackLoc,
 			Fallback:         fallbackChain,
 			MinFallbackScore: cfg.Phase2MinScore,
+		}
+		locationH := &webhttp.LocationHandler{
+			Pool:             pool,
+			Geocoder:         geocoding.NewClient(""),
+			FallbackLocation: fallbackLoc,
 		}
 		r.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
 			r.Get("/affinity", affinityH.Get)
 			r.Get("/concerts", concertsH.Get)
+			r.Get("/location", locationH.Get)
+			r.Put("/location", locationH.Put)
 		})
 	}
 

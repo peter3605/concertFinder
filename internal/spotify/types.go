@@ -54,9 +54,17 @@ const (
 	LongTerm   TimeRange = "long_term"
 )
 
+// TopArtist adds Genres to ArtistRef — the top-artists endpoint is currently
+// the only genre source Phase 2 uses. Full enrichment via GET /artists/{id}
+// remains TODO.
+type TopArtist struct {
+	ArtistRef
+	Genres []string `json:"genres"`
+}
+
 // TopArtistsByRange is what the scorer wants: three lists of top artists.
 type TopArtistsByRange struct {
-	Short  []ArtistRef
-	Medium []ArtistRef
-	Long   []ArtistRef
+	Short  []TopArtist
+	Medium []TopArtist
+	Long   []TopArtist
 }
