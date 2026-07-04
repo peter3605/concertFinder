@@ -1,0 +1,20 @@
+# Domain is injected via env at container start (or hardcode when stable).
+# Automatic HTTPS via Let's Encrypt — Caddy provisions the cert on first request.
+{$SITE_DOMAIN} {
+	# The Vite build output lives inside the api image (embedded via
+	# go:embed once we add that). Until then, the SPA is served from
+	# whatever the Go server serves at /.
+	reverse_proxy api:8080
+
+	encode gzip
+
+	# Preserve original scheme/host so the Go handlers see them correctly.
+	header_up X-Forwarded-Proto {scheme}
+	header_up X-Forwarded-Host  {host}
+	header_up X-Real-IP         {remote}
+
+	log {
+		output stdout
+		format json
+	}
+}
