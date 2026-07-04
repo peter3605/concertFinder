@@ -1,0 +1,6 @@
+# Only the placeholder index.html is tracked. Anything else in this
+# directory came from a local `npm run build` and should not be committed
+# — the real SPA is built in the Docker image.
+*
+!.gitignore
+!index.html

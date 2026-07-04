@@ -44,7 +44,7 @@ At https://developer.spotify.com/dashboard, create an app and set the redirect
 URI to exactly:
 
 ```
-https://127.0.0.1:3000/callback
+https://127.0.0.1:3000/api/auth/callback
 ```
 
 Copy the Client ID into `.env` as `SPOTIFY_CLIENT_ID`.
