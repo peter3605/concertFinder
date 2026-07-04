@@ -23,6 +23,7 @@ import (
 	"github.com/peterho/concertfinder/internal/fallback"
 	"github.com/peterho/concertfinder/internal/geocoding"
 	webhttp "github.com/peterho/concertfinder/internal/http"
+	"github.com/peterho/concertfinder/internal/http/spa"
 	"github.com/peterho/concertfinder/internal/search"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
@@ -61,94 +62,102 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger(logger))
 
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	r.Route("/api", func(api chi.Router) {
+		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		})
+
+		if encKey, err := auth.DecodeKey(cfg.EncryptionKey); err != nil {
+			logger.Warn("auth routes disabled: ENCRYPTION_KEY missing or invalid", "err", err)
+			return
+		} else {
+			spotifyHTTP := &http.Client{Timeout: 30 * time.Second}
+			spotifyClient := spotify.NewClient(spotifyHTTP)
+			oauthHTTP := &http.Client{Timeout: 10 * time.Second}
+			tokenSvc := &auth.TokenService{
+				Pool:       pool,
+				EncKey:     encKey,
+				ClientID:   cfg.SpotifyClientID,
+				HTTPClient: oauthHTTP,
+			}
+			deps := &auth.Deps{
+				Pool:          pool,
+				EncKey:        encKey,
+				ClientID:      cfg.SpotifyClientID,
+				RedirectURI:   cfg.SpotifyRedirectURI,
+				CookieDomain:  cfg.SessionCookieDomain,
+				Handshakes:    auth.NewHandshakeStore(),
+				SpotifyClient: spotifyClient,
+				HTTPClient:    oauthHTTP,
+				PostLoginURL:  "/",
+			}
+			api.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
+
+			affinitySvc := &affinity.Service{
+				Pool:    pool,
+				Tokens:  tokenSvc,
+				Spotify: spotifyClient,
+				TTL:     24 * time.Hour,
+			}
+			ticketHTTP := &http.Client{Timeout: 10 * time.Second}
+			tmClient := ticketmaster.NewClient(ticketHTTP, cfg.TicketmasterAPIKey)
+			bitClient := bandsintown.NewClient(ticketHTTP, cfg.BandsintownAppID)
+
+			affinityH := &webhttp.AffinityHandler{Service: affinitySvc}
+
+			var fallbackChain concerts.Fallbacker
+			if cfg.Phase2Enabled {
+				fallbackChain = &fallback.Chain{
+					Pool:     pool,
+					Fetcher:  fallback.NewFetcher(pool),
+					Brave:    fallback.NewBraveClient(cfg.BraveSearchAPIKey),
+					Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				}
+				logger.Info("phase 2 fallbacks enabled",
+					"min_score", cfg.Phase2MinScore,
+					"brave_key_set", cfg.BraveSearchAPIKey != "",
+					"songkick_key_set", cfg.SongkickAPIKey != "",
+				)
+			}
+
+			fallbackLoc := concerts.Location{
+				Latitude:    cfg.UserLatitude,
+				Longitude:   cfg.UserLongitude,
+				RadiusMiles: cfg.UserRadiusMiles,
+			}
+			searches := search.NewManager()
+			defer searches.Shutdown()
+
+			concertsH := &webhttp.ConcertsHandler{
+				Affinity:         affinitySvc,
+				Pool:             pool,
+				TM:               tmClient,
+				BIT:              bitClient,
+				FallbackLocation: fallbackLoc,
+				Fallback:         fallbackChain,
+				MinFallbackScore: cfg.Phase2MinScore,
+				Searches:         searches,
+			}
+			locationH := &webhttp.LocationHandler{
+				Pool:             pool,
+				Geocoder:         geocoding.NewClient(""),
+				FallbackLocation: fallbackLoc,
+			}
+			api.Route("/me", func(r chi.Router) {
+				r.Use(auth.RequireUser(pool))
+				r.Get("/affinity", affinityH.Get)
+				r.Get("/concerts", concertsH.Get)
+				r.Get("/location", locationH.Get)
+				r.Put("/location", locationH.Put)
+			})
+		}
 	})
 
-	if encKey, err := auth.DecodeKey(cfg.EncryptionKey); err != nil {
-		logger.Warn("auth routes disabled: ENCRYPTION_KEY missing or invalid", "err", err)
-	} else {
-		spotifyHTTP := &http.Client{Timeout: 30 * time.Second}
-		spotifyClient := spotify.NewClient(spotifyHTTP)
-		oauthHTTP := &http.Client{Timeout: 10 * time.Second}
-		tokenSvc := &auth.TokenService{
-			Pool:       pool,
-			EncKey:     encKey,
-			ClientID:   cfg.SpotifyClientID,
-			HTTPClient: oauthHTTP,
-		}
-		deps := &auth.Deps{
-			Pool:          pool,
-			EncKey:        encKey,
-			ClientID:      cfg.SpotifyClientID,
-			RedirectURI:   cfg.SpotifyRedirectURI,
-			CookieDomain:  cfg.SessionCookieDomain,
-			Handshakes:    auth.NewHandshakeStore(),
-			SpotifyClient: spotifyClient,
-			HTTPClient:    oauthHTTP,
-			PostLoginURL:  "/",
-		}
-		r.Route("/auth", func(r chi.Router) { auth.Mount(r, deps) })
-
-		affinitySvc := &affinity.Service{
-			Pool:    pool,
-			Tokens:  tokenSvc,
-			Spotify: spotifyClient,
-			TTL:     24 * time.Hour,
-		}
-		ticketHTTP := &http.Client{Timeout: 10 * time.Second}
-		tmClient := ticketmaster.NewClient(ticketHTTP, cfg.TicketmasterAPIKey)
-		bitClient := bandsintown.NewClient(ticketHTTP, cfg.BandsintownAppID)
-
-		affinityH := &webhttp.AffinityHandler{Service: affinitySvc}
-
-		var fallbackChain concerts.Fallbacker
-		if cfg.Phase2Enabled {
-			fallbackChain = &fallback.Chain{
-				Pool:     pool,
-				Fetcher:  fallback.NewFetcher(pool),
-				Brave:    fallback.NewBraveClient(cfg.BraveSearchAPIKey),
-				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
-			}
-			logger.Info("phase 2 fallbacks enabled",
-				"min_score", cfg.Phase2MinScore,
-				"brave_key_set", cfg.BraveSearchAPIKey != "",
-				"songkick_key_set", cfg.SongkickAPIKey != "",
-			)
-		}
-
-		fallbackLoc := concerts.Location{
-			Latitude:    cfg.UserLatitude,
-			Longitude:   cfg.UserLongitude,
-			RadiusMiles: cfg.UserRadiusMiles,
-		}
-		searches := search.NewManager()
-		defer searches.Shutdown()
-
-		concertsH := &webhttp.ConcertsHandler{
-			Affinity:         affinitySvc,
-			Pool:             pool,
-			TM:               tmClient,
-			BIT:              bitClient,
-			FallbackLocation: fallbackLoc,
-			Fallback:         fallbackChain,
-			MinFallbackScore: cfg.Phase2MinScore,
-			Searches:         searches,
-		}
-		locationH := &webhttp.LocationHandler{
-			Pool:             pool,
-			Geocoder:         geocoding.NewClient(""),
-			FallbackLocation: fallbackLoc,
-		}
-		r.Route("/me", func(r chi.Router) {
-			r.Use(auth.RequireUser(pool))
-			r.Get("/affinity", affinityH.Get)
-			r.Get("/concerts", concertsH.Get)
-			r.Get("/location", locationH.Get)
-			r.Put("/location", locationH.Put)
-		})
-	}
+	// SPA fallback: serve the embedded frontend for anything that isn't /api/*.
+	// Registered as NotFound so all API routes match first.
+	spaHandler := spa.Handler()
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) { spaHandler.ServeHTTP(w, r) })
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

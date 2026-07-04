@@ -121,7 +121,7 @@ The application must be registered at `https://developer.spotify.com/dashboard` 
 | Item | Value |
 |---|---|
 | Spotify Client ID | `[TODO: pending registration]` |
-| Redirect URI (dev) | `https://127.0.0.1:3000/callback` |
+| Redirect URI (dev) | `https://127.0.0.1:3000/api/auth/callback` |
 | Redirect URI (prod) | `https://[TODO: production domain]/callback` |
 | Allowed scopes | See section 3.6 |
 

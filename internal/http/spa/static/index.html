@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ConcertFinder</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 40rem;
+        margin: 4rem auto;
+        padding: 0 1rem;
+        color: #333;
+      }
+      code { background: #f2f2f2; padding: 0.1em 0.3em; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <h1>SPA not built</h1>
+    <p>
+      This is the placeholder <code>index.html</code>. The real React app is
+      populated into <code>internal/http/spa/static/</code> by the Docker build
+      (see <code>Dockerfile</code>) before the Go binary is compiled.
+    </p>
+    <p>
+      For local development, run <code>npm --prefix web run dev</code> and
+      hit <a href="https://127.0.0.1:3000">https://127.0.0.1:3000</a> — Vite
+      serves the real SPA and proxies <code>/api/*</code> to this Go server.
+    </p>
+    <p>
+      To rebuild the embedded SPA locally without Docker:
+      <br>
+      <code>npm --prefix web run build && rm -rf internal/http/spa/static/* && cp -r web/dist/* internal/http/spa/static/</code>
+    </p>
+  </body>
+</html>

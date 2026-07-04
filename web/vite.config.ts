@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // HTTPS is required in dev because Spotify's redirect URI is
-// https://127.0.0.1:3000/callback and http://localhost is rejected as of
-// Nov 2025. See docs/local-dev.md for mkcert setup.
+// https://127.0.0.1:3000/api/auth/callback and http://localhost is rejected
+// as of Nov 2025. See docs/local-dev.md for mkcert setup.
 const certPath = resolve(__dirname, 'certs/localhost-cert.pem');
 const keyPath = resolve(__dirname, 'certs/localhost-key.pem');
 const httpsAvailable = existsSync(certPath) && existsSync(keyPath);
@@ -26,15 +26,12 @@ export default defineConfig({
       ? { cert: readFileSync(certPath), key: readFileSync(keyPath) }
       : undefined,
     proxy: {
+      // Everything under /api/ (including /api/auth/callback for the Spotify
+      // OAuth redirect) is proxied to the Go backend unchanged. Backend
+      // handlers are mounted at /api/*, so no rewrite is needed.
       '/api': {
         target: 'http://127.0.0.1:8080',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-      },
-      '/callback': {
-        target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
-        rewrite: () => '/auth/callback',
       },
     },
   },
