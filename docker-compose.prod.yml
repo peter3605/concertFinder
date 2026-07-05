@@ -10,15 +10,6 @@ services:
       - "8080"
     restart: unless-stopped
 
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    env_file:
-      - path: .env
-        required: true
-    restart: unless-stopped
-
   caddy:
     image: caddy:2-alpine
     ports:
