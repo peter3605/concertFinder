@@ -1,0 +1,141 @@
+import { useState } from 'react';
+import { Mail } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { mutatingFetch } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import type { Me } from '@/lib/types';
+
+export default function SettingsPage() {
+  const { auth, setMe } = useAuth();
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  if (auth.kind !== 'signed_in') {
+    return <p className="text-sm text-muted-foreground">Log in to change settings.</p>;
+  }
+  const me = auth.me;
+
+  async function update(patch: Partial<Pick<Me, 'digest_opt_in' | 'instant_notify_opt_in'>>) {
+    setSaving(true);
+    setErr('');
+    try {
+      const r = await mutatingFetch('/api/me/email-prefs', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!r.ok) {
+        setErr(await r.text());
+        return;
+      }
+      setMe({ ...me, ...patch });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mx-auto flex max-w-2xl flex-col gap-6">
+      <div>
+        <h1 className="text-2xl font-semibold">Settings</h1>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Account</CardTitle>
+          <CardDescription>Your Spotify identity + email.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Display name</span>
+            <span>{me.display_name || me.spotify_user_id}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Spotify ID</span>
+            <span className="font-mono text-xs">{me.spotify_user_id}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Email</span>
+            <span>
+              {me.email || (
+                <a href="/api/auth/login" className="text-primary hover:underline">
+                  Log in again to grant email access
+                </a>
+              )}
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Mail className="h-4 w-4 text-primary" /> Email notifications
+          </CardTitle>
+          <CardDescription>
+            {me.email
+              ? `Delivered to ${me.email}.`
+              : 'Log in again with the email scope to enable notifications.'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-6">
+          <PrefRow
+            id="digest"
+            title="Daily digest"
+            description="One email a day summarizing upcoming shows in your area."
+            checked={!!me.digest_opt_in}
+            disabled={!me.email || saving}
+            onChange={(v) => update({ digest_opt_in: v })}
+          />
+          <PrefRow
+            id="instant"
+            title="Instant notifications"
+            description="Email as soon as a new show appears for an artist you subscribed to."
+            checked={!!me.instant_notify_opt_in}
+            disabled={!me.email || saving}
+            onChange={(v) => update({ instant_notify_opt_in: v })}
+          />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <div>
+            <Button variant="outline" asChild>
+              <a href="/subscribe">Manage subscribed artists</a>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function PrefRow({
+  id,
+  title,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: {
+  id: string;
+  title: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <Label htmlFor={id} className="text-base">
+          {title}
+        </Label>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </div>
+      <Switch id={id} checked={checked} onCheckedChange={onChange} disabled={disabled} />
+    </div>
+  );
+}

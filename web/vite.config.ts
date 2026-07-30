@@ -17,8 +17,17 @@ if (!httpsAvailable) {
   );
 }
 
+const apiTarget = process.env.VITE_API_TARGET ?? 'http://127.0.0.1:8080';
+// eslint-disable-next-line no-console
+console.log('[vite] proxy /api ->', apiTarget);
+
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+    },
+  },
   server: {
     port: 3000,
     host: '127.0.0.1',
@@ -29,8 +38,12 @@ export default defineConfig({
       // Everything under /api/ (including /api/auth/callback for the Spotify
       // OAuth redirect) is proxied to the Go backend unchanged. Backend
       // handlers are mounted at /api/*, so no rewrite is needed.
+      // Default targets the hybrid local-dev.md flow (docker db only + go run
+      // on host); docker-compose overrides via VITE_API_TARGET=http://api:8080
+      // so the web container can reach the api container over the compose
+      // network.
       '/api': {
-        target: 'http://127.0.0.1:8080',
+        target: apiTarget,
         changeOrigin: true,
       },
     },
