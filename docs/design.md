@@ -292,11 +292,13 @@ When both primary sources return zero results for a high-affinity artist (above 
 1. Check the artist's Spotify `external_urls` for an official site URL.
 2. Query Songkick API for the artist by name; if results, return them.
 
-#### 5.4.2 Tier B: Search and JSON-LD Extraction
+#### 5.4.2 Tier B: URL Resolution and JSON-LD Extraction
 
-1. Use a search API (Brave Search API in 2026 is the recommended choice) to resolve unknown artists to their official site URL. Cache the resolution per Spotify artist ID indefinitely.
+1. Resolve the artist's official homepage URL. The default resolver is **MusicBrainz** (`/ws/2/artist` search → `/ws/2/artist/{mbid}?inc=url-rels` → filter for `type == "official homepage"`) — free, no API key, ToS-clean, and community-maintained coverage that skews well toward long-tail artists. A Brave Search implementation is retained as a plug-in alternative behind `BRAVE_SEARCH_API_KEY`; if that env var is set the chain uses Brave instead. Cache the resolution per Spotify artist ID indefinitely.
 2. Fetch the artist's homepage and any common tour-page paths (`/tour`, `/shows`, `/live`). Look for `<script type="application/ld+json">` blocks containing schema.org `MusicEvent` entities. Many artist sites (Squarespace, Bandzoogle templates) publish these automatically for SEO.
 3. If no structured data is found, surface a prefilled Google search link to the user as the terminal fallback. Do not build heuristic HTML parsers; the maintenance burden is unjustifiable.
+
+**Why not use an LLM for URL resolution.** Direct LLM lookup (`"what's X's website?"`) hallucinates plausible-but-wrong URLs, has a training cutoff that misses new artists, and has the worst coverage on precisely the long-tail artists this tier exists for. LLM-driven scraping ("computer use") is still scraping — same ToS and WAF concerns as before. MusicBrainz's structured URL relationships give us verifiable data at $0.
 
 #### 5.4.3 Scraping Etiquette
 
@@ -335,7 +337,19 @@ Records sharing a dedup key are merged into a single canonical event with multip
 
 All discovered ticket links are presented to the user, sorted by the priority above. This serves two purposes: it gives the user choice of vendor (which can affect price and fees), and it provides graceful degradation if any one link is broken or sold out.
 
-### 6.1 Streaming Result Pattern
+### 6.0 Snapshot / SWR Pattern (Phase 3)
+
+The synchronous streaming pattern below was superseded during Phase 3 by a
+stale-while-revalidate design against `user_concert_snapshots`. GET
+`/api/me/concerts` returns the last completed scan immediately and enqueues
+a background refresh when the snapshot is older than
+`SNAPSHOT_STALE_AFTER_HOURS`. The fan-out itself now runs inside the river
+`ScanConcerts` worker, with the same §8.1 concurrency (semaphore=10, per-job
+budget=5min). Pre-warm on login + nightly cron ensures active users always
+have a warm snapshot. See `CLAUDE.md > SWR read pattern` for the current
+handler flow.
+
+### 6.1 Streaming Result Pattern (historical — Phase 2)
 
 A naive implementation would block until all artist searches complete, then return one large response. For 200 artists this can take 30+ seconds, which is unacceptable UX. ConcertFinder uses a streaming pattern:
 
@@ -527,14 +541,20 @@ Target: feature-complete on the local machine, ready to consider hosting.
 
 Target: shareable public URL; small group of users beyond the developer.
 
+**Deployment approach.** Rather than the ECS Fargate architecture originally sketched in earlier drafts of §11, Phase 3 uses a single EC2 t4g.small + RDS db.t4g.micro, both free-tier eligible for year 1. Caddy on the instance handles TLS termination via Let's Encrypt. The React SPA is embedded into the Go binary at build time (`go:embed`), so there is no separate S3/CloudFront asset pipeline. GitHub Actions deploys via SSM `docker compose up -d --build`. This trades zero-downtime deploys and auto-scaling for ~$18/mo steady-state vs. ~$30–50/mo on Fargate — acceptable for the intended scale of a small user group. See §11 for the current reference architecture, §11.3 for the deferred scale-up options, and `docs/aws-deploy.md` for the operator runbook.
+
 **In Scope**
 
-- AWS deployment: ECS Fargate, RDS Postgres, CloudFront + S3 frontend, Secrets Manager, ACM, Route 53.
+- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Route 53, Elastic IP.
 - Per-user rate-limit accounting against shared API quotas.
-- Email notifications for newly detected shows (introduces `user-read-email` scope and a re-auth flow).
+- Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP).
 - Privacy policy and terms of service pages.
-- Observability: CloudWatch metrics, structured logging dashboards, basic alerting.
-- Terraform definitions checked into `/infra`.
+- Observability: minimum-viable CloudWatch alarms on EC2 status check + RDS free storage. Application logs stay in Docker (`docker compose logs`).
+- Terraform definitions checked into `/infra` covering RDS, EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Route 53, Elastic IP, and the two CloudWatch alarms above.
+
+**Deferred until scale demands it** (see §11.3)
+
+- ECS Fargate, CloudFront/S3 frontend split, Secrets Manager, ALB, blue/green deploys, CloudWatch dashboards + log shipping.
 
 ### 10.4 Phase 4: Polish and Scale
 
@@ -549,31 +569,58 @@ Target: production-quality public app. Speculative.
 
 ## 11. AWS Architecture (Phase 3 Reference)
 
-Phase 3 deploys on AWS. The application is written to remain portable: all AWS-specific configuration is environment-driven, business logic contains no AWS SDK imports, and Postgres usage avoids RDS-specific features. The architecture below is the reference target, not a coupling.
+Phase 3 deploys on AWS. The application remains portable: no AWS SDK imports in `/internal`, all AWS-specific configuration is environment-driven, and Postgres usage avoids RDS-specific features. The architecture below is the free-tier-anchored target; §11.3 lists what was deliberately deferred.
 
 | Component | AWS Service | Notes |
 |---|---|---|
-| Go API | ECS Fargate | Container runtime; alternative: App Runner. |
-| Database | RDS PostgreSQL (db.t4g.micro to start) | Approx. $15/mo at low scale. |
-| Frontend assets | CloudFront + S3 | Built React SPA served as static assets. |
-| Secrets | AWS Secrets Manager | Spotify client secret, API keys, encryption key. |
-| TLS certificates | ACM | Free; auto-renewing. |
-| DNS | Route 53 | |
-| Logs | CloudWatch Logs | slog JSON output ingested directly. |
-| Scheduled jobs | EventBridge Scheduler | Daily affinity refresh trigger. |
-| Queue (if needed) | SQS | Only if river-on-Postgres outgrows itself. |
-| IaC | Terraform | In the `/infra` directory; check in alongside app code. |
+| Application host | EC2 t4g.small (ARM64, Amazon Linux 2023) | Runs `docker compose`: Go API container + Caddy container. Single instance; no ALB. |
+| Database | RDS PostgreSQL 16 (db.t4g.micro) | Private subnet; reachable only from the EC2 security group on port 5432. |
+| Frontend assets | Embedded in the Go binary (`go:embed`) | Served by the Go API at `/`. Backend endpoints live under `/api/*`. |
+| Secrets | `.env` file on the EC2 instance, mode 600 | Migrate to Secrets Manager if compromise risk changes. |
+| TLS certificates | Caddy + Let's Encrypt | Auto-provisioned on first HTTPS request. |
+| DNS | Route 53 hosted zone | Apex A record → Elastic IP attached to EC2. |
+| Static public IP | Elastic IP | Free while attached to a running instance. |
+| Deploy | GitHub Actions → SSM `RunShellScript` | OIDC federation; no long-lived AWS keys in GitHub. |
+| Logs | Docker logs on the box | `docker compose logs -f` over SSM when needed. |
+| Alerting | Two CloudWatch alarms | EC2 status check failure + RDS free storage low. |
+| Scheduled jobs | River workers folded into the API binary | No EventBridge dependency. |
+| Email (Phase 3) | Amazon SES via SMTP | SMTP-only integration preserves portability across providers. |
+| IaC | Terraform in `/infra` | Reproduces the setup end-to-end; `docs/aws-deploy.md` is the manual fallback. |
 
 ### 11.1 Estimated Phase 3 Cost (Low Scale)
 
-At single-digit users with normal usage patterns, expected monthly cost is approximately $30–50 USD. The Fargate task is the largest line item. A leaner alternative is a single small EC2 instance running Docker, which can bring monthly cost to ~$10 at the price of more operations overhead.
+At single-digit users:
+
+| Item | Year 1 (AWS free tier) | Year 2+ |
+|---|---|---|
+| EC2 t4g.small | $0 (750 hrs/mo free) | ~$5/mo |
+| RDS db.t4g.micro | $0 (750 hrs/mo free) | ~$13/mo |
+| RDS storage (20 GiB gp3) | $0 | ~$3/mo |
+| Route 53 hosted zone | ~$0.50/mo | ~$0.50/mo |
+| SES (< 62k emails/mo) | ~$0 | ~$0 |
+| Data transfer | $0 (100 GB out free/mo) | free at low usage |
+| Domain registration | ~$10/yr | ~$10/yr |
+| **Total** | **~$16 total (domain + Route 53 for year 1)** | **~$22/mo** |
 
 ### 11.2 Portability Constraints
 
 - No AWS SDK imports in `/internal` application code. AWS-specific behavior lives only in infrastructure configuration.
 - Database access is plain Postgres protocol. Same connection string works against RDS, Supabase, Neon, or a self-hosted VPS Postgres.
-- Secret loading reads from process environment. ECS injects from Secrets Manager; Docker Compose injects from `.env`. The application does not know the difference.
-- Object storage (for the frontend bundle) is fronted by CloudFront in production. In dev the Vite dev server serves the bundle directly.
+- Secret loading reads from process environment. In prod, `docker compose` injects from `/opt/concertfinder/.env`; locally it injects from `.env`. Migrating to Secrets Manager later is a config change, not a code change.
+- The frontend bundle is embedded into the Go binary via `go:embed` in production. In dev, Vite serves the bundle with an API proxy to Go. Splitting to CloudFront + S3 later is a build-time change; no application code change.
+- Email delivery uses SMTP against SES's SMTP endpoint. Any SMTP provider (Postmark, Resend, Mailgun, Sendgrid) works with only environment variable changes.
+
+### 11.3 Deferred Scaling Options
+
+The single-instance architecture is a deliberate free-tier / low-ops choice, not a permanent commitment. Trigger points for moving up:
+
+| Move | Trigger |
+|---|---|
+| Add ALB in front of EC2 | Zero-downtime deploys become required, or a second AZ is needed for availability. |
+| Split to ECS Fargate | Regular OOM or CPU saturation on t4g.small; auto-scaling matters. |
+| CloudFront + S3 for the SPA | Global user base; asset egress becomes a measurable cost or latency factor. |
+| AWS Secrets Manager | Multi-instance secret rotation, or compliance requires no plaintext credentials on host. |
+| CloudWatch dashboards + Logs shipping | Debugging via `docker compose logs` no longer scales, or an on-call rotation exists. |
 
 ---
 
