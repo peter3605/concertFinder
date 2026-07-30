@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — it holds real config, not example values.
+
+domain                  = "your-domain.example"        # apex you registered
+ses_verified_recipient  = "peter.ho433@gmail.com"     # gets the SES sandbox verification email
+
+# Everything else has sensible defaults; override only if needed:
+# region                       = "us-east-1"
+# github_repo                  = "peter3605/concertFinder"
+# github_branch                = "main"
+# ec2_instance_type            = "t4g.small"
+# rds_instance_class           = "db.t4g.micro"
+# rds_allocated_storage_gb     = 20
+# rds_backup_retention_days    = 7
+# ses_notification_local_part  = "notifications"
+# rds_storage_alarm_threshold_gb = 5

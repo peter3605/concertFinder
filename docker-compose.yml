@@ -8,7 +8,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Host port 5433 to avoid collision with any other local Postgres.
+      # Container still listens on 5432; other compose services use db:5432.
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U concertfinder -d concertfinder"]
       interval: 5s
@@ -25,8 +27,11 @@ services:
     environment:
       DATABASE_URL: postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable
       LISTEN_ADDR: ":8080"
-    ports:
-      - "8080:8080"
+    # No host port publishing — the web service reaches the api over the
+    # compose network as http://api:8080. Add `ports: - "8081:8080"` here if
+    # you want to curl the API directly from the host.
+    expose:
+      - "8080"
     depends_on:
       db:
         condition: service_healthy
@@ -38,6 +43,12 @@ services:
     volumes:
       - ./web:/app
       - web_node_modules:/app/node_modules
+    environment:
+      # Tells vite.config.ts where to send /api proxy requests. Inside the
+      # compose network the api service is reachable as http://api:8080; the
+      # default in vite.config.ts targets 127.0.0.1:8080 for the hybrid
+      # local-dev.md flow (docker db only, go run on host).
+      VITE_API_TARGET: http://api:8080
     ports:
       - "3000:3000"
     depends_on:

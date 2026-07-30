@@ -49,24 +49,44 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **Preserve Bandsintown tracking parameters** verbatim in event URLs shown to users — required by their display terms.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
-- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Secrets Manager → ECS env → app). Postgres usage avoids RDS-specific features.
+- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids RDS-specific features. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 
 ## Affinity Scoring (design §4.3)
 
 Per-artist score combines six weighted signals — followed (1.0), top artists weighted by time range (0.9 × {short=1.0, medium=0.8, long=0.6}), saved albums (0.7), saved tracks (0.5), recently played (0.4), owned playlists (0.2). Top 200 artists are submitted to concert search. These weights are starting values to be tuned during Phase 1 dogfooding — treat them as adjustable, not load-bearing.
 
-## Concurrency Pattern (design §6.1, §8.1)
+## SWR read pattern (Phase 3, replaces the old synchronous fan-out)
 
-The "get my concerts" request:
+The "get my concerts" request is now stale-while-revalidate against a
+snapshot in `user_concert_snapshots`:
 
-1. Resolve user from session cookie.
-2. Load/compute affinity profile (24h cache).
-3. Take top-N artists (N=200 Phase 1).
-4. Goroutine per artist, gated by **buffered semaphore capacity 10**. Each fans out internally to TM + BIT in parallel.
-5. Results stream to a channel; collector goroutine dedupes incrementally.
-6. **15-second context deadline** on the HTTP handler; in-flight goroutines cancel via `context.Done()`. All retries share this budget.
+1. Resolve user from session cookie (middleware also stashes the full user
+   in ctx so `handleMe` skips a duplicate DB read).
+2. Read the snapshot for `(user_id, location_key)`.
+3. Apply filters (date, genre, weekday, saved_only) over the snapshot.
+4. If the snapshot is older than `SNAPSHOT_STALE_AFTER_HOURS` (default 6h)
+   or missing, enqueue a `ScanConcerts` river job. Response includes
+   `refreshing: true` and the frontend polls every 10s to pick up the new
+   snapshot.
 
-Retry policy: HTTP 429 honors `Retry-After` (capped 30s), else exponential backoff with jitter; 5xx exp backoff capped at 3 retries; never retry other 4xx.
+The actual TM/BIT/fallback fan-out happens inside `ScanConcertsWorker`
+(design §6.1 concurrency lives there, not in the HTTP handler):
+
+- Top-N artists (N=200) with a per-artist goroutine bounded by a **buffered
+  semaphore of capacity 10**.
+- Each artist fans out to TM and BIT in parallel (independent goroutines —
+  BIT failure never cancels TM).
+- `ScanBudget = 5 * time.Minute` per job. Fallback resolver + venue geocoder
+  are rate-limited (MB and Nominatim are both 1 req/sec/IP).
+- Merged results are written to `user_concert_snapshots.snapshot` as a jsonb blob.
+
+Retry policy (unchanged): HTTP 429 honors `Retry-After` (capped 30s), else
+exponential backoff with jitter; 5xx exp backoff capped at 3 retries; never
+retry other 4xx.
+
+Snapshots are pre-warmed on login (via `OnLoginSuccess` hook) and refreshed
+nightly by `FanoutScanConcerts` (jobs spread across 60min to avoid a
+thundering herd).
 
 ## Deduplication (design §6)
 
@@ -79,7 +99,13 @@ Records sharing a key merge into one canonical event with multiple ticket links 
 
 ## Required Environment Variables (Appendix A)
 
-`SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `BANDSINTOWN_APP_ID`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`. Loaded from `.env` locally; injected from Secrets Manager in Phase 3.
+Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `BANDSINTOWN_APP_ID`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`.
+
+Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
+
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_BIT_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`.
+
+Loaded from `.env` in all environments; in prod the file lives at `/opt/concertfinder/.env` on the EC2 instance.
 
 ## Phase Discipline
 
@@ -87,6 +113,6 @@ When proposing or implementing work, check which phase it belongs to before expa
 
 - **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM + BIT only, semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
 - **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. Begin Extended Quota Mode application.
-- **Phase 3:** AWS (ECS Fargate + RDS + CloudFront/S3 + Secrets Manager), per-user rate accounting, email notifications (re-auth for `user-read-email`), privacy policy, Terraform in `/infra`.
+- **Phase 3:** AWS single-instance deployment (EC2 t4g.small + RDS db.t4g.micro, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 
 If a request would pull Phase 2/3 work into Phase 1, flag it rather than silently expanding.

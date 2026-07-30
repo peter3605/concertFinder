@@ -1,0 +1,20 @@
+# Local Terraform state — contains generated RDS passwords and SES SMTP creds.
+# Never commit. Migrate to S3 backend if this repo ever gets multiple contributors.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Local variables file — has your real domain, real emails.
+terraform.tfvars
+*.auto.tfvars
+
+# Provider plugins and lock file cache.
+.terraform/
+.terraform.lock.hcl.backup
+
+# Break-glass SSH key. Terraform writes this so you have it locally if SSM
+# ever dies. Never upload it anywhere.
+.secrets/
+
+# Plan output artifacts.
+*.tfplan
