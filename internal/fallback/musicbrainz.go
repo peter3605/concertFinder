@@ -33,6 +33,11 @@ const musicBrainzBase = "https://musicbrainz.org/ws/2"
 
 const mbMinRequestGap = 1100 * time.Millisecond // small margin over 1 req/sec
 
+// mbHotCacheSize caps the in-memory hot layer. Anything evicted still lives
+// in mb_url_cache in Postgres, so the eviction just means the next hit for
+// that artist pays a DB round trip instead of an in-process map lookup.
+const mbHotCacheSize = 5000
+
 // MusicBrainzClient satisfies URLResolver.
 type MusicBrainzClient struct {
 	HTTP      *http.Client
@@ -45,10 +50,8 @@ type MusicBrainzClient struct {
 	// round trip entirely.
 	Pool *pgxpool.Pool
 
-	// cacheMu protects the in-memory hot cache. RWMutex because most reads
-	// after warm-up are hits.
-	cacheMu sync.RWMutex
-	cache   map[string]string
+	// LRU-bounded hot cache. Evicted entries fall back to the DB warm layer.
+	cache *lruCache
 }
 
 // NewMusicBrainzClient constructs a client with an in-memory-only cache.
@@ -61,7 +64,7 @@ func NewMusicBrainzClient(userAgent string) *MusicBrainzClient {
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
 		UserAgent: userAgent,
 		limiter:   &rateLimiter{minGap: mbMinRequestGap},
-		cache:     map[string]string{},
+		cache:     newLRU(mbHotCacheSize),
 	}
 }
 
@@ -100,19 +103,14 @@ func (c *MusicBrainzClient) ResolveOfficialURL(ctx context.Context, artistName s
 	if key == "" {
 		return "", nil
 	}
-	c.cacheMu.RLock()
-	if cached, ok := c.cache[key]; ok {
-		c.cacheMu.RUnlock()
-		return cached, nil
+	if v, ok := c.cache.Get(key); ok {
+		return v.(string), nil
 	}
-	c.cacheMu.RUnlock()
 
-	// Warm layer: DB hit? Fill in-memory cache and return.
+	// Warm layer: DB hit? Promote to in-memory cache and return.
 	if c.Pool != nil {
 		if urlStr, hit, err := db.GetMBURL(ctx, c.Pool, key); err == nil && hit {
-			c.cacheMu.Lock()
-			c.cache[key] = urlStr
-			c.cacheMu.Unlock()
+			c.cache.Set(key, urlStr)
 			return urlStr, nil
 		}
 	}
@@ -128,9 +126,7 @@ func (c *MusicBrainzClient) ResolveOfficialURL(ctx context.Context, artistName s
 			return "", err
 		}
 	}
-	c.cacheMu.Lock()
-	c.cache[key] = resolved
-	c.cacheMu.Unlock()
+	c.cache.Set(key, resolved)
 	if c.Pool != nil {
 		_ = db.SaveMBURL(ctx, c.Pool, key, resolved)
 	}

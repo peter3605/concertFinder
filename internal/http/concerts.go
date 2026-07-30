@@ -1,7 +1,6 @@
 package http
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -22,11 +21,17 @@ import (
 // Requests never trigger a synchronous fan-out; they return the last
 // completed snapshot immediately and enqueue a background refresh when the
 // snapshot is stale or missing.
+//
+// Reads pass through an in-process SnapshotCache to skip the DB fetch +
+// JSON assembly on repeat requests. The cache is keyed on
+// (user, location, computed_at), so a new scan naturally invalidates the
+// stale entry the next time it's looked up.
 type ConcertsHandler struct {
 	Pool               *pgxpool.Pool
 	River              *river.Client[pgx.Tx]
 	FallbackLocation   concerts.Location
 	SnapshotStaleAfter time.Duration
+	SnapshotCache      *SnapshotCache // nil = cache disabled
 }
 
 type concertsResponse struct {
@@ -75,13 +80,30 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("concerts: snapshot read failed", "err", err, "user", u.ID)
 	} else if hit {
 		hasSnap = true
-		if err := json.Unmarshal(snap.Snapshot, &found); err != nil {
-			slog.Warn("concerts: snapshot decode failed", "err", err, "user", u.ID)
-			hasSnap = false
-			found = nil
-		} else {
-			t := snap.ComputedAt
-			computedAt = &t
+		t := snap.ComputedAt
+		computedAt = &t
+		// Cache lookup keyed on (user, location, computed_at). A new scan
+		// bumps computed_at and misses the cache; the new payload is
+		// installed on next request.
+		if h.SnapshotCache != nil {
+			if cs, ok := h.SnapshotCache.Get(u.ID, locKey, snap.ComputedAt); ok {
+				found = cs
+			}
+		}
+		if found == nil {
+			blobs, err := db.GetConcertsByDedupKeys(r.Context(), h.Pool, snap.DedupKeys)
+			if err != nil {
+				slog.Warn("concerts: load concerts failed", "err", err, "user", u.ID)
+				hasSnap = false
+			} else if assembled, err := concerts.AssembleByKey(snap.DedupKeys, blobs); err != nil {
+				slog.Warn("concerts: assemble failed", "err", err, "user", u.ID)
+				hasSnap = false
+			} else {
+				found = assembled
+				if h.SnapshotCache != nil {
+					h.SnapshotCache.Put(u.ID, locKey, snap.ComputedAt, assembled)
+				}
+			}
 		}
 	}
 

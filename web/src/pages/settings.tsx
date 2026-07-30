@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Mail } from 'lucide-react';
+import { AlertTriangle, Mail } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { mutatingFetch } from '@/lib/api';
@@ -108,7 +109,95 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <DangerZone displayName={me.display_name || me.spotify_user_id} />
     </div>
+  );
+}
+
+function DangerZone({ displayName }: { displayName: string }) {
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function deleteAccount() {
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await mutatingFetch('/api/me/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_name: typed }),
+      });
+      if (!r.ok) {
+        setErr(await r.text());
+        return;
+      }
+      // Session cookie is cleared by the server; force a fresh navigation
+      // so the app rehydrates as anon.
+      window.location.href = '/login';
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="border-destructive/40">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-destructive">
+          <AlertTriangle className="h-4 w-4" /> Delete account
+        </CardTitle>
+        <CardDescription>
+          Permanently removes your user record, saved concerts, subscribed
+          artists, snapshots, and notification history. Cannot be undone.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {!confirming ? (
+          <div>
+            <Button variant="destructive" onClick={() => setConfirming(true)}>
+              Delete my account
+            </Button>
+          </div>
+        ) : (
+          <>
+            <Label htmlFor="confirm-name">
+              Type your display name (<code className="font-mono">{displayName}</code>) to confirm:
+            </Label>
+            <Input
+              id="confirm-name"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={displayName}
+              autoFocus
+            />
+            {err && <p className="text-sm text-destructive">{err}</p>}
+            <div className="flex gap-2">
+              <Button
+                variant="destructive"
+                onClick={deleteAccount}
+                disabled={busy || typed.trim().toLowerCase() !== displayName.trim().toLowerCase()}
+              >
+                {busy ? 'Deleting…' : 'Yes, delete permanently'}
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setConfirming(false);
+                  setTyped('');
+                  setErr('');
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

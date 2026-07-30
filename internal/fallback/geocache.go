@@ -3,7 +3,6 @@ package fallback
 import (
 	"context"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,6 +10,11 @@ import (
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/geocoding"
 )
+
+// venueHotCacheSize caps the in-memory hot layer. Same eviction philosophy
+// as MusicBrainzClient: an evicted entry means the next hit pays a DB read
+// instead of a map read.
+const venueHotCacheSize = 5000
 
 // VenueGeocoder turns a venue's city/state/country strings into lat/lng via
 // Nominatim, with a two-tier cache: in-memory (hot) over Postgres (warm).
@@ -23,8 +27,7 @@ import (
 type VenueGeocoder struct {
 	G       *geocoding.Client
 	Pool    *pgxpool.Pool // optional; enables DB-backed warm cache when non-nil
-	mu      sync.RWMutex
-	cache   map[string]cachedGeo
+	cache   *lruCache
 	limiter *rateLimiter
 }
 
@@ -36,7 +39,7 @@ type cachedGeo struct {
 func NewVenueGeocoder(g *geocoding.Client) *VenueGeocoder {
 	return &VenueGeocoder{
 		G:       g,
-		cache:   map[string]cachedGeo{},
+		cache:   newLRU(venueHotCacheSize),
 		limiter: &rateLimiter{minGap: 1100 * time.Millisecond},
 	}
 }
@@ -60,19 +63,15 @@ func (v *VenueGeocoder) Resolve(ctx context.Context, city, state, country string
 	country = strings.TrimSpace(country)
 	key := strings.ToLower(city) + "|" + strings.ToLower(state) + "|" + strings.ToLower(country)
 
-	v.mu.RLock()
-	if hit, exists := v.cache[key]; exists {
-		v.mu.RUnlock()
-		return hit.lat, hit.lng, hit.ok
+	if hit, ok := v.cache.Get(key); ok {
+		g := hit.(cachedGeo)
+		return g.lat, g.lng, g.ok
 	}
-	v.mu.RUnlock()
 
 	// Warm layer.
 	if v.Pool != nil {
 		if lat, lng, ok, hit, err := db.GetVenueGeo(ctx, v.Pool, key); err == nil && hit {
-			v.mu.Lock()
-			v.cache[key] = cachedGeo{lat: lat, lng: lng, ok: ok}
-			v.mu.Unlock()
+			v.cache.Set(key, cachedGeo{lat: lat, lng: lng, ok: ok})
 			return lat, lng, ok
 		}
 	}
@@ -93,9 +92,7 @@ func (v *VenueGeocoder) Resolve(ctx context.Context, city, state, country string
 	if err == nil && res != nil {
 		got = cachedGeo{lat: res.Latitude, lng: res.Longitude, ok: true}
 	}
-	v.mu.Lock()
-	v.cache[key] = got
-	v.mu.Unlock()
+	v.cache.Set(key, got)
 	if v.Pool != nil {
 		_ = db.SaveVenueGeo(ctx, v.Pool, key, got.lat, got.lng, got.ok)
 	}

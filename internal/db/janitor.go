@@ -53,3 +53,13 @@ func PruneOldDigestSent(ctx context.Context, pool *pgxpool.Pool, days int) (int6
 	tag, err := pool.Exec(ctx, q, days)
 	return tag.RowsAffected(), err
 }
+
+// PrunePastConcerts drops rows in the shared concerts table whose event_date
+// is past by the given window. Post-normalization, orphaned concert rows
+// still take space even after every user's snapshot has been refreshed
+// beyond them.
+func PrunePastConcerts(ctx context.Context, pool *pgxpool.Pool, days int) (int64, error) {
+	const q = `DELETE FROM concerts WHERE event_date < now() - ($1 || ' days')::interval`
+	tag, err := pool.Exec(ctx, q, days)
+	return tag.RowsAffected(), err
+}

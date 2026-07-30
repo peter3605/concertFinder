@@ -11,7 +11,6 @@ import (
 
 	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
-	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 )
@@ -43,11 +42,9 @@ type Chain struct {
 // FindEvents returns concerts for an artist that TM+BIT missed. loc is the
 // user's location; results are haversine-filtered to it.
 func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location) []concerts.Concert {
-	// Tier A.1 — cached official URL, if any.
-	if events := c.tryOfficialSite(ctx, artist, loc, ""); len(events) > 0 {
-		return events
-	}
-	// Tier A.2 — Songkick.
+	// Tier A — Songkick. (The "cached official URL" step from earlier
+	// designs collapsed into Tier B once the URL resolver got its own
+	// two-tier cache — Tier B is now cache-first-then-fetch by construction.)
 	if c.Songkick != nil {
 		if c.RateLedger != nil && !c.RateLedger.AllowFromContext(ctx, rate.SourceSongkick) {
 			// Over the per-user Songkick cap; skip and fall through.
@@ -65,17 +62,14 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 			}
 		}
 	}
-	// Tier B.1 — resolve an official URL (default MusicBrainz), then Tier B.2
-	// scrape the artist's homepage for JSON-LD MusicEvents.
+	// Tier B — resolve an official URL (default MusicBrainz, cached in
+	// mb_url_cache) then scrape the artist's homepage for JSON-LD MusicEvents.
 	if c.Resolver != nil {
 		officialURL, err := c.Resolver.ResolveOfficialURL(ctx, artist.Name)
 		if err != nil && !errors.Is(err, ErrNoAPIKey) {
 			slog.Warn("url resolve failed", "artist", artist.Name, "err", err)
 		}
 		if officialURL != "" {
-			_ = db.UpsertArtistResolution(ctx, c.Pool, db.ArtistResolution{
-				SpotifyArtistID: artist.ID, OfficialURL: officialURL,
-			})
 			if events := c.tryOfficialSite(ctx, artist, loc, officialURL); len(events) > 0 {
 				return events
 			}
@@ -86,15 +80,13 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 	return nil
 }
 
-func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location, override string) []concerts.Concert {
-	officialURL := override
-	if officialURL == "" {
-		res, hit, err := db.GetArtistResolution(ctx, c.Pool, artist.ID)
-		if err != nil || !hit {
-			return nil
-		}
-		officialURL = res.OfficialURL
-	}
+// tryOfficialSite fetches an artist's homepage + a few well-known tour
+// paths and extracts JSON-LD MusicEvents. The URL is passed in by the caller
+// (from the Resolver on the fallback path); we no longer maintain a
+// per-artist-ID URL cache in artist_resolutions — Tier A.1 for the "we
+// already know this artist's site" case now hits mb_url_cache via
+// c.Resolver instead.
+func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location, officialURL string) []concerts.Concert {
 	if officialURL == "" {
 		return nil
 	}
