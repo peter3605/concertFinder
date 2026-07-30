@@ -85,6 +85,7 @@ func main() {
 		affinityH    *webhttp.AffinityHandler
 		locationH    *webhttp.LocationHandler
 		savedH       *webhttp.SavedConcertsHandler
+		accountH     *webhttp.AccountHandler
 		subscribedH  *webhttp.SubscribedArtistsHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
 		unsubscribeH *webhttp.UnsubscribeHandler
@@ -291,8 +292,13 @@ func main() {
 			River:              riverClient,
 			FallbackLocation:   fallbackLoc,
 			SnapshotStaleAfter: time.Duration(cfg.SnapshotStaleAfterHours) * time.Hour,
+			// LRU-bounded per-(user, location, computed_at) cache. 200 entries
+			// is plenty at single-instance scale — typically one live entry
+			// per active user per location.
+			SnapshotCache: webhttp.NewSnapshotCache(200),
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool}
+		accountH = &webhttp.AccountHandler{Pool: pool}
 		subscribedH = &webhttp.SubscribedArtistsHandler{
 			Pool:    pool,
 			Spotify: spotifyClient,
@@ -382,6 +388,7 @@ func main() {
 			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
 			r.Get("/artists/search", subscribedH.SearchArtists)
 			r.Put("/email-prefs", emailPrefsH.Put)
+			r.Delete("/account", accountH.Delete)
 		})
 	})
 

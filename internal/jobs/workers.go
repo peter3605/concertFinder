@@ -95,14 +95,27 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if err != nil {
 		return err
 	}
-	blob, err := json.Marshal(found)
-	if err != nil {
+	// Normalized snapshots (migration 0012): upsert each concert into the
+	// shared `concerts` table, then persist only the array of dedup_keys
+	// on the user's snapshot row. Storage is now shared across users —
+	// two users following the same Taylor Swift show write one row, not two.
+	dedupKeys := make([]string, len(found))
+	rows := make([]db.ConcertRow, len(found))
+	for i, c := range found {
+		body, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		rows[i] = db.ConcertRow{DedupKey: c.DedupKey, Data: body, EventDate: c.Date}
+		dedupKeys[i] = c.DedupKey
+	}
+	if err := db.UpsertConcerts(ctx, w.Pool, rows); err != nil {
 		return err
 	}
 	err = db.UpsertConcertSnapshot(ctx, w.Pool, db.ConcertSnapshot{
 		UserID:      user.ID,
 		LocationKey: LocationKey(loc),
-		Snapshot:    blob,
+		DedupKeys:   dedupKeys,
 		ComputedAt:  time.Now(),
 	})
 	if err != nil {
@@ -239,23 +252,26 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	if err != nil || !hit {
 		return nil
 	}
-	var all []concerts.Concert
-	if err := json.Unmarshal(snap.Snapshot, &all); err != nil {
+	// Post-normalization: snapshot holds dedup_keys; join against the
+	// shared concerts table to get full bodies.
+	blobs, err := db.GetConcertsByDedupKeys(ctx, w.Pool, snap.DedupKeys)
+	if err != nil {
+		return err
+	}
+	all, err := concerts.AssembleByKey(snap.DedupKeys, blobs)
+	if err != nil {
 		return err
 	}
 	// Build the candidate set: future-dated concerts only. First-ever digest
-	// also caps at 60 days out so we don't dump an entire tour year into one
-	// email.
+	// also caps at 60 days out so we don't dump an entire tour year into
+	// one email. First-ever is detected by "no prior rows in
+	// user_digest_sent" — checked below via len(unsent) == len(candidates).
 	now := time.Now()
 	horizon := now.Add(60 * 24 * time.Hour)
-	firstEver := user.DigestLastSentAt == nil
 	candidateKeys := make([]string, 0, len(all))
 	byKey := make(map[string]concerts.Concert, len(all))
 	for _, c := range all {
 		if !c.Date.After(now) {
-			continue
-		}
-		if firstEver && c.Date.After(horizon) {
 			continue
 		}
 		candidateKeys = append(candidateKeys, c.DedupKey)
@@ -266,17 +282,24 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	if err != nil {
 		return err
 	}
+	// If everything is unsent, this is the first-ever digest for this user;
+	// clip to the 60-day horizon.
+	firstEver := len(unsent) == len(candidateKeys)
 	fresh := make([]concerts.Concert, 0, len(unsent))
 	sendKeys := make([]string, 0, len(unsent))
 	for _, k := range candidateKeys { // preserve snapshot order
-		if _, ok := unsent[k]; ok {
-			fresh = append(fresh, byKey[k])
-			sendKeys = append(sendKeys, k)
+		if _, ok := unsent[k]; !ok {
+			continue
 		}
+		c := byKey[k]
+		if firstEver && c.Date.After(horizon) {
+			continue
+		}
+		fresh = append(fresh, c)
+		sendKeys = append(sendKeys, k)
 	}
 	if len(fresh) == 0 {
 		slog.Info("digest: nothing new", "user", user.ID)
-		_ = db.MarkDigestSent(ctx, w.Pool, user.ID, time.Now())
 		return nil
 	}
 	// Idempotency: record the send BEFORE we hit SMTP. If the send fails
@@ -291,9 +314,6 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub)
 	if err := w.Sender.Send(ctx, msg); err != nil {
 		slog.Warn("digest: SMTP send failed after recording sent-set", "err", err, "user", user.ID)
-		return err
-	}
-	if err := db.MarkDigestSent(ctx, w.Pool, user.ID, time.Now()); err != nil {
 		return err
 	}
 	slog.Info("digest sent", "user", user.ID, "concerts", len(fresh))
@@ -332,27 +352,26 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	if len(unsent) == 0 {
 		return nil
 	}
-	// Look up the concerts from the user's current snapshot.
-	loc, hit, err := db.GetUserLocation(ctx, w.Pool, user.ID)
-	if err != nil || !hit {
-		return nil
+	// Look up the concerts. Only the unsent keys need loading — no reason
+	// to pull the whole snapshot when we already know exactly which
+	// dedup_keys belong in this email. (Pre-normalization this fetched the
+	// snapshot then filtered client-side; the concerts table lookup is
+	// now the direct path.)
+	keys := make([]string, 0, len(unsent))
+	for k := range unsent {
+		keys = append(keys, k)
 	}
-	locKey := LocationKey(concerts.Location{Latitude: loc.Latitude, Longitude: loc.Longitude, RadiusMiles: loc.RadiusMiles})
-	snap, hit, err := db.GetConcertSnapshot(ctx, w.Pool, user.ID, locKey)
-	if err != nil || !hit {
-		return nil
-	}
-	var all []concerts.Concert
-	if err := json.Unmarshal(snap.Snapshot, &all); err != nil {
+	blobs, err := db.GetConcertsByDedupKeys(ctx, w.Pool, keys)
+	if err != nil {
 		return err
 	}
-	fresh := make([]concerts.Concert, 0, len(unsent))
-	sendKeys := make([]string, 0, len(unsent))
-	for _, c := range all {
-		if _, ok := unsent[c.DedupKey]; ok {
-			fresh = append(fresh, c)
-			sendKeys = append(sendKeys, c.DedupKey)
-		}
+	fresh, err := concerts.AssembleByKey(keys, blobs)
+	if err != nil {
+		return err
+	}
+	sendKeys := make([]string, 0, len(fresh))
+	for _, c := range fresh {
+		sendKeys = append(sendKeys, c.DedupKey)
 	}
 	if len(fresh) == 0 {
 		return nil
@@ -387,6 +406,7 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 	steps := []step{
 		{"rate_ledger", func(c context.Context) (int64, error) { return db.PruneRateLedger(c, w.Pool, 90) }},
 		{"concert_cache", func(c context.Context) (int64, error) { return db.PruneConcertCache(c, w.Pool, 7) }},
+		{"past_concerts", func(c context.Context) (int64, error) { return db.PrunePastConcerts(c, w.Pool, 7) }},
 		{"oauth_handshakes", func(c context.Context) (int64, error) { return db.PruneExpiredHandshakes(c, w.Pool) }},
 		{"stale_snapshots", func(c context.Context) (int64, error) { return db.PruneStaleSnapshots(c, w.Pool, 30) }},
 		{"old_digest_sent", func(c context.Context) (int64, error) { return db.PruneOldDigestSent(c, w.Pool, 180) }},

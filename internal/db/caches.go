@@ -41,13 +41,27 @@ ON CONFLICT (artist_key) DO UPDATE SET
 
 // --- Venue geocode cache ---
 
+// negativeGeoTTL is how long we trust a "Nominatim returned nothing" record
+// before re-asking. Positive matches never expire (city coordinates don't
+// drift), but negative results might be due to transient Nominatim data
+// issues that get better over time.
+const negativeGeoTTL = "30 days"
+
 // GetVenueGeo returns cached (lat, lng, ok, cacheHit, err). ok=false means
-// Nominatim was asked and returned nothing (negative cache).
+// Nominatim was asked and returned nothing (negative cache). Negative
+// entries older than negativeGeoTTL are treated as misses so we re-query.
 func GetVenueGeo(ctx context.Context, pool *pgxpool.Pool, placeKey string) (float64, float64, bool, bool, error) {
-	const q = `SELECT latitude, longitude, ok FROM venue_geo_cache WHERE place_key = $1`
+	// Filter negatives past the TTL client-side by comparing resolved_at.
+	// Positive rows always count as a hit regardless of age.
+	const q = `
+SELECT latitude, longitude, ok
+FROM venue_geo_cache
+WHERE place_key = $1
+  AND (ok = true OR resolved_at > now() - ($2 || '')::interval)
+`
 	var lat, lng float64
 	var ok bool
-	err := pool.QueryRow(ctx, q, placeKey).Scan(&lat, &lng, &ok)
+	err := pool.QueryRow(ctx, q, placeKey, negativeGeoTTL).Scan(&lat, &lng, &ok)
 	if err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return 0, 0, false, false, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -21,7 +20,6 @@ type User struct {
 	Email              string
 	DigestOptIn        bool
 	InstantNotifyOptIn bool
-	DigestLastSentAt   *time.Time
 }
 
 // UpsertUserBySpotifyID inserts a new user or updates an existing one keyed by
@@ -44,11 +42,11 @@ ON CONFLICT (spotify_user_id) DO UPDATE SET
   email                   = COALESCE(EXCLUDED.email, users.email),
   updated_at              = now()
 RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-          COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, digest_last_sent_at
+          COALESCE(email, ''), digest_opt_in, instant_notify_opt_in
 `
 	row := pool.QueryRow(ctx, q, u.ID, u.SpotifyUserID, u.DisplayName, u.EncryptedRefreshToken, u.RefreshTokenNonce, u.Email)
 	var out User
-	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken, &out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn, &out.DigestLastSentAt); err != nil {
+	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken, &out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn); err != nil {
 		return User{}, fmt.Errorf("upsert user: %w", err)
 	}
 	return out, nil
@@ -58,10 +56,10 @@ RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_to
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, error) {
 	const q = `
 SELECT id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, digest_last_sent_at
+       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in
 FROM users WHERE id = $1`
 	var u User
-	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.DigestLastSentAt)
+	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn)
 	if err != nil {
 		return User{}, err
 	}
@@ -81,13 +79,6 @@ func SetDigestOptIn(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, optIn
 	return nil
 }
 
-// MarkDigestSent stamps the last-sent time so the next digest run knows the
-// diff cutoff.
-func MarkDigestSent(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, at time.Time) error {
-	const q = `UPDATE users SET digest_last_sent_at = $2 WHERE id = $1`
-	_, err := pool.Exec(ctx, q, id, at)
-	return err
-}
 
 // UpdateRefreshToken persists a rotated refresh token. Spotify may rotate on refresh (design §3.4).
 func UpdateRefreshToken(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, ct, nonce []byte) error {
