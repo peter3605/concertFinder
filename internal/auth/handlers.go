@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,19 +10,23 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/spotify"
 )
 
-// Scopes requested at authorization time. See design §3.6.
+// Scopes requested at authorization time. See design §3.6. user-read-email
+// added in Phase 3 for the daily-digest feature (design §10.3); existing
+// users with pre-Phase-3 tokens must log out and re-authenticate to grant it.
 var Scopes = []string{
 	"user-read-recently-played",
 	"user-top-read",
 	"user-library-read",
 	"user-follow-read",
 	"playlist-read-private",
+	"user-read-email",
 }
 
 const spotifyAuthorizeURL = "https://accounts.spotify.com/authorize"
@@ -32,10 +37,15 @@ type Deps struct {
 	ClientID      string
 	RedirectURI   string
 	CookieDomain  string
-	Handshakes    *HandshakeStore
+	Handshakes    HandshakeStore
 	SpotifyClient *spotify.Client
 	HTTPClient    *http.Client // for Spotify token endpoint
 	PostLoginURL  string       // where to send the browser after a successful callback
+	// OnLoginSuccess is invoked after a successful callback + session
+	// creation. Used by main.go to enqueue a pre-warm concert scan for the
+	// new session's user so the first /me/concerts request finds a snapshot.
+	// Nil is fine — no-op.
+	OnLoginSuccess func(ctx context.Context, userID uuid.UUID)
 }
 
 // Mount registers /login, /callback, /logout, /me under the parent router.
@@ -63,7 +73,11 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	d.Handshakes.Put(handshakeKey, verifier, state, HandshakeTTL)
+	if err := d.Handshakes.Put(r.Context(), handshakeKey, verifier, state, HandshakeTTL); err != nil {
+		slog.Error("handshake put failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	setHandshakeCookie(w, d.CookieDomain, handshakeKey)
 
 	q := url.Values{}
@@ -95,7 +109,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing handshake cookie", http.StatusBadRequest)
 		return
 	}
-	hs, ok := d.Handshakes.Take(hc.Value)
+	hs, ok := d.Handshakes.Take(r.Context(), hc.Value)
 	if !ok {
 		http.Error(w, "handshake expired", http.StatusBadRequest)
 		return
@@ -131,6 +145,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		DisplayName:           me.DisplayName,
 		EncryptedRefreshToken: ct,
 		RefreshTokenNonce:     nonce,
+		Email:                 me.Email,
 	})
 	if err != nil {
 		slog.Error("upsert user failed", "err", err)
@@ -155,6 +170,10 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	setSessionCookie(w, d.CookieDomain, sessionID, expires)
 
+	if d.OnLoginSuccess != nil {
+		d.OnLoginSuccess(r.Context(), user.ID)
+	}
+
 	target := d.PostLoginURL
 	if target == "" {
 		target = "/"
@@ -171,15 +190,19 @@ func (d *Deps) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) handleMe(w http.ResponseWriter, r *http.Request) {
-	u, ok := UserFromContext(r.Context())
+	// Middleware already fetched the full user; no need for a second query.
+	full, ok := FullUserFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id":              u.ID,
-		"spotify_user_id": u.SpotifyUserID,
-		"display_name":    u.DisplayName,
+		"id":                    full.ID,
+		"spotify_user_id":       full.SpotifyUserID,
+		"display_name":          full.DisplayName,
+		"email":                 full.Email,
+		"digest_opt_in":         full.DigestOptIn,
+		"instant_notify_opt_in": full.InstantNotifyOptIn,
 	})
 }

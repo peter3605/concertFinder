@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -24,12 +26,13 @@ import (
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/email"
 	"github.com/peterho/concertfinder/internal/fallback"
 	"github.com/peterho/concertfinder/internal/geocoding"
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/http/spa"
 	"github.com/peterho/concertfinder/internal/jobs"
-	"github.com/peterho/concertfinder/internal/search"
+	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
@@ -81,8 +84,12 @@ func main() {
 		concertsH    *webhttp.ConcertsHandler
 		affinityH    *webhttp.AffinityHandler
 		locationH    *webhttp.LocationHandler
-		searches     *search.Manager
+		savedH       *webhttp.SavedConcertsHandler
+		subscribedH  *webhttp.SubscribedArtistsHandler
+		emailPrefsH  *webhttp.EmailPrefsHandler
+		unsubscribeH *webhttp.UnsubscribeHandler
 		riverClient  *river.Client[pgx.Tx]
+		signingKey   []byte
 	)
 
 	encKey, keyErr := auth.DecodeKey(cfg.EncryptionKey)
@@ -104,7 +111,7 @@ func main() {
 			ClientID:      cfg.SpotifyClientID,
 			RedirectURI:   cfg.SpotifyRedirectURI,
 			CookieDomain:  cfg.SessionCookieDomain,
-			Handshakes:    auth.NewHandshakeStore(),
+			Handshakes:    auth.NewDBHandshakeStore(pool),
 			SpotifyClient: spotifyClient,
 			HTTPClient:    oauthHTTP,
 			PostLoginURL:  "/",
@@ -122,18 +129,47 @@ func main() {
 
 		affinityH = &webhttp.AffinityHandler{Service: affinitySvc}
 
+		// Shared Nominatim client. Used by the location handler (user picks a
+		// city) and by the fallback venue geocoder (turns "Baltimore, MD"
+		// venues into coords when JSON-LD omits geo).
+		geocoder := geocoding.NewClient("")
+
+		rateLedger := &rate.Ledger{
+			Pool: pool,
+			Caps: rate.Caps{
+				Ticketmaster: cfg.RateCapTMPerUserDaily,
+				Bandsintown:  cfg.RateCapBITPerUserDaily,
+				Songkick:     cfg.RateCapSongkickPerUserDaily,
+			},
+		}
+		logger.Info("rate ledger enabled",
+			"tm_daily", cfg.RateCapTMPerUserDaily,
+			"bit_daily", cfg.RateCapBITPerUserDaily,
+			"songkick_daily", cfg.RateCapSongkickPerUserDaily,
+		)
+
 		var fallbackChain concerts.Fallbacker
 		if cfg.Phase2Enabled {
+			// URL resolution defaults to MusicBrainz (free, no API key). If a
+			// Brave key is set, we fall back to that — kept for parity while
+			// evaluating MusicBrainz coverage on real data.
+			var resolver fallback.URLResolver = fallback.NewMusicBrainzClient("").WithPool(pool)
+			if cfg.BraveSearchAPIKey != "" {
+				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
+			}
 			fallbackChain = &fallback.Chain{
-				Pool:     pool,
-				Fetcher:  fallback.NewFetcher(pool),
-				Brave:    fallback.NewBraveClient(cfg.BraveSearchAPIKey),
-				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				Pool:       pool,
+				Fetcher:    fallback.NewFetcher(pool),
+				Resolver:   resolver,
+				Songkick:   fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				VenueGeo:   fallback.NewVenueGeocoder(geocoder).WithPool(pool),
+				RateLedger: rateLedger,
 			}
 			logger.Info("phase 2 fallbacks enabled",
 				"min_score", cfg.Phase2MinScore,
-				"brave_key_set", cfg.BraveSearchAPIKey != "",
+				"url_resolver", fmt.Sprintf("%T", resolver),
 				"songkick_key_set", cfg.SongkickAPIKey != "",
+				"venue_geocoder", "nominatim",
 			)
 		}
 
@@ -142,34 +178,97 @@ func main() {
 			Longitude:   cfg.UserLongitude,
 			RadiusMiles: cfg.UserRadiusMiles,
 		}
-		searches = search.NewManager()
 
-		concertsH = &webhttp.ConcertsHandler{
-			Affinity:         affinitySvc,
-			Pool:             pool,
-			TM:               tmClient,
-			BIT:              bitClient,
-			FallbackLocation: fallbackLoc,
-			Fallback:         fallbackChain,
-			MinFallbackScore: cfg.Phase2MinScore,
-			Searches:         searches,
-		}
 		locationH = &webhttp.LocationHandler{
 			Pool:             pool,
-			Geocoder:         geocoding.NewClient(""),
+			Geocoder:         geocoder,
 			FallbackLocation: fallbackLoc,
 		}
+
+		// Factory returning a fresh SearchDeps for each scan job. TM/BIT/
+		// fallback are all safe to share across concurrent jobs (their
+		// internal state is either read-only config or independently locked).
+		searchDeps := func() concerts.SearchDeps {
+			return concerts.SearchDeps{
+				Pool:        pool,
+				TM:          tmClient,
+				BIT:         bitClient,
+				CacheTTL:    4 * time.Hour,
+				Parallelism: 10,
+				Fallback:    fallbackChain,
+				RateLedger:  rateLedger,
+			}
+		}
+
+		// Email sender + unsubscribe handler. Sender falls back to log mode
+		// automatically when EMAIL_DELIVERY_MODE isn't 'smtp', so local dev
+		// runs the full digest render + enqueue path without a real relay.
+		emailSender := &email.Sender{Cfg: email.Config{
+			Mode:     email.Mode(cfg.EmailDeliveryMode),
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+		}}
+		signingKey = auth.SigningKey(cfg.SigningKey, encKey)
+		unsubscribeH = &webhttp.UnsubscribeHandler{Pool: pool, Secret: signingKey}
+		emailPrefsH = &webhttp.EmailPrefsHandler{Pool: pool}
 
 		// Background jobs live in the same process — no separate worker
 		// binary. See docs/design.md §10.2 (option 2 rationale in commit).
 		workers := river.NewWorkers()
 		river.AddWorker(workers, &jobs.RefreshAffinityWorker{Pool: pool, Affinity: affinitySvc})
-		fanoutW := &jobs.FanoutAffinityRefreshWorker{Pool: pool}
-		river.AddWorker(workers, fanoutW)
+		scanWorker := &jobs.ScanConcertsWorker{
+			Pool:             pool,
+			Affinity:         affinitySvc,
+			Deps:             searchDeps,
+			MinFallbackScore: cfg.Phase2MinScore,
+			// River back-reference wired after client construction (below).
+		}
+		river.AddWorker(workers, scanWorker)
+		river.AddWorker(workers, &jobs.SendDigestWorker{
+			Pool:             pool,
+			Sender:           emailSender,
+			UnsubscribeBase:  cfg.SiteBaseURL,
+			UnsubscribeToken: unsubscribeH.Token,
+		})
+		river.AddWorker(workers, &jobs.SendInstantNotifyWorker{
+			Pool:             pool,
+			Sender:           emailSender,
+			UnsubscribeBase:  cfg.SiteBaseURL,
+			UnsubscribeToken: unsubscribeH.Token,
+		})
+		river.AddWorker(workers, &jobs.JanitorWorker{Pool: pool})
+		fanoutAff := &jobs.FanoutAffinityRefreshWorker{Pool: pool}
+		fanoutScan := &jobs.FanoutScanConcertsWorker{Pool: pool, Fallback: jobs.FallbackLocation{
+			Latitude:    cfg.UserLatitude,
+			Longitude:   cfg.UserLongitude,
+			RadiusMiles: cfg.UserRadiusMiles,
+		}}
+		fanoutDigest := &jobs.FanoutSendDigestWorker{Pool: pool}
+		river.AddWorker(workers, fanoutAff)
+		river.AddWorker(workers, fanoutScan)
+		river.AddWorker(workers, fanoutDigest)
 		periodic := []*river.PeriodicJob{
 			river.NewPeriodicJob(
 				river.PeriodicInterval(24*time.Hour),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutAffinityRefreshArgs{}, nil },
+				&river.PeriodicJobOpts{RunOnStart: false},
+			),
+			river.NewPeriodicJob(
+				river.PeriodicInterval(24*time.Hour),
+				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutScanConcertsArgs{}, nil },
+				&river.PeriodicJobOpts{RunOnStart: false},
+			),
+			river.NewPeriodicJob(
+				river.PeriodicInterval(24*time.Hour),
+				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutSendDigestArgs{}, nil },
+				&river.PeriodicJobOpts{RunOnStart: false},
+			),
+			river.NewPeriodicJob(
+				river.PeriodicInterval(24*time.Hour),
+				func() (river.JobArgs, *river.InsertOpts) { return jobs.JanitorArgs{}, nil },
 				&river.PeriodicJobOpts{RunOnStart: false},
 			),
 		}
@@ -182,7 +281,44 @@ func main() {
 			logger.Error("river client init failed", "err", err)
 			os.Exit(1)
 		}
-		fanoutW.Client = riverClient
+		fanoutAff.Client = riverClient
+		fanoutScan.Client = riverClient
+		fanoutDigest.Client = riverClient
+		scanWorker.River = riverClient
+
+		concertsH = &webhttp.ConcertsHandler{
+			Pool:               pool,
+			River:              riverClient,
+			FallbackLocation:   fallbackLoc,
+			SnapshotStaleAfter: time.Duration(cfg.SnapshotStaleAfterHours) * time.Hour,
+		}
+		savedH = &webhttp.SavedConcertsHandler{Pool: pool}
+		subscribedH = &webhttp.SubscribedArtistsHandler{
+			Pool:    pool,
+			Spotify: spotifyClient,
+			Tokens:  tokenSvc,
+		}
+
+		// Wire the login-success hook so new sessions trigger a pre-warm
+		// snapshot job. Uses a detached background context so a browser
+		// disconnect mid-callback doesn't cancel the enqueue.
+		authDeps.OnLoginSuccess = func(_ context.Context, userID uuid.UUID) {
+			loc := fallbackLoc
+			if ul, hit, err := db.GetUserLocation(context.Background(), pool, userID); err == nil && hit {
+				loc = concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
+			}
+			args := jobs.ScanConcertsArgs{
+				UserID:      userID,
+				Latitude:    loc.Latitude,
+				Longitude:   loc.Longitude,
+				RadiusMiles: loc.RadiusMiles,
+			}
+			if _, err := riverClient.Insert(context.Background(), args, &river.InsertOpts{
+				UniqueOpts: river.UniqueOpts{ByArgs: true, ByPeriod: 30 * time.Second},
+			}); err != nil {
+				logger.Warn("prewarm scan enqueue failed", "err", err, "user", userID)
+			}
+		}
 	}
 
 	r := chi.NewRouter()
@@ -190,22 +326,62 @@ func main() {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger(logger))
+	// gzip everything gzip-worthy. Level 5 is a well-tuned middle ground —
+	// the concert-list JSON compresses ~5x, which is the payload that
+	// dominates wire time. chi's Compress skips already-compressed content
+	// types (images, video) automatically.
+	r.Use(middleware.Compress(5))
 
 	r.Route("/api", func(api chi.Router) {
+		// Unknown /api/* paths return a JSON 404 rather than falling through
+		// to the SPA HTML handler — matters for API clients that would
+		// otherwise see HTML and misdiagnose.
+		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		})
+		api.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
+		})
 		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		})
+		api.Get("/site-info", (&webhttp.SiteInfoHandler{
+			ContactEmail:  cfg.ContactEmail,
+			EffectiveDate: "2026-07-29",
+		}).Get)
 		if authDeps == nil {
 			return
 		}
-		api.Route("/auth", func(r chi.Router) { auth.Mount(r, authDeps) })
+		// Rate-limit the OAuth start (/login and /callback are the state-mutating
+		// bits of the auth flow). 5 req/s with burst 20 per source IP — plenty
+		// for real users, spam-hostile.
+		authLimiter := auth.NewIPRateLimit(5, 20)
+		api.Route("/auth", func(r chi.Router) {
+			r.Use(authLimiter.Middleware)
+			auth.Mount(r, authDeps)
+		})
+		// Unauthenticated: HMAC-signed token in the URL is proof of identity
+		// for one-click unsubscribe from a mobile mail client with no session.
+		api.Get("/unsubscribe", unsubscribeH.Get)
 		api.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
+			r.Use(auth.CSRF(signingKey))
 			r.Get("/affinity", affinityH.Get)
 			r.Get("/concerts", concertsH.Get)
 			r.Get("/location", locationH.Get)
 			r.Put("/location", locationH.Put)
+			r.Post("/saved-concerts", savedH.Post)
+			r.Delete("/saved-concerts/{dedupKey}", savedH.Delete)
+			r.Get("/subscribed-artists", subscribedH.List)
+			r.Post("/subscribed-artists/{artistID}", subscribedH.Post)
+			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
+			r.Get("/artists/search", subscribedH.SearchArtists)
+			r.Put("/email-prefs", emailPrefsH.Put)
 		})
 	})
 
@@ -247,9 +423,6 @@ func main() {
 		if err := riverClient.Stop(shutdownCtx); err != nil {
 			logger.Error("river stop error", "err", err)
 		}
-	}
-	if searches != nil {
-		searches.Shutdown()
 	}
 }
 

@@ -54,7 +54,7 @@ func postToken(ctx context.Context, httpClient *http.Client, form url.Values) (*
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		return nil, fmt.Errorf("spotify token: httpClient is nil (must be constructed with a timeout)")
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 )
 
 type ctxKey struct{}
+type fullUserKey struct{}
 
 type CurrentUser struct {
 	ID            uuid.UUID
@@ -24,9 +25,25 @@ func withUser(ctx context.Context, u CurrentUser) context.Context {
 	return context.WithValue(ctx, ctxKey{}, u)
 }
 
+// withFullUser stashes the whole db.User next to CurrentUser so downstream
+// handlers that need every field (email, digest prefs, encrypted token) can
+// skip a second GetUserByID query. Keeping the two contexts distinct lets
+// handlers that only need the identity subset stay lightweight.
+func withFullUser(ctx context.Context, u db.User) context.Context {
+	return context.WithValue(ctx, fullUserKey{}, u)
+}
+
 // UserFromContext returns the authenticated user, or (zero, false) if none.
 func UserFromContext(ctx context.Context) (CurrentUser, bool) {
 	u, ok := ctx.Value(ctxKey{}).(CurrentUser)
+	return u, ok
+}
+
+// FullUserFromContext returns the complete db.User the middleware fetched
+// during session resolution, or (zero, false) if no request went through
+// RequireUser.
+func FullUserFromContext(ctx context.Context) (db.User, bool) {
+	u, ok := ctx.Value(fullUserKey{}).(db.User)
 	return u, ok
 }
 
@@ -63,6 +80,7 @@ func RequireUser(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				DisplayName:   user.DisplayName,
 				SessionID:     sess.ID,
 			})
+			ctx = withFullUser(ctx, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

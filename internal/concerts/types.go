@@ -47,4 +47,10 @@ type Concert struct {
 	Longitude float64      `json:"longitude,omitempty"`
 	Links     []TicketLink `json:"links"`
 	DedupKey  string       `json:"dedup_key"`
+	// Saved is a per-user, per-request tag added by the HTTP handler; it is
+	// never persisted in the snapshot. omitempty keeps snapshot JSON clean.
+	Saved bool `json:"saved,omitempty"`
+	// Subscribed mirrors Saved but for the user's per-artist subscription
+	// list (drives the "notify me instantly for this artist" feature).
+	Subscribed bool `json:"subscribed,omitempty"`
 }

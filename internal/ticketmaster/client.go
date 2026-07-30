@@ -27,9 +27,12 @@ type Client struct {
 	APIKey string
 }
 
+// NewClient panics on a nil httpClient — http.DefaultClient has no timeout
+// and would let a hung TM response block one search fan-out goroutine
+// indefinitely.
 func NewClient(httpClient *http.Client, apiKey string) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		panic("ticketmaster.NewClient: httpClient must be non-nil (set an explicit timeout)")
 	}
 	return &Client{HTTP: httpClient, APIKey: apiKey}
 }

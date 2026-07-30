@@ -3,11 +3,13 @@ package fallback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/peterho/concertfinder/internal/concerts"
@@ -18,12 +20,23 @@ import (
 
 const songkickBase = "https://api.songkick.com/api/3.0"
 
-// SongkickClient wraps a minimal slice of the Songkick API.
+const (
+	songkickMaxRetries    = 3
+	songkickMaxRetryAfter = 30 * time.Second
+	songkickBaseBackoff   = 200 * time.Millisecond
+	songkickUserAgent     = "ConcertFinder/0.1 (https://github.com/peter3605/concertFinder)"
+)
+
+// SongkickClient wraps a minimal slice of the Songkick API. Includes retry
+// with backoff on 5xx / 429 and a UA header identifying us so Songkick can
+// contact us before rate-limiting.
 type SongkickClient struct {
 	HTTP   *http.Client
 	APIKey string
 }
 
+// NewSongkickClient panics on a nil httpClient — a hung Songkick call would
+// otherwise burn a scan worker's whole budget.
 func NewSongkickClient(apiKey string) *SongkickClient {
 	return &SongkickClient{HTTP: &http.Client{Timeout: 10 * time.Second}, APIKey: apiKey}
 }
@@ -32,7 +45,7 @@ type songkickArtistSearchResp struct {
 	ResultsPage struct {
 		Results struct {
 			Artist []struct {
-				ID   int    `json:"id"`
+				ID          int    `json:"id"`
 				DisplayName string `json:"displayName"`
 			} `json:"artist"`
 		} `json:"results"`
@@ -94,8 +107,8 @@ func (c *SongkickClient) SearchArtistEvents(ctx context.Context, artistName stri
 	}
 	out := make([]concerts.Concert, 0, len(cal.ResultsPage.Results.Event))
 	for _, e := range cal.ResultsPage.Results.Event {
-		if !strings.EqualFold(e.Venue.MetroArea.Country.DisplayName, "US") &&
-			!strings.EqualFold(e.Venue.MetroArea.Country.DisplayName, "United States") {
+		cn := e.Venue.MetroArea.Country.DisplayName
+		if cn != "US" && cn != "USA" && cn != "United States" {
 			continue
 		}
 		var dt time.Time
@@ -112,17 +125,17 @@ func (c *SongkickClient) SearchArtistEvents(ctx context.Context, artistName stri
 		if dt.IsZero() {
 			continue
 		}
-		c := concerts.Concert{
-			Artist: concerts.ArtistRef{Name: artistName},
-			Date:   dt,
-			Venue:  e.Venue.DisplayName,
-			City:   e.Venue.MetroArea.DisplayName,
-			State:  e.Venue.MetroArea.State.DisplayName,
+		concert := concerts.Concert{
+			Artist:  concerts.ArtistRef{Name: artistName},
+			Date:    dt,
+			Venue:   e.Venue.DisplayName,
+			City:    e.Venue.MetroArea.DisplayName,
+			State:   e.Venue.MetroArea.State.DisplayName,
 			Country: e.Venue.MetroArea.Country.DisplayName,
-			Links:  []concerts.TicketLink{{Source: concerts.SourceSongkick, URL: e.URI}},
+			Links:   []concerts.TicketLink{{Source: concerts.SourceSongkick, URL: e.URI}},
 		}
-		c.DedupKey = concerts.DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
-		out = append(out, c)
+		concert.DedupKey = concerts.DedupKey(concert.Artist.Name, concert.Date, concert.Venue, concert.City)
+		out = append(out, concert)
 	}
 	return out, nil
 }
@@ -139,28 +152,102 @@ func (c *SongkickClient) resolveArtistID(ctx context.Context, name string) (int,
 	if err := json.Unmarshal(body, &s); err != nil {
 		return 0, err
 	}
-	target := strings.ToLower(strings.TrimSpace(name))
+	// Normalize both sides so "Sigur Rós" matches "Sigur Ros" and "The XX"
+	// matches "XX" — same rules as the dedup key so semantics stay uniform.
+	target := concerts.Normalize(name)
 	for _, a := range s.ResultsPage.Results.Artist {
-		if strings.ToLower(strings.TrimSpace(a.DisplayName)) == target {
+		if concerts.Normalize(a.DisplayName) == target {
 			return a.ID, nil
 		}
 	}
 	return 0, nil
 }
 
+// get is retry-aware: honors Retry-After on 429, exponential backoff for
+// 5xx / network errors.
 func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := 0; attempt <= songkickMaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", songkickUserAgent)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			if !songkickBackoff(ctx, attempt) {
+				return nil, lastErr
+			}
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			if !songkickBackoff(ctx, attempt) {
+				return nil, lastErr
+			}
+			continue
+		}
+		switch {
+		case resp.StatusCode/100 == 2:
+			return body, nil
+		case resp.StatusCode == http.StatusTooManyRequests:
+			d := time.Duration(0)
+			if raw := resp.Header.Get("Retry-After"); raw != "" {
+				if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+					d = time.Duration(secs) * time.Second
+				}
+			}
+			if d == 0 || d > songkickMaxRetryAfter {
+				if !songkickBackoff(ctx, attempt) {
+					return nil, fmt.Errorf("songkick 429: retries exhausted")
+				}
+			} else {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			lastErr = fmt.Errorf("songkick 429")
+			continue
+		case resp.StatusCode/100 == 5:
+			lastErr = fmt.Errorf("songkick %d", resp.StatusCode)
+			if !songkickBackoff(ctx, attempt) {
+				return nil, lastErr
+			}
+			continue
+		default:
+			return nil, fmt.Errorf("songkick %d: %s", resp.StatusCode, u)
+		}
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
+	if lastErr == nil {
+		lastErr = errors.New("songkick: retries exhausted")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("songkick %s: %s", u, resp.Status)
+	return nil, lastErr
+}
+
+func songkickBackoff(ctx context.Context, attempt int) bool {
+	if attempt >= songkickMaxRetries {
+		return false
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	d := songkickBaseBackoff << attempt
+	d += time.Duration(rand.Int63n(int64(100 * time.Millisecond)))
+	if d > songkickMaxRetryAfter {
+		d = songkickMaxRetryAfter
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }

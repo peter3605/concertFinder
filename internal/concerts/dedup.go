@@ -130,14 +130,23 @@ func (m *Merger) Add(c Concert) {
 	}
 }
 
-// All returns concerts sorted ascending by date, then artist name. Values are
-// copied out under the read lock so the caller can iterate without contention.
+// All returns concerts sorted ascending by date, then artist name. Values —
+// including the Links slice — are deep-copied under the read lock so a
+// concurrent Add appending to the stored Concert can't race with a caller
+// iterating the returned slice.
 func (m *Merger) All() []Concert {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]Concert, 0, len(m.byKey))
 	for _, c := range m.byKey {
-		out = append(out, *c)
+		cp := *c
+		if len(c.Links) > 0 {
+			cp.Links = append([]TicketLink(nil), c.Links...)
+		}
+		if len(c.Artist.Genres) > 0 {
+			cp.Artist.Genres = append([]string(nil), c.Artist.Genres...)
+		}
+		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].Date.Equal(out[j].Date) {

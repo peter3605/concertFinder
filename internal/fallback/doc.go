@@ -5,9 +5,10 @@
 // not scrape by default.
 //
 // Tier A checks known structured sources (Spotify external_urls cached in
-// artist_resolutions, Songkick). Tier B resolves an official URL via Brave
-// Search, fetches the homepage plus common tour pages, and extracts
-// schema.org MusicEvent entities from JSON-LD blocks.
+// artist_resolutions, Songkick). Tier B resolves an official URL via
+// MusicBrainz (default) or Brave Search (opt-in via BRAVE_SEARCH_API_KEY),
+// fetches the homepage plus common tour pages, and extracts schema.org
+// MusicEvent entities from JSON-LD blocks.
 //
 // Scraping etiquette (§5.4.3):
 //   - User-Agent identifies the app and provides a contact URL.

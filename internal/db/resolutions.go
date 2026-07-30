@@ -37,15 +37,17 @@ func GetArtistResolution(ctx context.Context, pool *pgxpool.Pool, spotifyArtistI
 }
 
 // UpsertArtistResolution stores or refreshes a resolution row. Empty strings
-// are persisted as NULL so the negative-cache semantics stay explicit.
+// in the input are treated as "don't touch this field" — not "clear it" —
+// so a caller updating only OfficialURL (the Phase 2 fallback path) doesn't
+// nuke a previously-resolved ticketmaster_attraction_id.
 func UpsertArtistResolution(ctx context.Context, pool *pgxpool.Pool, r ArtistResolution) error {
 	const q = `
 INSERT INTO artist_resolutions (spotify_artist_id, ticketmaster_attraction_id, bandsintown_name, official_url, resolved_at)
 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), now())
 ON CONFLICT (spotify_artist_id) DO UPDATE SET
-  ticketmaster_attraction_id = EXCLUDED.ticketmaster_attraction_id,
-  bandsintown_name           = EXCLUDED.bandsintown_name,
-  official_url               = EXCLUDED.official_url,
+  ticketmaster_attraction_id = COALESCE(EXCLUDED.ticketmaster_attraction_id, artist_resolutions.ticketmaster_attraction_id),
+  bandsintown_name           = COALESCE(EXCLUDED.bandsintown_name,           artist_resolutions.bandsintown_name),
+  official_url               = COALESCE(EXCLUDED.official_url,               artist_resolutions.official_url),
   resolved_at                = EXCLUDED.resolved_at
 `
 	_, err := pool.Exec(ctx, q, r.SpotifyArtistID, r.TicketmasterAttractionID, r.BandsintownName, r.OfficialURL)

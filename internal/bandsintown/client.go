@@ -27,9 +27,10 @@ type Client struct {
 	AppID string
 }
 
+// NewClient panics on a nil httpClient. See spotify.NewClient rationale.
 func NewClient(httpClient *http.Client, appID string) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		panic("bandsintown.NewClient: httpClient must be non-nil (set an explicit timeout)")
 	}
 	return &Client{HTTP: httpClient, AppID: appID}
 }

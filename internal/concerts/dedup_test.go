@@ -78,6 +78,25 @@ func TestMerger_CombinesLinksSorted(t *testing.T) {
 	}
 }
 
+func TestMerger_AllReturnsIndependentSlices(t *testing.T) {
+	// Regression for the audit fix: All() must deep-copy Links so a later Add
+	// doesn't mutate a slice a caller is already iterating.
+	when := time.Date(2026, 8, 1, 20, 0, 0, 0, time.UTC)
+	m := NewMerger()
+	m.Add(Concert{
+		Artist: ArtistRef{Name: "Cardinal Bloom"}, Date: when, Venue: "Union Stage", City: "DC",
+		Links: []TicketLink{{Source: SourceTicketmaster, URL: "https://a"}},
+	})
+	snapshot := m.All()
+	m.Add(Concert{
+		Artist: ArtistRef{Name: "Cardinal Bloom"}, Date: when, Venue: "Union Stage", City: "DC",
+		Links: []TicketLink{{Source: SourceBandsintown, URL: "https://b"}},
+	})
+	if len(snapshot[0].Links) != 1 {
+		t.Fatalf("snapshot slice must not be extended by later Add; got %d links", len(snapshot[0].Links))
+	}
+}
+
 func TestMerger_SortByDateThenName(t *testing.T) {
 	m := NewMerger()
 	m.Add(Concert{Artist: ArtistRef{Name: "Z"}, Date: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), Venue: "v", City: "c"})

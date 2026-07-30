@@ -20,6 +20,12 @@ var embedded embed.FS
 // Handler serves the embedded SPA. Requests for real files (JS, CSS, etc.)
 // return the file; anything else returns index.html so client-side routing
 // works.
+//
+// Caching:
+//   - Files under /assets/* have content-hashed filenames (Vite output),
+//     safe to cache aggressively — one year, immutable.
+//   - Everything else (index.html, robots.txt, static images) uses no-cache
+//     so users pick up new bundle hashes on the next visit.
 func Handler() http.Handler {
 	sub, err := fs.Sub(embedded, "static")
 	if err != nil {
@@ -37,6 +43,13 @@ func Handler() http.Handler {
 		trimmed := strings.TrimPrefix(clean, "/")
 		if f, err := sub.Open(trimmed); err == nil {
 			f.Close()
+			// Hashed bundle files (Vite emits e.g. /assets/index-Xyz.js) are
+			// immutable — anything under /assets/ gets a 1-year cache. Non-
+			// hashed static assets served from other paths fall through to
+			// the default no-cache behavior.
+			if strings.HasPrefix(clean, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
 			fileServer.ServeHTTP(w, r)
 			return
 		}
