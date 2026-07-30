@@ -7,17 +7,24 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
+
+// bitLockedOutMarker identifies the AWS-flavored 403 that Bandsintown's public
+// API is currently returning for every request. Logging each occurrence
+// generates hundreds of identical WARN lines per search with no signal — a
+// single startup notice would be nicer, but this is the least-invasive fix.
+const bitLockedOutMarker = "explicit deny in an identity-based policy"
 
 // Location is the search origin (design §10.1: hardcoded in Phase 1).
 type Location struct {
@@ -42,6 +49,10 @@ type SearchDeps struct {
 	Parallelism      int           // §8.1 = 10
 	Fallback         Fallbacker    // nil = Phase 1 behavior (no fallback)
 	MinFallbackScore float64       // artists with Score < this bypass the fallback
+	// RateLedger enforces per-user daily caps on TM/BIT/Songkick (design §8.3).
+	// Nil = no enforcement. User is read from ctx via rate.UserFromContext,
+	// which the scan worker sets before calling into Search.
+	RateLedger *rate.Ledger
 }
 
 // Search fans out to TM + BIT for each artist, respects ctx, and returns
@@ -129,38 +140,56 @@ func searchOne(ctx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Lo
 		resolution.BandsintownName = a.Name
 	}
 
+	// TM + BIT run independently. A failure in one source must not cancel or
+	// discard the other: BIT has been intermittently returning 403 for the
+	// entire public API surface, and losing all TM results because BIT is
+	// down defeats the point of having two sources.
 	var (
 		tmEvents  []ticketmaster.Event
 		bitEvents []bandsintown.Event
 	)
-	g, gctx := errgroup.WithContext(ctx)
+	var wg sync.WaitGroup
 
-	g.Go(func() error {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		if resolution.TicketmasterAttractionID == "" {
-			return nil
+			return
 		}
-		evs, err := loadOrFetchTM(gctx, d, a.ID, resolution.TicketmasterAttractionID, loc)
+		evs, err := loadOrFetchTM(ctx, d, a.ID, resolution.TicketmasterAttractionID, loc)
 		if err != nil {
-			return err
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				slog.Warn("tm fetch failed", "artist", a.Name, "err", err)
+			}
+			return
 		}
 		tmEvents = evs
-		return nil
-	})
-	g.Go(func() error {
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		name := resolution.BandsintownName
 		if name == "" {
 			name = a.Name
 		}
-		evs, err := loadOrFetchBIT(gctx, d, a.ID, name, loc)
+		evs, err := loadOrFetchBIT(ctx, d, a.ID, name, loc)
 		if err != nil {
-			return err
+			switch {
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				// ctx cleanup — not actionable
+			case strings.Contains(err.Error(), bitLockedOutMarker):
+				// BIT's public API is currently 403'ing every request. Don't
+				// spam the log with one line per artist for a known outage.
+			default:
+				slog.Warn("bit fetch failed", "artist", a.Name, "err", err)
+			}
+			return
 		}
 		bitEvents = evs
-		return nil
-	})
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
+	}()
+
+	wg.Wait()
 
 	out := make([]Concert, 0, len(tmEvents)+len(bitEvents))
 	for _, e := range tmEvents {
@@ -200,6 +229,12 @@ func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID str
 			return out, nil
 		}
 	}
+	// Cache miss — this becomes a real upstream call. Charge the user's
+	// TM ledger; if they're over the daily cap treat as empty for the
+	// remainder of the day.
+	if d.RateLedger != nil && !d.RateLedger.AllowFromContext(ctx, rate.SourceTicketmaster) {
+		return nil, nil
+	}
 	evs, err := d.TM.SearchEvents(ctx, attractionID, loc.Latitude, loc.Longitude, loc.RadiusMiles)
 	if err != nil {
 		return nil, fmt.Errorf("tm: %w", err)
@@ -219,6 +254,9 @@ func loadOrFetchBIT(ctx context.Context, d SearchDeps, artistID, name string, lo
 		if err := json.Unmarshal(blob, &out); err == nil {
 			return out, nil
 		}
+	}
+	if d.RateLedger != nil && !d.RateLedger.AllowFromContext(ctx, rate.SourceBandsintown) {
+		return nil, nil
 	}
 	evs, err := d.BIT.ArtistEvents(ctx, name, loc.Latitude, loc.Longitude, loc.RadiusMiles)
 	if err != nil {

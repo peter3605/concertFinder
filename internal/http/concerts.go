@@ -1,52 +1,41 @@
 package http
 
 import (
-	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
-	"github.com/peterho/concertfinder/internal/affinity"
 	"github.com/peterho/concertfinder/internal/auth"
-	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
-	"github.com/peterho/concertfinder/internal/search"
-	"github.com/peterho/concertfinder/internal/ticketmaster"
+	"github.com/peterho/concertfinder/internal/jobs"
 )
 
-// initialResponseBudget bounds how long a fresh /me/concerts call waits
-// before returning partial results (design §6.1: 15s outer deadline).
-const initialResponseBudget = 15 * time.Second
-
-// pollResponseBudget is a shorter wait when the client is polling a running
-// search — enough for quick progress but not enough to block a busy client.
-const pollResponseBudget = 5 * time.Second
-
-// ConcertsHandler serves /me/concerts.
+// ConcertsHandler serves /me/concerts with stale-while-revalidate semantics.
+// Requests never trigger a synchronous fan-out; they return the last
+// completed snapshot immediately and enqueue a background refresh when the
+// snapshot is stale or missing.
 type ConcertsHandler struct {
-	Affinity         *affinity.Service
-	Pool             *pgxpool.Pool
-	TM               *ticketmaster.Client
-	BIT              *bandsintown.Client
-	FallbackLocation concerts.Location
-	Fallback         concerts.Fallbacker
-	MinFallbackScore float64
-	Searches         *search.Manager
+	Pool               *pgxpool.Pool
+	River              *river.Client[pgx.Tx]
+	FallbackLocation   concerts.Location
+	SnapshotStaleAfter time.Duration
 }
 
 type concertsResponse struct {
-	SearchID uuid.UUID          `json:"search_id"`
-	Complete bool               `json:"complete"`
-	Location concerts.Location  `json:"location"`
-	Count    int                `json:"count"`
-	Concerts []concerts.Concert `json:"concerts"`
-	Facets   facetSet           `json:"facets"`
+	Location   concerts.Location  `json:"location"`
+	Count      int                `json:"count"`
+	Concerts   []concerts.Concert `json:"concerts"`
+	Facets     facetSet           `json:"facets"`
+	ComputedAt *time.Time         `json:"computed_at,omitempty"`
+	Refreshing bool               `json:"refreshing"`
 }
 
 type facetSet struct {
@@ -75,67 +64,92 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			RadiusMiles: userLoc.RadiusMiles,
 		}
 	}
+	locKey := jobs.LocationKey(loc)
 
-	// Polling an existing search?
-	if raw := r.URL.Query().Get("id"); raw != "" {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			http.Error(w, "invalid id", http.StatusBadRequest)
-			return
+	var (
+		found      []concerts.Concert
+		computedAt *time.Time
+		hasSnap    bool
+	)
+	if snap, hit, err := db.GetConcertSnapshot(r.Context(), h.Pool, u.ID, locKey); err != nil {
+		slog.Warn("concerts: snapshot read failed", "err", err, "user", u.ID)
+	} else if hit {
+		hasSnap = true
+		if err := json.Unmarshal(snap.Snapshot, &found); err != nil {
+			slog.Warn("concerts: snapshot decode failed", "err", err, "user", u.ID)
+			hasSnap = false
+			found = nil
+		} else {
+			t := snap.ComputedAt
+			computedAt = &t
 		}
-		s, ok := h.Searches.Get(id)
-		if !ok {
-			http.Error(w, "search not found or expired", http.StatusNotFound)
-			return
-		}
-		h.respondFromSearch(w, r, s, loc, pollResponseBudget)
-		return
 	}
 
-	// Fresh search: compute affinity synchronously (cheap on cache hit), then
-	// hand the top-N to a detached fan-out.
-	artists, _, _, err := h.Affinity.LoadOrCompute(r.Context(), affinity.User{ID: u.ID, SpotifyUserID: u.SpotifyUserID})
-	if err != nil {
-		slog.Error("concerts: affinity failed", "err", err, "user", u.ID)
-		http.Error(w, "affinity load failed", http.StatusInternalServerError)
-		return
+	// SWR: enqueue a background scan when the snapshot is missing or older
+	// than the staleness window. River's uniqueness guarantees we don't pile
+	// up duplicate jobs if the user refreshes rapidly.
+	stale := !hasSnap || (computedAt != nil && time.Since(*computedAt) > h.SnapshotStaleAfter)
+	refreshing := false
+	if stale && h.River != nil {
+		args := jobs.ScanConcertsArgs{
+			UserID:      u.ID,
+			Latitude:    loc.Latitude,
+			Longitude:   loc.Longitude,
+			RadiusMiles: loc.RadiusMiles,
+		}
+		opts := &river.InsertOpts{
+			UniqueOpts: river.UniqueOpts{
+				ByArgs:   true,
+				ByPeriod: 30 * time.Second, // collapse a burst of refreshes
+			},
+		}
+		if _, err := h.River.Insert(r.Context(), args, opts); err != nil {
+			slog.Warn("concerts: scan enqueue failed", "err", err, "user", u.ID)
+		} else {
+			refreshing = true
+		}
 	}
-	s := h.Searches.Start(concerts.SearchDeps{
-		Pool:             h.Pool,
-		TM:               h.TM,
-		BIT:              h.BIT,
-		CacheTTL:         4 * time.Hour,
-		Parallelism:      10,
-		Fallback:         h.Fallback,
-		MinFallbackScore: h.MinFallbackScore,
-	}, artists, loc)
-	h.respondFromSearch(w, r, s, loc, initialResponseBudget)
-}
 
-// respondFromSearch waits up to budget for completion, snapshots the merger,
-// applies filters/facets, and writes the response.
-func (h *ConcertsHandler) respondFromSearch(w http.ResponseWriter, r *http.Request, s *search.Search, loc concerts.Location, budget time.Duration) {
-	waitCtx, cancel := waitContext(r.Context(), budget)
-	defer cancel()
-	s.WaitFor(waitCtx)
-
-	found := s.Merger.All()
 	facets := computeFacets(found)
 	filters := parseFilters(r, loc)
 	filtered := concerts.Apply(found, filters)
 
-	writeJSON(w, concertsResponse{
-		SearchID: s.ID,
-		Complete: s.IsComplete(),
-		Location: loc,
-		Count:    len(filtered),
-		Concerts: filtered,
-		Facets:   facets,
-	})
-}
+	// Overlay per-user saved + subscribed status. Both sets are small
+	// (bounded by user's own picks) so a single read + O(n) tag is fine.
+	saved, err := db.GetSavedDedupKeys(r.Context(), h.Pool, u.ID)
+	if err != nil {
+		slog.Warn("concerts: saved lookup failed", "err", err, "user", u.ID)
+	}
+	subscribed, err := db.GetSubscribedArtistIDs(r.Context(), h.Pool, u.ID)
+	if err != nil {
+		slog.Warn("concerts: subscribed lookup failed", "err", err, "user", u.ID)
+	}
+	for i := range filtered {
+		if _, ok := saved[filtered[i].DedupKey]; ok {
+			filtered[i].Saved = true
+		}
+		if _, ok := subscribed[filtered[i].Artist.ID]; ok {
+			filtered[i].Subscribed = true
+		}
+	}
+	if r.URL.Query().Get("saved_only") == "true" {
+		kept := filtered[:0]
+		for _, c := range filtered {
+			if c.Saved {
+				kept = append(kept, c)
+			}
+		}
+		filtered = kept
+	}
 
-func waitContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, d)
+	writeJSON(w, concertsResponse{
+		Location:   loc,
+		Count:      len(filtered),
+		Concerts:   filtered,
+		Facets:     facets,
+		ComputedAt: computedAt,
+		Refreshing: refreshing,
+	})
 }
 
 func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {

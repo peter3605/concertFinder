@@ -2,6 +2,7 @@ package fallback
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -68,7 +69,13 @@ func (f *Fetcher) GetPage(ctx context.Context, rawURL string) ([]byte, error) {
 
 	key := "page:" + rawURL
 	if blob, ok, err := db.GetCachedConcerts(ctx, f.Pool, key, pageTTL); err == nil && ok {
-		return blob, nil
+		// Cached bytes are stored JSON-encoded (HTML isn't valid JSON but
+		// concert_cache.results is jsonb). Decode; on corruption fall through
+		// to re-fetch.
+		var s string
+		if json.Unmarshal(blob, &s) == nil {
+			return []byte(s), nil
+		}
 	}
 
 	allowed, err := f.rob.allowed(ctx, f.HTTP, u)
@@ -102,7 +109,12 @@ func (f *Fetcher) GetPage(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.SaveCachedConcerts(ctx, f.Pool, key, body)
+	// concert_cache.results is jsonb, so wrap the raw HTML in a JSON string.
+	// json.Marshal replaces invalid UTF-8 with U+FFFD, which is acceptable
+	// for HTML in practice (most pages are UTF-8 already).
+	if encoded, err := json.Marshal(string(body)); err == nil {
+		_ = db.SaveCachedConcerts(ctx, f.Pool, key, encoded)
+	}
 	return body, nil
 }
 

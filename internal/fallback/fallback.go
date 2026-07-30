@@ -12,8 +12,16 @@ import (
 	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 )
+
+// URLResolver finds an artist's official homepage URL by name. Implemented
+// by MusicBrainzClient (default, free, ToS-clean) and BraveClient (legacy,
+// requires paid-ish API key). Chain accepts either.
+type URLResolver interface {
+	ResolveOfficialURL(ctx context.Context, artistName string) (string, error)
+}
 
 // Chain runs the Tier A → Tier B fallback (§5.4). Any tier returning ≥1
 // concert short-circuits later tiers. Errors from one tier are logged but
@@ -21,8 +29,15 @@ import (
 type Chain struct {
 	Pool     *pgxpool.Pool
 	Fetcher  *Fetcher
-	Brave    *BraveClient
+	Resolver URLResolver
 	Songkick *SongkickClient
+	// VenueGeo geocodes venue city/state when JSON-LD or Songkick omits
+	// coordinates. Nil is valid — in that case, no-coord concerts get
+	// dropped in the radius filter.
+	VenueGeo *VenueGeocoder
+	// RateLedger enforces per-user daily caps on Songkick (design §8.3).
+	// Nil = no enforcement.
+	RateLedger *rate.Ledger
 }
 
 // FindEvents returns concerts for an artist that TM+BIT missed. loc is the
@@ -34,23 +49,28 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 	}
 	// Tier A.2 — Songkick.
 	if c.Songkick != nil {
-		evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)
-		if err != nil && !errors.Is(err, ErrNoAPIKey) {
-			slog.Warn("songkick failed", "artist", artist.Name, "err", err)
-		}
-		out := filterByRadius(evs, loc)
-		for i := range out {
-			out[i].Artist.ID = artist.ID
-		}
-		if len(out) > 0 {
-			return out
+		if c.RateLedger != nil && !c.RateLedger.AllowFromContext(ctx, rate.SourceSongkick) {
+			// Over the per-user Songkick cap; skip and fall through.
+		} else {
+			evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)
+			if err != nil && !errors.Is(err, ErrNoAPIKey) {
+				slog.Warn("songkick failed", "artist", artist.Name, "err", err)
+			}
+			out := filterByRadius(ctx, evs, loc, c.VenueGeo)
+			for i := range out {
+				out[i].Artist.ID = artist.ID
+			}
+			if len(out) > 0 {
+				return out
+			}
 		}
 	}
-	// Tier B.1 — Brave Search to discover an official URL, then Tier B.2 scrape.
-	if c.Brave != nil {
-		officialURL, err := c.Brave.ResolveOfficialURL(ctx, artist.Name)
+	// Tier B.1 — resolve an official URL (default MusicBrainz), then Tier B.2
+	// scrape the artist's homepage for JSON-LD MusicEvents.
+	if c.Resolver != nil {
+		officialURL, err := c.Resolver.ResolveOfficialURL(ctx, artist.Name)
 		if err != nil && !errors.Is(err, ErrNoAPIKey) {
-			slog.Warn("brave resolve failed", "artist", artist.Name, "err", err)
+			slog.Warn("url resolve failed", "artist", artist.Name, "err", err)
 		}
 		if officialURL != "" {
 			_ = db.UpsertArtistResolution(ctx, c.Pool, db.ArtistResolution{
@@ -105,23 +125,31 @@ func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist
 			break
 		}
 	}
-	return filterByRadius(all, loc)
+	return filterByRadius(ctx, all, loc, c.VenueGeo)
 }
 
-// filterByRadius drops concerts whose venue coordinates lie outside the
-// user's radius. Records with no coordinates (JSON-LD often omits geo) are
-// kept — the alternative is a permanent false-negative for indie tour pages.
-func filterByRadius(cs []concerts.Concert, loc concerts.Location) []concerts.Concert {
+// filterByRadius drops concerts whose venue lies outside the user's radius.
+// Fallback sources (especially official-site JSON-LD for major artists like
+// Post Malone) frequently return an entire world tour, so we always need to
+// filter. Concerts without coordinates get their city+state geocoded through
+// VenueGeo (Nominatim, cached in memory per unique city). If VenueGeo is nil
+// or geocoding fails, no-coord concerts are dropped rather than shown.
+func filterByRadius(ctx context.Context, cs []concerts.Concert, loc concerts.Location, geo *VenueGeocoder) []concerts.Concert {
 	if loc.RadiusMiles <= 0 {
 		return cs
 	}
 	out := cs[:0]
 	for _, c := range cs {
-		if c.Latitude == 0 && c.Longitude == 0 {
-			out = append(out, c)
+		lat, lng := c.Latitude, c.Longitude
+		if lat == 0 && lng == 0 && geo != nil {
+			if gLat, gLng, ok := geo.Resolve(ctx, c.City, c.State, c.Country); ok {
+				lat, lng = gLat, gLng
+			}
+		}
+		if lat == 0 && lng == 0 {
 			continue
 		}
-		if bandsintown.HaversineMiles(loc.Latitude, loc.Longitude, c.Latitude, c.Longitude) <= float64(loc.RadiusMiles) {
+		if bandsintown.HaversineMiles(loc.Latitude, loc.Longitude, lat, lng) <= float64(loc.RadiusMiles) {
 			out = append(out, c)
 		}
 	}
