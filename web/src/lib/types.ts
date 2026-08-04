@@ -38,18 +38,37 @@ export type ConcertsResponse = {
   location: Location;
   count: number;
   concerts: Concert[];
-  facets: { genres: Facet[] };
+  facets: { genres: Facet[]; venues: Facet[] };
   computed_at?: string;
   refreshing: boolean;
+  // False when the scan behind these results didn't cover every artist.
+  // Lets the UI distinguish a quiet area from a truncated scan.
+  complete: boolean;
+  // Set when the shortfall was the daily upstream quota, which resets at
+  // this time. Absent when another scan could help sooner.
+  retry_after?: string;
 };
 
 export type Weekday = 'all' | 'weekday' | 'weekend';
 
 export type FiltersState = {
   genre: string;
+  // Venue name as shown in the facet list. The server compares it under the
+  // same normalization it uses to build those facets, so differences in
+  // case or punctuation between sources don't matter.
+  venue: string;
   dateFrom: string;
   dateTo: string;
   weekday: Weekday;
+};
+
+// Shared starting point so every page agrees on "no filters applied".
+export const EMPTY_FILTERS: FiltersState = {
+  genre: '',
+  venue: '',
+  dateFrom: '',
+  dateTo: '',
+  weekday: 'all',
 };
 
 export const SOURCE_LABELS: Record<string, string> = {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,16 +20,23 @@ type ArtistResolution struct {
 	SpotifyArtistID          string
 	TicketmasterAttractionID string
 	BandsintownName          string
+	// ResolvedAt lets callers expire *negative* resolutions. A row with an
+	// empty TicketmasterAttractionID means "TM had no exact name match when
+	// we asked", which stops being true when an artist signs to TM — so
+	// concerts.needsTMResolution re-asks once the row ages past
+	// NegativeResolutionTTL.
+	ResolvedAt time.Time
 }
 
 // GetArtistResolution returns (row, true, nil) on hit, (zero, false, nil) on miss.
 func GetArtistResolution(ctx context.Context, pool *pgxpool.Pool, spotifyArtistID string) (ArtistResolution, bool, error) {
 	const q = `SELECT spotify_artist_id,
 	                  COALESCE(ticketmaster_attraction_id, ''),
-	                  COALESCE(bandsintown_name, '')
+	                  COALESCE(bandsintown_name, ''),
+	                  resolved_at
 	           FROM artist_resolutions WHERE spotify_artist_id = $1`
 	var r ArtistResolution
-	err := pool.QueryRow(ctx, q, spotifyArtistID).Scan(&r.SpotifyArtistID, &r.TicketmasterAttractionID, &r.BandsintownName)
+	err := pool.QueryRow(ctx, q, spotifyArtistID).Scan(&r.SpotifyArtistID, &r.TicketmasterAttractionID, &r.BandsintownName, &r.ResolvedAt)
 	if err != nil {
 		if errors.Is(err, ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return ArtistResolution{}, false, nil

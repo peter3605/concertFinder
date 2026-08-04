@@ -18,6 +18,9 @@ import (
 // contain no user identity and other users may still benefit from them.
 type AccountHandler struct {
 	Pool *pgxpool.Pool
+	// Tokens, when set, has its in-memory access-token entry for the user
+	// dropped on delete so nothing keeps working after the row is gone.
+	Tokens *auth.TokenService
 }
 
 type deleteAccountRequest struct {
@@ -57,6 +60,9 @@ func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		slog.Error("account delete failed", "err", err, "user", u.ID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if h.Tokens != nil {
+		h.Tokens.Forget(u.ID)
 	}
 	slog.Info("account deleted", "user", u.ID)
 	// Clear session cookie so the browser stops sending stale credentials.

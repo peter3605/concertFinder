@@ -2,6 +2,22 @@ package concerts
 
 import "encoding/json"
 
+// Assemble decodes raw JSON concert blobs in the order given. Used where
+// the query already returns rows in the order we want to display (the saved
+// list, which the database sorts by event date), so no reindexing step is
+// needed.
+func Assemble(blobs [][]byte) ([]Concert, error) {
+	out := make([]Concert, 0, len(blobs))
+	for _, b := range blobs {
+		var c Concert
+		if err := json.Unmarshal(b, &c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // AssembleByKey turns a slice of raw JSON concert blobs into a []Concert
 // in the same order as the provided dedupKeys. Post-normalization
 // (migration 0012) the snapshot stores dedup_keys separately from concert

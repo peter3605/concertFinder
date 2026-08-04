@@ -5,7 +5,6 @@ import (
 	"html"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/peterho/concertfinder/internal/concerts"
 )
@@ -123,9 +122,6 @@ func stateSuffix(state string) string {
 	}
 	return ", " + state
 }
-
-// Unused for now — reserved for a "next 30 days" cap in the digest.
-var _ = time.Duration(0)
 
 // RenderInstantNotify composes an email for one or more newly-discovered
 // concerts by artists the user actively subscribed to. Distinct subject and

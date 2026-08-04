@@ -34,9 +34,13 @@ type Chain struct {
 	// coordinates. Nil is valid — in that case, no-coord concerts get
 	// dropped in the radius filter.
 	VenueGeo *VenueGeocoder
-	// RateLedger enforces per-user daily caps on Songkick (design §8.3).
-	// Nil = no enforcement.
-	RateLedger *rate.Ledger
+}
+
+// isCtxErr reports whether an error is just the scan's fallback deadline
+// arriving. Those are expected once the budget is spent and would otherwise
+// emit one WARN per remaining artist — a hundred lines saying nothing.
+func isCtxErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // FindEvents returns concerts for an artist that TM+BIT missed. loc is the
@@ -45,12 +49,14 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 	// Tier A — Songkick. (The "cached official URL" step from earlier
 	// designs collapsed into Tier B once the URL resolver got its own
 	// two-tier cache — Tier B is now cache-first-then-fetch by construction.)
-	if c.Songkick != nil {
-		if c.RateLedger != nil && !c.RateLedger.AllowFromContext(ctx, rate.SourceSongkick) {
+	if c.Songkick.Enabled() {
+		// Per-user daily quota (design §8.3) rides on the context as a
+		// pre-charged reservation taken out by the scan worker.
+		if !rate.Allow(ctx, rate.SourceSongkick) {
 			// Over the per-user Songkick cap; skip and fall through.
 		} else {
 			evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)
-			if err != nil && !errors.Is(err, ErrNoAPIKey) {
+			if err != nil && !errors.Is(err, ErrNoAPIKey) && !isCtxErr(err) {
 				slog.Warn("songkick failed", "artist", artist.Name, "err", err)
 			}
 			out := filterByRadius(ctx, evs, loc, c.VenueGeo)
@@ -66,7 +72,7 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 	// mb_url_cache) then scrape the artist's homepage for JSON-LD MusicEvents.
 	if c.Resolver != nil {
 		officialURL, err := c.Resolver.ResolveOfficialURL(ctx, artist.Name)
-		if err != nil && !errors.Is(err, ErrNoAPIKey) {
+		if err != nil && !errors.Is(err, ErrNoAPIKey) && !isCtxErr(err) {
 			slog.Warn("url resolve failed", "artist", artist.Name, "err", err)
 		}
 		if officialURL != "" {
@@ -130,7 +136,10 @@ func filterByRadius(ctx context.Context, cs []concerts.Concert, loc concerts.Loc
 	if loc.RadiusMiles <= 0 {
 		return cs
 	}
-	out := cs[:0]
+	// Allocate rather than filter into cs[:0]. Every caller happens to pass
+	// a freshly-built slice today, so the in-place form was safe by luck;
+	// it would silently truncate any caller that didn't.
+	out := make([]concerts.Concert, 0, len(cs))
 	for _, c := range cs {
 		lat, lng := c.Latitude, c.Longitude
 		if lat == 0 && lng == 0 && geo != nil {

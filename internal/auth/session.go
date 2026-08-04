@@ -10,7 +10,6 @@ const (
 	handshakeCookieName = "cf_handshake"
 
 	SessionCreatedTTL = 90 * 24 * time.Hour // hard cap
-	SessionIdleTTL    = 30 * 24 * time.Hour // last_seen refresh window
 	HandshakeTTL      = 10 * time.Minute
 )
 

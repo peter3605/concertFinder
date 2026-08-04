@@ -5,8 +5,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,32 +70,3 @@ func GetConcertsByDedupKeys(ctx context.Context, pool *pgxpool.Pool, keys []stri
 	return out, rows.Err()
 }
 
-// GetConcertJSON returns the raw JSON body for a single concert. Used by
-// the instant-notify worker to look up a small set without a batch query.
-func GetConcertJSON(ctx context.Context, pool *pgxpool.Pool, dedupKey string) ([]byte, bool, error) {
-	const q = `SELECT data FROM concerts WHERE dedup_key = $1`
-	var b []byte
-	err := pool.QueryRow(ctx, q, dedupKey).Scan(&b)
-	if err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return b, true, nil
-}
-
-// MarshalConcerts is a small convenience so callers upstream of this
-// package don't have to know the JSON encoding invariant. Returns rows
-// suitable for UpsertConcerts.
-func MarshalConcerts[C any](concerts []C, dedupKey func(c C) string, eventDate func(c C) time.Time) ([]ConcertRow, error) {
-	rows := make([]ConcertRow, 0, len(concerts))
-	for _, c := range concerts {
-		data, err := json.Marshal(c)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, ConcertRow{DedupKey: dedupKey(c), Data: data, EventDate: eventDate(c)})
-	}
-	return rows, nil
-}

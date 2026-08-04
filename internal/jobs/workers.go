@@ -3,7 +3,9 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"sort"
 	"strconv"
 	"time"
 
@@ -54,6 +56,25 @@ type ScanConcertsWorker struct {
 	// River lets this worker enqueue follow-up jobs (currently the
 	// instant-notify email fires here). Nil = feature disabled.
 	River *river.Client[pgx.Tx]
+	// Ledger issues the per-user daily quota reservations this scan spends
+	// (design §8.3). Nil = no enforcement.
+	Ledger *rate.Ledger
+}
+
+// ScanMaxAttempts bounds river's retries for a scan. River's default is 25,
+// which for a permanently-failing scan (revoked Spotify grant, say) means
+// two dozen full fan-out attempts. Three is enough to ride out a transient
+// upstream problem without turning a broken account into sustained load.
+const ScanMaxAttempts = 3
+
+func (w *ScanConcertsWorker) NextRetry(job *river.Job[ScanConcertsArgs]) time.Time {
+	// Linear-ish backoff: 1min, 5min. Scans are expensive; retrying one in
+	// a few seconds mostly re-runs work that hasn't had time to change.
+	delay := time.Duration(job.Attempt) * 4 * time.Minute
+	if delay < time.Minute {
+		delay = time.Minute
+	}
+	return time.Now().Add(delay)
 }
 
 // ScanBudget is the max time one scan job may run. Includes serialized MB
@@ -71,9 +92,6 @@ func (w *ScanConcertsWorker) Timeout(*river.Job[ScanConcertsArgs]) time.Duration
 func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcertsArgs]) error {
 	ctx, cancel := context.WithTimeout(ctx, ScanBudget)
 	defer cancel()
-	// Stash the user ID so ledger checks downstream can charge the right
-	// account (design §8.3). Every fresh TM/BIT/Songkick call reads this.
-	ctx = rate.NewContext(ctx, job.Args.UserID)
 
 	user, err := db.GetUserByID(ctx, w.Pool, job.Args.UserID)
 	if err != nil {
@@ -83,6 +101,19 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if err != nil {
 		return err
 	}
+
+	// Take out this scan's quota up front (design §8.3): one upsert per
+	// source instead of one per call, sized to the workload. Whatever we
+	// don't spend goes back at the end. Release uses a detached context so
+	// an expired scan budget can't leave the block charged.
+	reservations := w.Ledger.ReserveAll(ctx, user.ID, scanQuotaFor(len(artists)))
+	defer func() {
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer releaseCancel()
+		reservations.Release(releaseCtx)
+	}()
+	ctx = rate.NewContext(ctx, reservations)
+
 	loc := concerts.Location{
 		Latitude:    job.Args.Latitude,
 		Longitude:   job.Args.Longitude,
@@ -91,10 +122,24 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	deps := w.Deps()
 	deps.MinFallbackScore = w.MinFallbackScore
 
-	found, err := concerts.Search(ctx, deps, artists, loc)
-	if err != nil {
-		return err
+	// A non-nil error here still carries usable partial results; see
+	// concerts.IncompleteError.
+	found, searchErr := concerts.Search(ctx, deps, artists, loc)
+	var incomplete *concerts.IncompleteError
+	switch {
+	case searchErr == nil:
+	case errors.As(searchErr, &incomplete):
+		slog.Warn("scan_concerts incomplete",
+			"user", user.ID,
+			"skipped_artists", incomplete.SkippedArtists,
+			"total_artists", incomplete.TotalArtists,
+			"rate_capped", incomplete.RateCapped,
+			"found", len(found),
+		)
+	default:
+		return searchErr
 	}
+
 	// Normalized snapshots (migration 0012): upsert each concert into the
 	// shared `concerts` table, then persist only the array of dedup_keys
 	// on the user's snapshot row. Storage is now shared across users —
@@ -109,19 +154,38 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		rows[i] = db.ConcertRow{DedupKey: c.DedupKey, Data: body, EventDate: c.Date}
 		dedupKeys[i] = c.DedupKey
 	}
+	// Persist partial results too — a half-filled page beats an empty one —
+	// but record that they're partial so the SWR handler keeps treating the
+	// snapshot as stale instead of sitting on it for the full window.
 	if err := db.UpsertConcerts(ctx, w.Pool, rows); err != nil {
 		return err
+	}
+	// A quota-capped scan can't do better until the ledger's UTC day turns
+	// over, so record when it's worth trying again. Any other flavor of
+	// incompleteness (budget overrun) leaves this nil and retries freely.
+	var retryAfter *time.Time
+	if incomplete != nil && incomplete.RateCapped {
+		t := nextQuotaReset(time.Now())
+		retryAfter = &t
 	}
 	err = db.UpsertConcertSnapshot(ctx, w.Pool, db.ConcertSnapshot{
 		UserID:      user.ID,
 		LocationKey: LocationKey(loc),
 		DedupKeys:   dedupKeys,
 		ComputedAt:  time.Now(),
+		Complete:    incomplete == nil,
+		RetryAfter:  retryAfter,
 	})
 	if err != nil {
 		return err
 	}
-	slog.Info("scan_concerts done", "user", user.ID, "location", LocationKey(loc), "concerts", len(found))
+	slog.Info("scan_concerts done",
+		"user", user.ID,
+		"location", LocationKey(loc),
+		"concerts", len(found),
+		"complete", incomplete == nil,
+		"retry_after", retryAfter,
+	)
 
 	// Instant-notify hook. Only fires when the user opted in AND is
 	// subscribed to at least one artist that had a net-new concert. Errors
@@ -129,7 +193,43 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if w.River != nil && user.InstantNotifyOptIn && user.Email != "" {
 		w.enqueueInstantNotify(ctx, user, found)
 	}
+
+	// Surface incompleteness to river so the job retries (bounded by
+	// ScanMaxAttempts) rather than reporting success on a truncated scan.
+	// The snapshot above is already durable, so a retry only adds coverage.
+	//
+	// Exception: a purely quota-capped scan. Every retry before the UTC day
+	// rolls over is guaranteed to be capped identically, so retrying just
+	// burns worker slots to reproduce the same result. The snapshot carries
+	// complete=false and a retry_after, which is the durable record that
+	// work remains — river doesn't need to hold the job open too.
+	if incomplete != nil && !isOnlyRateCapped(incomplete) {
+		return searchErr
+	}
 	return nil
+}
+
+// isOnlyRateCapped reports whether quota exhaustion was the sole reason a
+// scan came up short. If artists were also skipped outright, time alone
+// won't fix it and the job should still retry.
+func isOnlyRateCapped(e *concerts.IncompleteError) bool {
+	return e.RateCapped && e.SkippedArtists == 0
+}
+
+// nextQuotaReset returns the instant the per-user daily ledger rolls to a
+// new day. Mirrors internal/rate's UTC day bucket — if that ever changes,
+// this has to move with it.
+func nextQuotaReset(now time.Time) time.Time {
+	u := now.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+}
+
+// scanQuotaFor sizes the per-source reservation for a scan. Each artist can
+// cost at most a resolution call plus an events call against a given source,
+// so 2x the artist count is a true upper bound; the reservation hands back
+// whatever cache hits mean we never spend.
+func scanQuotaFor(artists int) int {
+	return artists * 2
 }
 
 // enqueueInstantNotify picks the subset of just-computed concerts that
@@ -262,10 +362,18 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	if err != nil {
 		return err
 	}
-	// Build the candidate set: future-dated concerts only. First-ever digest
-	// also caps at 60 days out so we don't dump an entire tour year into
-	// one email. First-ever is detected by "no prior rows in
-	// user_digest_sent" — checked below via len(unsent) == len(candidates).
+	// First-ever digest caps at 60 days out so we don't dump an entire tour
+	// year into one email. Detected by an exact count of prior sends: the
+	// old "every candidate happens to be unsent" heuristic also fired for
+	// an established user who had just moved cities, silently withholding
+	// everything past the horizon from them.
+	priorSends, err := db.CountDigestSent(ctx, w.Pool, user.ID)
+	if err != nil {
+		return err
+	}
+	firstEver := priorSends == 0
+
+	// Build the candidate set: future-dated concerts only.
 	now := time.Now()
 	horizon := now.Add(60 * 24 * time.Hour)
 	candidateKeys := make([]string, 0, len(all))
@@ -282,9 +390,6 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	if err != nil {
 		return err
 	}
-	// If everything is unsent, this is the first-ever digest for this user;
-	// clip to the 60-day horizon.
-	firstEver := len(unsent) == len(candidateKeys)
 	fresh := make([]concerts.Concert, 0, len(unsent))
 	sendKeys := make([]string, 0, len(unsent))
 	for _, k := range candidateKeys { // preserve snapshot order
@@ -357,9 +462,14 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	// dedup_keys belong in this email. (Pre-normalization this fetched the
 	// snapshot then filtered client-side; the concerts table lookup is
 	// now the direct path.)
+	// Preserve the enqueued order rather than ranging over the map: Go
+	// randomizes map iteration, and AssembleByKey preserves whatever order
+	// it's handed, so this used to produce emails listing shows at random.
 	keys := make([]string, 0, len(unsent))
-	for k := range unsent {
-		keys = append(keys, k)
+	for _, k := range job.Args.DedupKeys {
+		if _, ok := unsent[k]; ok {
+			keys = append(keys, k)
+		}
 	}
 	blobs, err := db.GetConcertsByDedupKeys(ctx, w.Pool, keys)
 	if err != nil {
@@ -369,12 +479,19 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	if err != nil {
 		return err
 	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	// Soonest show first — the digest groups by month for the same reason.
+	sort.Slice(fresh, func(i, j int) bool {
+		if !fresh[i].Date.Equal(fresh[j].Date) {
+			return fresh[i].Date.Before(fresh[j].Date)
+		}
+		return fresh[i].Artist.Name < fresh[j].Artist.Name
+	})
 	sendKeys := make([]string, 0, len(fresh))
 	for _, c := range fresh {
 		sendKeys = append(sendKeys, c.DedupKey)
-	}
-	if len(fresh) == 0 {
-		return nil
 	}
 	// Record the send BEFORE hitting SMTP; same at-most-once trade-off as
 	// the daily digest.
@@ -408,7 +525,11 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		{"concert_cache", func(c context.Context) (int64, error) { return db.PruneConcertCache(c, w.Pool, 7) }},
 		{"past_concerts", func(c context.Context) (int64, error) { return db.PrunePastConcerts(c, w.Pool, 7) }},
 		{"oauth_handshakes", func(c context.Context) (int64, error) { return db.PruneExpiredHandshakes(c, w.Pool) }},
-		{"stale_snapshots", func(c context.Context) (int64, error) { return db.PruneStaleSnapshots(c, w.Pool, 30) }},
+		// Sessions were the one table with an expiry and no reaper. Both
+		// nightly fanout workers scan this table, so dead rows cost every
+		// night, forever.
+		{"expired_sessions", func(c context.Context) (int64, error) { return db.PruneExpiredSessions(c, w.Pool) }},
+		{"stale_snapshots", w.pruneStaleSnapshots},
 		{"old_digest_sent", func(c context.Context) (int64, error) { return db.PruneOldDigestSent(c, w.Pool, 180) }},
 	}
 	for _, s := range steps {
@@ -422,6 +543,31 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		}
 	}
 	return nil
+}
+
+// pruneStaleSnapshots drops snapshots for locations a user has moved away
+// from. The set of keys to preserve is built here, in Go, using the same
+// LocationKey formatter the scan worker writes with — the previous version
+// rebuilt the key in SQL with round(...)::text, a second implementation of
+// the format whose disagreement with the first would delete the snapshot a
+// user is actively looking at.
+func (w *JanitorWorker) pruneStaleSnapshots(ctx context.Context) (int64, error) {
+	locs, err := db.ListCurrentLocations(ctx, w.Pool)
+	if err != nil {
+		return 0, err
+	}
+	keep := make([]db.CurrentLocationKey, 0, len(locs))
+	for _, l := range locs {
+		keep = append(keep, db.CurrentLocationKey{
+			UserID: l.UserID,
+			LocationKey: LocationKey(concerts.Location{
+				Latitude:    l.Latitude,
+				Longitude:   l.Longitude,
+				RadiusMiles: l.RadiusMiles,
+			}),
+		})
+	}
+	return db.PruneStaleSnapshots(ctx, w.Pool, keep, 30)
 }
 
 // FanoutSendDigestWorker enqueues one SendDigestArgs per opted-in user with

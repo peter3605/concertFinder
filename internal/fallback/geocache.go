@@ -16,6 +16,10 @@ import (
 // instead of a map read.
 const venueHotCacheSize = 5000
 
+// nominatimMinRequestGap honors OSM Nominatim's 1 req/sec/IP policy, with a
+// small margin.
+const nominatimMinRequestGap = 1100 * time.Millisecond
+
 // VenueGeocoder turns a venue's city/state/country strings into lat/lng via
 // Nominatim, with a two-tier cache: in-memory (hot) over Postgres (warm).
 // Fallback sources (JSON-LD, Songkick occasionally) sometimes omit geo
@@ -40,7 +44,7 @@ func NewVenueGeocoder(g *geocoding.Client) *VenueGeocoder {
 	return &VenueGeocoder{
 		G:       g,
 		cache:   newLRU(venueHotCacheSize),
-		limiter: &rateLimiter{minGap: 1100 * time.Millisecond},
+		limiter: newRateLimiter(nominatimMinRequestGap),
 	}
 }
 

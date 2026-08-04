@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useDocumentTitle } from '@/lib/use-document-title';
 
 type SiteInfo = { contact_email: string; effective_date: string };
 
 export default function PrivacyPage() {
+  useDocumentTitle('Privacy');
   const [info, setInfo] = useState<SiteInfo>({ contact_email: '', effective_date: '' });
   useEffect(() => {
     fetch('/api/site-info')

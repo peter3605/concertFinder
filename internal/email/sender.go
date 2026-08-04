@@ -6,7 +6,6 @@ package email
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -125,8 +124,3 @@ func buildMIME(from string, m Message) []byte {
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return []byte(b.String())
 }
-
-// verifyTLS is unused today — kept as documentation of what a stricter
-// TLS-configured client would look like if we drop the smtp.SendMail
-// convenience wrapper.
-var _ = tls.VersionTLS12

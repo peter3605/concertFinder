@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,54 +18,13 @@ type handshake struct {
 	ExpiresAt time.Time
 }
 
-// HandshakeStore is the interface both the in-memory and DB-backed stores
-// satisfy. Multi-instance deploys need the DB variant.
+// HandshakeStore abstracts handshake persistence. Only the DB-backed
+// implementation below remains — an in-memory variant existed for
+// single-instance dev but was never wired up, and it would have broken the
+// moment /login and /callback landed on different replicas.
 type HandshakeStore interface {
 	Put(ctx context.Context, key, verifier, state string, ttl time.Duration) error
 	Take(ctx context.Context, key string) (*handshake, bool)
-}
-
-// --- In-memory implementation ---
-
-// MemHandshakeStore is a single-process TTL map. Fine for dev / single-instance.
-type MemHandshakeStore struct {
-	mu   sync.Mutex
-	data map[string]handshake
-}
-
-func NewMemHandshakeStore() *MemHandshakeStore {
-	return &MemHandshakeStore{data: map[string]handshake{}}
-}
-
-func (s *MemHandshakeStore) Put(_ context.Context, key, verifier, state string, ttl time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data[key] = handshake{Verifier: verifier, State: state, ExpiresAt: time.Now().Add(ttl)}
-	s.gcLocked()
-	return nil
-}
-
-func (s *MemHandshakeStore) Take(_ context.Context, key string) (*handshake, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	h, ok := s.data[key]
-	if !ok {
-		return nil, false
-	}
-	delete(s.data, key)
-	if time.Now().After(h.ExpiresAt) {
-		return nil, false
-	}
-	return &h, true
-}
-
-func (s *MemHandshakeStore) gcLocked() {
-	now := time.Now()
-	for k, v := range s.data {
-		if now.After(v.ExpiresAt) {
-			delete(s.data, k)
-		}
-	}
 }
 
 // --- DB-backed implementation ---
