@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,6 +48,14 @@ func FullUserFromContext(ctx context.Context) (db.User, bool) {
 	return u, ok
 }
 
+// SessionTouchInterval is how stale last_seen_at must get before we write
+// it again. The column feeds a 14-day "recently active" window in the
+// nightly fanout workers, so minute-level precision is worthless — but
+// writing it on every request meant the concerts page, which polls every
+// 10s, dirtied a row 6 times a minute per user. At that rate the write
+// amplification and autovacuum churn cost more than the signal is worth.
+const SessionTouchInterval = 15 * time.Minute
+
 // RequireUser is middleware that resolves cf_session → user and attaches it
 // to the request context. On miss, responds 401.
 func RequireUser(pool *pgxpool.Pool) func(http.Handler) http.Handler {
@@ -57,7 +66,9 @@ func RequireUser(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			sess, err := db.GetSessionByID(r.Context(), pool, c.Value)
+			// One round trip for session + user; both are needed on every
+			// authenticated request.
+			su, err := db.GetSessionUser(r.Context(), pool, c.Value)
 			if err != nil {
 				if errors.Is(err, db.ErrNoRows) {
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -66,13 +77,15 @@ func RequireUser(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				http.Error(w, "session lookup failed", http.StatusInternalServerError)
 				return
 			}
-			user, err := db.GetUserByID(r.Context(), pool, sess.UserID)
-			if err != nil {
-				http.Error(w, "user lookup failed", http.StatusInternalServerError)
-				return
+			sess, user := su.Session, su.User
+
+			// Best-effort, throttled touch; do not block on error. We
+			// already know last_seen_at from the join, so most requests
+			// skip the write entirely rather than issuing a conditional
+			// UPDATE that would round-trip anyway.
+			if time.Since(sess.LastSeenAt) > SessionTouchInterval {
+				_ = db.TouchSession(r.Context(), pool, sess.ID)
 			}
-			// Best-effort touch; do not block on error.
-			_ = db.TouchSession(r.Context(), pool, sess.ID)
 
 			ctx := withUser(r.Context(), CurrentUser{
 				ID:            user.ID,

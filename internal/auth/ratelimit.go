@@ -16,6 +16,7 @@ type IPRateLimit struct {
 	rate    float64       // tokens per second
 	burst   float64       // max bucket capacity
 	ttl     time.Duration // idle time before we drop an IP
+	nextGC  time.Time     // amortizes the sweep; see gcLocked
 }
 
 type bucket struct {
@@ -23,6 +24,11 @@ type bucket struct {
 	last     time.Time
 	lastSeen time.Time
 }
+
+// gcInterval bounds how often the idle-bucket sweep runs. The sweep is
+// O(tracked IPs) under the global mutex, so doing it on every request — as
+// this used to — puts a full map walk on the auth hot path.
+const gcInterval = time.Minute
 
 func NewIPRateLimit(perSecond, burst float64) *IPRateLimit {
 	return &IPRateLimit{
@@ -57,7 +63,14 @@ func (l *IPRateLimit) Allow(ip string) bool {
 	return true
 }
 
+// gcLocked drops buckets nobody has touched in ttl. Rate-limited to once
+// per gcInterval: entries live ttl anyway, so sweeping more often just
+// burns time holding the lock. Caller must hold l.mu.
 func (l *IPRateLimit) gcLocked(now time.Time) {
+	if now.Before(l.nextGC) {
+		return
+	}
+	l.nextGC = now.Add(gcInterval)
 	for ip, b := range l.buckets {
 		if now.Sub(b.lastSeen) > l.ttl {
 			delete(l.buckets, ip)

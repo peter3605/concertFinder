@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // RecentlyPlayed returns up to 50 recent plays (Spotify caps this endpoint).
@@ -24,8 +26,12 @@ func (c *Client) RecentlyPlayed(ctx context.Context, accessToken string) ([]Rece
 
 // TopArtists fetches the caller's top artists across all three time ranges.
 // Spotify caps this at 50 per range, so one request per range suffices.
+//
+// The three ranges are independent, so they run concurrently — every other
+// affinity source is already fanned out by HydrateSources, and three serial
+// round trips here were the longest pole left on that path.
 func (c *Client) TopArtists(ctx context.Context, accessToken string) (TopArtistsByRange, error) {
-	fetch := func(tr TimeRange) ([]TopArtist, error) {
+	fetch := func(ctx context.Context, tr TimeRange) ([]TopArtist, error) {
 		u := fmt.Sprintf("%s/me/top/artists?time_range=%s&limit=50", APIBase, tr)
 		body, err := c.doGETRetry(ctx, u, accessToken)
 		if err != nil {
@@ -40,15 +46,28 @@ func (c *Client) TopArtists(ctx context.Context, accessToken string) (TopArtists
 		return page.Items, nil
 	}
 	var out TopArtistsByRange
-	var err error
-	if out.Short, err = fetch(ShortTerm); err != nil {
-		return out, err
+	targets := []struct {
+		tr  TimeRange
+		dst *[]TopArtist
+	}{
+		{ShortTerm, &out.Short},
+		{MediumTerm, &out.Medium},
+		{LongTerm, &out.Long},
 	}
-	if out.Medium, err = fetch(MediumTerm); err != nil {
-		return out, err
+	g, gctx := errgroup.WithContext(ctx)
+	for _, t := range targets {
+		t := t
+		g.Go(func() error {
+			items, err := fetch(gctx, t.tr)
+			if err != nil {
+				return err
+			}
+			*t.dst = items
+			return nil
+		})
 	}
-	if out.Long, err = fetch(LongTerm); err != nil {
-		return out, err
+	if err := g.Wait(); err != nil {
+		return TopArtistsByRange{}, err
 	}
 	return out, nil
 }

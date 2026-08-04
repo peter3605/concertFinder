@@ -10,15 +10,82 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/peterho/concertfinder/internal/auth"
+	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
 )
 
-// SavedConcertsHandler serves POST/DELETE /me/saved-concerts.
-// Reads happen through GET /me/concerts (saved flag on each row) rather than
-// through a dedicated list endpoint — the client's already fetching concerts
-// and the frontend does the filtering, so a separate list would duplicate.
+// SavedConcertsHandler serves GET/POST/DELETE /me/saved-concerts.
+//
+// The list is read from user_saved_concerts joined to the shared concerts
+// table, NOT by filtering the user's snapshot. Reading it out of the
+// snapshot (the old `GET /me/concerts?saved_only=true` route) meant a save
+// only survived while its artist stayed in the affinity top-200; the next
+// recompute could drop the artist and the user's saved show would disappear
+// with no message and no way to get it back.
 type SavedConcertsHandler struct {
 	Pool *pgxpool.Pool
+	// FallbackLocation is echoed back when the user has no saved location,
+	// so the response shape matches /me/concerts.
+	FallbackLocation concerts.Location
+}
+
+// List returns the user's saved concerts, newest event first, with the same
+// response shape as /me/concerts so the frontend can reuse its renderer.
+func (h *SavedConcertsHandler) List(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	blobs, err := db.GetSavedConcerts(r.Context(), h.Pool, u.ID)
+	if err != nil {
+		slog.Error("saved concerts: load failed", "err", err, "user", u.ID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	saved, err := concerts.Assemble(blobs)
+	if err != nil {
+		slog.Error("saved concerts: assemble failed", "err", err, "user", u.ID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Everything here is saved by definition; tag it so the star renders
+	// filled without the client having to infer it.
+	for i := range saved {
+		saved[i].Saved = true
+	}
+	subscribed, err := db.GetSubscribedArtistIDs(r.Context(), h.Pool, u.ID)
+	if err != nil {
+		slog.Warn("saved concerts: subscribed lookup failed", "err", err, "user", u.ID)
+	}
+	for i := range saved {
+		if _, ok := subscribed[saved[i].Artist.ID]; ok {
+			saved[i].Subscribed = true
+		}
+	}
+
+	loc := h.FallbackLocation
+	if userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID); err == nil && hit {
+		loc = concerts.Location{
+			Latitude:    userLoc.Latitude,
+			Longitude:   userLoc.Longitude,
+			RadiusMiles: userLoc.RadiusMiles,
+		}
+	}
+
+	facets := computeFacets(saved)
+	filtered := concerts.Apply(saved, parseFilters(r, loc))
+
+	writeJSON(w, concertsResponse{
+		Location: loc,
+		Count:    len(filtered),
+		Concerts: filtered,
+		Facets:   facets,
+		// A saved list is never mid-refresh: it reflects the saves table
+		// directly rather than a snapshot that a background scan rebuilds.
+		Refreshing: false,
+		Complete:   true,
+	})
 }
 
 type saveRequest struct {

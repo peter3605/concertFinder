@@ -1,6 +1,10 @@
 package jobs
 
-import "github.com/google/uuid"
+import (
+	"github.com/google/uuid"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
+)
 
 // RefreshAffinityArgs recomputes one user's affinity profile out-of-band.
 type RefreshAffinityArgs struct {
@@ -32,6 +36,40 @@ type ScanConcertsArgs struct {
 }
 
 func (ScanConcertsArgs) Kind() string { return "scan_concerts" }
+
+// InsertOpts governs retries and, critically, concurrency for this job type.
+//
+// MaxAttempts: river's default is 25, which for an account that can never
+// scan successfully (a revoked Spotify grant, say) means two dozen full
+// 200-artist fan-outs.
+//
+// UniqueOpts: at most ONE scan per (user, location) may exist in any
+// non-final state. A time-window uniqueness (the previous ByPeriod: 30s)
+// does not do this — a scan takes ~60s, so the window lapsed while the job
+// was still running and a second scan started underneath it. The two then
+// starved each other: the first reserves the user's whole daily quota
+// block up front, so the second got zero permits, reported rate_capped,
+// and wrote complete=false over the first one's good snapshot. Observed
+// live as a concert list oscillating between 20 and 21 results with a
+// permanent "refreshing" spinner.
+//
+// Completed/cancelled/discarded are deliberately NOT in the state list:
+// once a scan finishes, a genuinely stale snapshot must be refreshable.
+func (ScanConcertsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: ScanMaxAttempts,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true, // per user + location
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
 
 // FanoutScanConcertsArgs is the periodic-tick counterpart. Its worker finds
 // active users with saved locations and enqueues one ScanConcertsArgs per user.

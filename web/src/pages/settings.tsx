@@ -8,8 +8,10 @@ import { Label } from '@/components/ui/label';
 import { mutatingFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { Me } from '@/lib/types';
+import { useDocumentTitle } from '@/lib/use-document-title';
 
 export default function SettingsPage() {
+  useDocumentTitle('Settings');
   const { auth, setMe } = useAuth();
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');

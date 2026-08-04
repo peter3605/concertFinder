@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -41,10 +43,20 @@ type concertsResponse struct {
 	Facets     facetSet           `json:"facets"`
 	ComputedAt *time.Time         `json:"computed_at,omitempty"`
 	Refreshing bool               `json:"refreshing"`
+	// Complete is false when the scan behind these results didn't cover
+	// every artist. Surfaced so the UI can distinguish "your area is quiet"
+	// from "we only got partway through" — otherwise a truncated feed is
+	// indistinguishable from a genuinely empty one.
+	Complete bool `json:"complete"`
+	// RetryAfter is set when the shortfall was the user's daily upstream
+	// quota, which only resets on the hour named here. Lets the UI say when
+	// more results are expected instead of implying an imminent refresh.
+	RetryAfter *time.Time `json:"retry_after,omitempty"`
 }
 
 type facetSet struct {
 	Genres []facet `json:"genres"`
+	Venues []facet `json:"venues"`
 }
 
 type facet struct {
@@ -59,27 +71,71 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loc := h.FallbackLocation
-	if userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID); err != nil {
-		slog.Warn("concerts: user location lookup failed", "err", err, "user", u.ID)
-	} else if hit {
-		loc = concerts.Location{
-			Latitude:    userLoc.Latitude,
-			Longitude:   userLoc.Longitude,
-			RadiusMiles: userLoc.RadiusMiles,
+	// The user's location, saved set, and subscribed set are three
+	// independent reads that the response needs before it can be built.
+	// Issuing them concurrently keeps this endpoint — which the frontend
+	// polls every 10s during a refresh — from paying for them serially.
+	var (
+		loc        = h.FallbackLocation
+		saved      map[string]struct{}
+		subscribed map[string]struct{}
+	)
+	var pre sync.WaitGroup
+	pre.Add(3)
+	go func() {
+		defer pre.Done()
+		userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID)
+		if err != nil {
+			slog.Warn("concerts: user location lookup failed", "err", err, "user", u.ID)
+			return
 		}
-	}
+		if hit {
+			loc = concerts.Location{
+				Latitude:    userLoc.Latitude,
+				Longitude:   userLoc.Longitude,
+				RadiusMiles: userLoc.RadiusMiles,
+			}
+		}
+	}()
+	go func() {
+		defer pre.Done()
+		s, err := db.GetSavedDedupKeys(r.Context(), h.Pool, u.ID)
+		if err != nil {
+			slog.Warn("concerts: saved lookup failed", "err", err, "user", u.ID)
+			return
+		}
+		saved = s
+	}()
+	go func() {
+		defer pre.Done()
+		s, err := db.GetSubscribedArtistIDs(r.Context(), h.Pool, u.ID)
+		if err != nil {
+			slog.Warn("concerts: subscribed lookup failed", "err", err, "user", u.ID)
+			return
+		}
+		subscribed = s
+	}()
+	pre.Wait()
+
 	locKey := jobs.LocationKey(loc)
 
 	var (
 		found      []concerts.Concert
 		computedAt *time.Time
 		hasSnap    bool
+		// complete is false when the scan behind this snapshot didn't
+		// cover every artist; such a snapshot is always treated as stale.
+		complete bool
+		// retryAfter, when set, is the earliest time a re-scan could do
+		// any better (the user's daily upstream quota resets then).
+		retryAfter *time.Time
 	)
 	if snap, hit, err := db.GetConcertSnapshot(r.Context(), h.Pool, u.ID, locKey); err != nil {
 		slog.Warn("concerts: snapshot read failed", "err", err, "user", u.ID)
 	} else if hit {
 		hasSnap = true
+		complete = snap.Complete
+		retryAfter = snap.RetryAfter
 		t := snap.ComputedAt
 		computedAt = &t
 		// Cache lookup keyed on (user, location, computed_at). A new scan
@@ -107,10 +163,22 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// SWR: enqueue a background scan when the snapshot is missing or older
-	// than the staleness window. River's uniqueness guarantees we don't pile
-	// up duplicate jobs if the user refreshes rapidly.
-	stale := !hasSnap || (computedAt != nil && time.Since(*computedAt) > h.SnapshotStaleAfter)
+	// SWR: enqueue a background scan when the snapshot is missing, older
+	// than the staleness window, or known to be partial. River's uniqueness
+	// (declared on ScanConcertsArgs) guarantees we don't pile up duplicate
+	// jobs if the user refreshes rapidly.
+	stale := !hasSnap ||
+		!complete ||
+		(computedAt != nil && time.Since(*computedAt) > h.SnapshotStaleAfter)
+
+	// ...unless the last scan told us to wait. A quota-capped scan stays
+	// incomplete — and therefore permanently "stale" — until the daily
+	// ledger resets, so without this the 10s poll loop re-enqueues a scan
+	// that cannot succeed, every 10s, for the rest of the day.
+	if retryAfter != nil && time.Now().Before(*retryAfter) {
+		stale = false
+	}
+
 	refreshing := false
 	if stale && h.River != nil {
 		args := jobs.ScanConcertsArgs{
@@ -119,13 +187,10 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			Longitude:   loc.Longitude,
 			RadiusMiles: loc.RadiusMiles,
 		}
-		opts := &river.InsertOpts{
-			UniqueOpts: river.UniqueOpts{
-				ByArgs:   true,
-				ByPeriod: 30 * time.Second, // collapse a burst of refreshes
-			},
-		}
-		if _, err := h.River.Insert(r.Context(), args, opts); err != nil {
+		// Uniqueness is declared on ScanConcertsArgs.InsertOpts: one scan in
+		// flight per (user, location). Supplying opts here would override
+		// that and reopen the concurrent-scan starvation this fixed.
+		if _, err := h.River.Insert(r.Context(), args, nil); err != nil {
 			slog.Warn("concerts: scan enqueue failed", "err", err, "user", u.ID)
 		} else {
 			refreshing = true
@@ -137,15 +202,8 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	filtered := concerts.Apply(found, filters)
 
 	// Overlay per-user saved + subscribed status. Both sets are small
-	// (bounded by user's own picks) so a single read + O(n) tag is fine.
-	saved, err := db.GetSavedDedupKeys(r.Context(), h.Pool, u.ID)
-	if err != nil {
-		slog.Warn("concerts: saved lookup failed", "err", err, "user", u.ID)
-	}
-	subscribed, err := db.GetSubscribedArtistIDs(r.Context(), h.Pool, u.ID)
-	if err != nil {
-		slog.Warn("concerts: subscribed lookup failed", "err", err, "user", u.ID)
-	}
+	// (bounded by the user's own picks) so an O(n) tag is fine; they were
+	// read concurrently above.
 	for i := range filtered {
 		if _, ok := saved[filtered[i].DedupKey]; ok {
 			filtered[i].Saved = true
@@ -171,12 +229,16 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		Facets:     facets,
 		ComputedAt: computedAt,
 		Refreshing: refreshing,
+		// A missing snapshot isn't "incomplete", it's "not built yet" —
+		// that's what Refreshing communicates.
+		Complete:   !hasSnap || complete,
+		RetryAfter: retryAfter,
 	})
 }
 
 func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
 	q := r.URL.Query()
-	f := concerts.Filters{Genre: q.Get("genre"), Origin: origin}
+	f := concerts.Filters{Genre: q.Get("genre"), Venue: q.Get("venue"), Origin: origin}
 	if v := q.Get("date_from"); v != "" {
 		if t, err := time.Parse("2006-01-02", v); err == nil {
 			f.DateFrom = t
@@ -205,6 +267,13 @@ func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
 
 func computeFacets(cs []concerts.Concert) facetSet {
 	genreCounts := map[string]int{}
+	// Venues are bucketed by their normalized form — the same key
+	// concerts.Apply filters on — so a room that two sources spell
+	// differently ("9:30 CLUB" / "9:30 Club") is one facet with one honest
+	// count. spellings tracks the raw variants so we can show a real name
+	// rather than the normalized slug.
+	venueCounts := map[string]int{}
+	spellings := map[string]map[string]int{}
 	for _, c := range cs {
 		seen := map[string]bool{}
 		for _, g := range c.Artist.Genres {
@@ -214,16 +283,51 @@ func computeFacets(cs []concerts.Concert) facetSet {
 			seen[g] = true
 			genreCounts[g]++
 		}
+		if raw := strings.TrimSpace(c.Venue); raw != "" {
+			key := concerts.Normalize(raw)
+			venueCounts[key]++
+			if spellings[key] == nil {
+				spellings[key] = map[string]int{}
+			}
+			spellings[key][raw]++
+		}
 	}
+
 	genres := make([]facet, 0, len(genreCounts))
 	for g, n := range genreCounts {
 		genres = append(genres, facet{Value: g, Count: n})
 	}
-	sort.Slice(genres, func(i, j int) bool {
-		if genres[i].Count != genres[j].Count {
-			return genres[i].Count > genres[j].Count
+	sortFacets(genres)
+
+	venues := make([]facet, 0, len(venueCounts))
+	for key, n := range venueCounts {
+		venues = append(venues, facet{Value: pickSpelling(spellings[key]), Count: n})
+	}
+	sortFacets(venues)
+
+	return facetSet{Genres: genres, Venues: venues}
+}
+
+// sortFacets orders by descending count, then value, so the list is stable
+// across requests with identical data.
+func sortFacets(f []facet) {
+	sort.Slice(f, func(i, j int) bool {
+		if f[i].Count != f[j].Count {
+			return f[i].Count > f[j].Count
 		}
-		return genres[i].Value < genres[j].Value
+		return f[i].Value < f[j].Value
 	})
-	return facetSet{Genres: genres}
+}
+
+// pickSpelling chooses the display name for a venue bucket: the most common
+// raw spelling, ties broken alphabetically so the label doesn't flicker
+// between requests.
+func pickSpelling(variants map[string]int) string {
+	best, bestN := "", -1
+	for raw, n := range variants {
+		if n > bestN || (n == bestN && raw < best) {
+			best, bestN = raw, n
+		}
+	}
+	return best
 }

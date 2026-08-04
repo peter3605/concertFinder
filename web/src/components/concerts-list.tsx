@@ -22,9 +22,15 @@ export function ConcertsList({
 }: Props) {
   const isFirstTime = data.count === 0 && !data.computed_at && data.refreshing;
   const isEmpty = data.count === 0 && data.computed_at;
+  // A partial scan and a genuinely quiet area produce the same short list;
+  // say which one this is rather than letting the user assume the worst.
+  const isPartial = data.complete === false && !data.refreshing;
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <div
+        className="flex items-center gap-2 text-sm text-muted-foreground"
+        aria-live="polite"
+      >
         <span>
           {data.count} show{data.count === 1 ? '' : 's'}
         </span>
@@ -37,6 +43,15 @@ export function ConcertsList({
           </span>
         )}
       </div>
+
+      {isPartial && (
+        <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
+          This is a partial list — we didn&rsquo;t finish checking every artist.
+          {data.retry_after
+            ? ` More shows should appear after ${formatRetry(data.retry_after)}.`
+            : ' More shows should appear on the next refresh.'}
+        </p>
+      )}
 
       {isFirstTime && (
         <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
@@ -73,11 +88,24 @@ export function ConcertsList({
   );
 }
 
+// Renders the quota-reset instant as a local time the user can act on
+// ("after 8:00 PM") rather than an opaque UTC timestamp.
+function formatRetry(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'the next refresh';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${time}`;
+}
+
+// Group by the month the show falls in *locally*. ConcertCard renders each
+// date with the browser's timezone, so bucketing by UTC month put a show at
+// e.g. 2026-09-01T00:30Z under "September" while its card read "Aug 31".
 function groupByMonth(concerts: Concert[]) {
   const groups = new Map<string, Concert[]>();
   for (const c of concerts) {
     const d = new Date(c.date);
-    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(c);
   }
@@ -85,10 +113,9 @@ function groupByMonth(concerts: Concert[]) {
     .sort()
     .map((key) => {
       const [year, month] = key.split('-').map(Number);
-      const label = new Date(Date.UTC(year, month - 1, 1)).toLocaleString(undefined, {
+      const label = new Date(year, month - 1, 1).toLocaleString(undefined, {
         month: 'long',
         year: 'numeric',
-        timeZone: 'UTC',
       });
       return { key, label, items: groups.get(key)! };
     });

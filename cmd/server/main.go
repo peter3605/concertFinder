@@ -147,7 +147,20 @@ func main() {
 			"tm_daily", cfg.RateCapTMPerUserDaily,
 			"bit_daily", cfg.RateCapBITPerUserDaily,
 			"songkick_daily", cfg.RateCapSongkickPerUserDaily,
+			"max_artists_per_scan", spotify.MaxScoredArtists,
 		)
+		// A cap below the artist count means a user can never cover their own
+		// profile: every scan runs out of quota partway and reports itself
+		// incomplete. Worth saying out loud rather than leaving to be
+		// rediscovered from a thin concert list.
+		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < spotify.MaxScoredArtists {
+			logger.Warn("TM per-user daily cap is below the per-scan artist count; scans will be capped short",
+				"cap", cfg.RateCapTMPerUserDaily, "artists", spotify.MaxScoredArtists)
+		}
+		if cfg.RateCapBITPerUserDaily > 0 && cfg.RateCapBITPerUserDaily < spotify.MaxScoredArtists {
+			logger.Warn("BIT per-user daily cap is below the per-scan artist count; scans will be capped short",
+				"cap", cfg.RateCapBITPerUserDaily, "artists", spotify.MaxScoredArtists)
+		}
 
 		var fallbackChain concerts.Fallbacker
 		if cfg.Phase2Enabled {
@@ -159,18 +172,23 @@ func main() {
 				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
 			}
 			fallbackChain = &fallback.Chain{
-				Pool:       pool,
-				Fetcher:    fallback.NewFetcher(pool),
-				Resolver:   resolver,
-				Songkick:   fallback.NewSongkickClient(cfg.SongkickAPIKey),
-				VenueGeo:   fallback.NewVenueGeocoder(geocoder).WithPool(pool),
-				RateLedger: rateLedger,
+				Pool:     pool,
+				Fetcher:  fallback.NewFetcher(pool),
+				Resolver: resolver,
+				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				VenueGeo: fallback.NewVenueGeocoder(geocoder).WithPool(pool),
+			}
+			budget := time.Duration(cfg.Phase2FallbackBudgetSeconds) * time.Second
+			if budget == 0 {
+				budget = concerts.DefaultFallbackBudget
 			}
 			logger.Info("phase 2 fallbacks enabled",
 				"min_score", cfg.Phase2MinScore,
 				"url_resolver", fmt.Sprintf("%T", resolver),
 				"songkick_key_set", cfg.SongkickAPIKey != "",
 				"venue_geocoder", "nominatim",
+				"fallback_budget", budget,
+				"fallback_concurrency", cfg.Phase2FallbackConcurrency,
 			)
 		}
 
@@ -189,15 +207,31 @@ func main() {
 		// Factory returning a fresh SearchDeps for each scan job. TM/BIT/
 		// fallback are all safe to share across concurrent jobs (their
 		// internal state is either read-only config or independently locked).
+		// Per-user quota is not wired here: the scan worker reserves it and
+		// puts it on the context (see internal/rate).
+		// Upstream response cache lifetime. Long enough that the SWR refresh
+		// loop is served from cache between quota-spending scans.
+		cacheTTL := concerts.DefaultCacheTTL
+		if cfg.ConcertCacheTTLHours > 0 {
+			cacheTTL = time.Duration(cfg.ConcertCacheTTLHours) * time.Hour
+		}
+		fallbackBudget := time.Duration(cfg.Phase2FallbackBudgetSeconds) * time.Second
+		// ONE gate for the whole process. The fallback's resolvers share a
+		// single 1 req/sec turnstile each, so concurrent scans would divide
+		// that throughput while each still believing it had a full budget.
+		// Constructed here, outside the closure, so every scan contends for
+		// the same slot — a per-scan gate would be a no-op.
+		fallbackGate := concerts.NewFallbackGate(cfg.Phase2FallbackConcurrency)
 		searchDeps := func() concerts.SearchDeps {
 			return concerts.SearchDeps{
-				Pool:        pool,
-				TM:          tmClient,
-				BIT:         bitClient,
-				CacheTTL:    4 * time.Hour,
-				Parallelism: 10,
-				Fallback:    fallbackChain,
-				RateLedger:  rateLedger,
+				Pool:           pool,
+				TM:             tmClient,
+				BIT:            bitClient,
+				CacheTTL:       cacheTTL,
+				Parallelism:    10,
+				Fallback:       fallbackChain,
+				FallbackBudget: fallbackBudget,
+				FallbackGate:   fallbackGate,
 			}
 		}
 
@@ -225,6 +259,7 @@ func main() {
 			Affinity:         affinitySvc,
 			Deps:             searchDeps,
 			MinFallbackScore: cfg.Phase2MinScore,
+			Ledger:           rateLedger,
 			// River back-reference wired after client construction (below).
 		}
 		river.AddWorker(workers, scanWorker)
@@ -297,8 +332,8 @@ func main() {
 			// per active user per location.
 			SnapshotCache: webhttp.NewSnapshotCache(200),
 		}
-		savedH = &webhttp.SavedConcertsHandler{Pool: pool}
-		accountH = &webhttp.AccountHandler{Pool: pool}
+		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
+		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc}
 		subscribedH = &webhttp.SubscribedArtistsHandler{
 			Pool:    pool,
 			Spotify: spotifyClient,
@@ -319,9 +354,9 @@ func main() {
 				Longitude:   loc.Longitude,
 				RadiusMiles: loc.RadiusMiles,
 			}
-			if _, err := riverClient.Insert(context.Background(), args, &river.InsertOpts{
-				UniqueOpts: river.UniqueOpts{ByArgs: true, ByPeriod: 30 * time.Second},
-			}); err != nil {
+			// Uniqueness comes from ScanConcertsArgs.InsertOpts (one scan in
+			// flight per user+location); passing opts here would override it.
+			if _, err := riverClient.Insert(context.Background(), args, nil); err != nil {
 				logger.Warn("prewarm scan enqueue failed", "err", err, "user", userID)
 			}
 		}
@@ -381,6 +416,7 @@ func main() {
 			r.Get("/concerts", concertsH.Get)
 			r.Get("/location", locationH.Get)
 			r.Put("/location", locationH.Put)
+			r.Get("/saved-concerts", savedH.List)
 			r.Post("/saved-concerts", savedH.Post)
 			r.Delete("/saved-concerts/{dedupKey}", savedH.Delete)
 			r.Get("/subscribed-artists", subscribedH.List)
@@ -404,9 +440,16 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           r,
+		Addr:    cfg.ListenAddr,
+		Handler: r,
+		// Bound every phase of a connection, not just the header read — a
+		// slow or stalled client must not be able to hold one open
+		// indefinitely. WriteTimeout is generous because /me/concerts can
+		// serialize a few thousand concerts on a cold cache.
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
 		logger.Info("server listening", "addr", cfg.ListenAddr)

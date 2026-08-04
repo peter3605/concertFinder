@@ -2,18 +2,23 @@ import { useEffect, useState } from 'react';
 import { FilterBar } from '@/components/filter-bar';
 import { ConcertsList } from '@/components/concerts-list';
 import { LocationBar } from '@/components/location-bar';
+import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
-import type { FiltersState, Location } from '@/lib/types';
+import { useDocumentTitle } from '@/lib/use-document-title';
+import { EMPTY_FILTERS, type FiltersState, type Location } from '@/lib/types';
 
 export default function ConcertsPage() {
-  const [filters, setFilters] = useState<FiltersState>({
-    genre: '',
-    dateFrom: '',
-    dateTo: '',
-    weekday: 'all',
-  });
+  useDocumentTitle('Concerts');
+  const [filters, setFilters] = useState<FiltersState>(EMPTY_FILTERS);
   const [location, setLocation] = useState<Location | null>(null);
-  const { state, toggleSaved, toggleSubscribed } = useConcerts(filters);
+  // Bumped when the user saves a new location. The concerts request has no
+  // location parameter — the server reads it from the user's saved row — so
+  // the URL is unchanged and only an explicit token can trigger the refetch.
+  const [locationVersion, setLocationVersion] = useState(0);
+  const { state, toggleSaved, toggleSubscribed, actionError, dismissActionError } = useConcerts(
+    filters,
+    { reloadToken: locationVersion },
+  );
 
   // Location is fetched independently so the LocationBar can render even
   // if concerts are still loading.
@@ -24,6 +29,11 @@ export default function ConcertsPage() {
       .catch(() => setLocation(null));
   }, []);
 
+  function onLocationSaved(loc: Location) {
+    setLocation(loc);
+    setLocationVersion((v) => v + 1);
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -32,9 +42,15 @@ export default function ConcertsPage() {
           Built from your Spotify listening. Refreshed daily.
         </p>
       </div>
-      {location && <LocationBar location={location} onSaved={setLocation} />}
+      {location && <LocationBar location={location} onSaved={onLocationSaved} />}
+      <ActionError message={actionError} onDismiss={dismissActionError} />
       {state.kind === 'loaded' && (
-        <FilterBar filters={filters} facets={state.data.facets.genres} onChange={setFilters} />
+        <FilterBar
+          filters={filters}
+          facets={state.data.facets.genres}
+          venueFacets={state.data.facets.venues}
+          onChange={setFilters}
+        />
       )}
       {state.kind === 'loading' && <div className="text-sm text-muted-foreground">Loading…</div>}
       {state.kind === 'error' && (

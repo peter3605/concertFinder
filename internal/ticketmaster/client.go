@@ -69,15 +69,22 @@ func (c *Client) doGETRetry(ctx context.Context, url string) ([]byte, int, error
 		case resp.StatusCode/100 == 2:
 			return body, resp.StatusCode, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
-			d := retryAfter(resp.Header.Get("Retry-After"))
-			if d == 0 || d > maxRetryAfter {
-				if !sleepBackoff(ctx, attempt) {
-					return nil, resp.StatusCode, fmt.Errorf("tm 429: retries exhausted")
-				}
-			} else if !sleepFor(ctx, d) {
-				return nil, resp.StatusCode, ctx.Err()
-			}
 			lastErr = fmt.Errorf("tm 429")
+			// Honor Retry-After, clamped to maxRetryAfter — clamping
+			// shortens the wait toward 30s, it does not discard it. See
+			// spotify/http.go for why the previous form was wrong.
+			if d := retryAfter(resp.Header.Get("Retry-After")); d > 0 {
+				if d > maxRetryAfter {
+					d = maxRetryAfter
+				}
+				if !sleepFor(ctx, d) {
+					return nil, resp.StatusCode, ctx.Err()
+				}
+				continue
+			}
+			if !sleepBackoff(ctx, attempt) {
+				return nil, resp.StatusCode, fmt.Errorf("tm 429: retries exhausted")
+			}
 			continue
 		case resp.StatusCode/100 == 5:
 			lastErr = fmt.Errorf("tm %d", resp.StatusCode)

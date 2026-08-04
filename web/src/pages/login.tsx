@@ -1,10 +1,12 @@
 import { Music2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useDocumentTitle } from '@/lib/use-document-title';
 
 // Landing page for anonymous users. Explains what the app is + a single
 // prominent CTA to start the Spotify OAuth flow.
 export default function LoginPage() {
+  useDocumentTitle('Log in');
   return (
     <div className="mx-auto mt-16 max-w-md">
       <Card>

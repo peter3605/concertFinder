@@ -25,10 +25,23 @@ type Config struct {
 	UserRadiusMiles     int
 
 	// Phase 2 fallback chain (design §5.4). Off by default.
-	Phase2Enabled      bool
-	Phase2MinScore     float64
-	BraveSearchAPIKey  string
-	SongkickAPIKey     string
+	Phase2Enabled     bool
+	Phase2MinScore    float64
+	BraveSearchAPIKey string
+	SongkickAPIKey    string
+	// Phase2FallbackBudgetSeconds caps total fallback wall-clock per scan.
+	// The chain's lookups are globally serialized at 1 req/sec, so without
+	// a cap they can consume an entire ScanBudget on a cold profile and
+	// starve the TM/BIT fan-out that produces most results. 0 = package
+	// default (60s); negative disables the fallback outright.
+	Phase2FallbackBudgetSeconds int
+	// Phase2FallbackConcurrency is how many scans may use the fallback
+	// chain at once, process-wide. The budget above is per-scan wall-clock
+	// but the resolvers behind it share one 1 req/sec turnstile each, so
+	// letting every scan in divides that throughput without reducing anyone's
+	// budget — coverage silently thins as users are added. 1 matches the
+	// turnstiles; <= 0 removes the limit.
+	Phase2FallbackConcurrency int
 
 	// SWR staleness threshold for user_concert_snapshots. When a request
 	// finds a snapshot older than this, it enqueues a background refresh
@@ -36,12 +49,28 @@ type Config struct {
 	SnapshotStaleAfterHours int
 
 	// Per-user daily caps on outbound API calls (design §8.3). 0 disables
-	// enforcement for that source. Chosen so a single heavy user can't
-	// exhaust the shared upstream quota: TM account-wide is 5000/day; with
-	// 100/user daily we support ~50 active users before hitting the ceiling.
+	// enforcement for that source.
+	//
+	// These must be sized against spotify.MaxScoredArtists (200), not picked
+	// for the shared-account ceiling alone. A scan needs roughly one call per
+	// artist per source once the concert cache lapses; the previous TM cap of
+	// 100 was below that, so a single user could never cover their own
+	// profile in a day and every scan reported itself incomplete. 250 covers
+	// 200 artists plus resolution calls and leaves headroom.
+	//
+	// The trade-off is real: TM's account-wide budget is 5000/day, so 250
+	// per user supports ~20 concurrently active users rather than ~50. With
+	// DefaultCacheTTL at 12h a user costs far less than their cap on a
+	// typical day, but the ceiling is worth revisiting before onboarding a
+	// crowd — the ledger enforces per-user limits, not the account total.
 	RateCapTMPerUserDaily       int
 	RateCapBITPerUserDaily      int
 	RateCapSongkickPerUserDaily int
+
+	// ConcertCacheTTLHours is how long cached per-artist upstream responses
+	// stay trusted. 0 = package default (12h). Longer means fewer quota-
+	// spending scans; shorter means fresher listings.
+	ConcertCacheTTLHours int
 
 	// Email digest (design §10.3, Phase 3). SMTP config; when empty the
 	// sender runs in "log" mode and writes messages to slog instead.
@@ -103,14 +132,28 @@ func Load() (*Config, error) {
 	}
 	c.BraveSearchAPIKey = os.Getenv("BRAVE_SEARCH_API_KEY")
 	c.SongkickAPIKey = os.Getenv("SONGKICK_API_KEY")
+	// Not intEnv: that clamps negatives to the default, and negative is a
+	// meaningful value here ("skip the fallback entirely").
+	if v, err := strconv.Atoi(os.Getenv("PHASE2_FALLBACK_BUDGET_SECONDS")); err == nil {
+		c.Phase2FallbackBudgetSeconds = v
+	}
+	// Same reasoning: 0 and negative both mean "no admission limit", which
+	// intEnv would swallow.
+	c.Phase2FallbackConcurrency = 1
+	if v, err := strconv.Atoi(os.Getenv("PHASE2_FALLBACK_CONCURRENCY")); err == nil {
+		c.Phase2FallbackConcurrency = v
+	}
 	if h, err := strconv.Atoi(os.Getenv("SNAPSHOT_STALE_AFTER_HOURS")); err == nil && h > 0 {
 		c.SnapshotStaleAfterHours = h
 	} else {
 		c.SnapshotStaleAfterHours = 6
 	}
-	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 100)
-	c.RateCapBITPerUserDaily = intEnv("RATE_CAP_BIT_PER_USER_DAILY", 200)
-	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 50)
+	// Defaults sized so one full scan of a 200-artist profile fits inside a
+	// day's allowance for each source; see the field comments.
+	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
+	c.RateCapBITPerUserDaily = intEnv("RATE_CAP_BIT_PER_USER_DAILY", 250)
+	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 100)
+	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 
 	c.EmailDeliveryMode = strings.ToLower(strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_MODE")))
 	if c.EmailDeliveryMode == "" {

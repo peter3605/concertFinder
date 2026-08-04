@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,7 +62,7 @@ func NewMusicBrainzClient(userAgent string) *MusicBrainzClient {
 	return &MusicBrainzClient{
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
 		UserAgent: userAgent,
-		limiter:   &rateLimiter{minGap: mbMinRequestGap},
+		limiter:   newRateLimiter(mbMinRequestGap),
 		cache:     newLRU(mbHotCacheSize),
 	}
 }
@@ -261,22 +260,43 @@ func mbSleepBackoff(ctx context.Context, attempt int, retryAfter string) bool {
 }
 
 // rateLimiter enforces a minimum gap between consecutive requests. Enough for
-// MusicBrainz's 1 req/sec limit; not accurate enough for high-throughput use.
+// MusicBrainz's and Nominatim's 1 req/sec limits; not accurate enough for
+// high-throughput use.
+//
+// The turnstile is a capacity-1 channel rather than a sync.Mutex because
+// acquisition has to be cancellable. With a mutex, a scan fanning out over
+// 200 artists piles every goroutine onto one lock that each holder pins for
+// ~1.1s; a latecomer blocks for minutes inside an *uninterruptible*
+// Lock(), which the scan's context deadline cannot reach. That's how a scan
+// with a 5-minute budget was observed running for 978s. Selecting on the
+// channel lets a cancelled scan abandon the queue immediately.
 type rateLimiter struct {
-	mu      sync.Mutex
-	lastReq time.Time
-	minGap  time.Duration
+	turnstile chan struct{} // capacity 1; guards lastReq and the inter-request gap
+	lastReq   time.Time     // only touched while holding the turnstile
+	minGap    time.Duration
+}
+
+func newRateLimiter(minGap time.Duration) *rateLimiter {
+	return &rateLimiter{turnstile: make(chan struct{}, 1), minGap: minGap}
 }
 
 func (r *rateLimiter) Wait(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	select {
+	case r.turnstile <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-r.turnstile }()
+
 	if wait := r.minGap - time.Since(r.lastReq); wait > 0 {
 		t := time.NewTimer(wait)
 		defer t.Stop()
 		select {
 		case <-t.C:
 		case <-ctx.Done():
+			// Deliberately leave lastReq alone: we never issued a request,
+			// so the next caller's gap should still be measured from the
+			// last one that actually went out.
 			return ctx.Err()
 		}
 	}

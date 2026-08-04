@@ -4,7 +4,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { ActionError } from '@/components/action-error';
 import { mutatingFetch } from '@/lib/api';
+import { useDocumentTitle } from '@/lib/use-document-title';
 
 // Full-fledged subscribe/search page. Any Spotify artist (touring or not)
 // can be followed here; the bell on concert cards is the shortcut for
@@ -15,11 +17,15 @@ type SubscribedArtist = { id: string; name: string };
 const SEARCH_DEBOUNCE_MS = 300;
 
 export default function SubscribePage() {
+  useDocumentTitle('Subscriptions');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchArtist[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState('');
   const [subs, setSubs] = useState<SubscribedArtist[]>([]);
+  // Subscribe/unsubscribe are optimistic; without a message a rollback
+  // looks like the button undoing itself for no reason.
+  const [actionErr, setActionErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generation = useRef(0);
@@ -71,6 +77,7 @@ export default function SubscribePage() {
   const subscribedIDs = new Set(subs.map((s) => s.id));
 
   async function subscribe(a: SearchArtist) {
+    setActionErr(null);
     const prev = subs;
     setSubs([...subs, { id: a.id, name: a.name }].sort(byName));
     const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(a.id)}`, {
@@ -78,16 +85,24 @@ export default function SubscribePage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ display_name: a.name }),
     });
-    if (!r.ok) setSubs(prev);
+    if (!r.ok) {
+      setSubs(prev);
+      setActionErr(`Couldn't subscribe to ${a.name}. Try again.`);
+    }
   }
 
   async function unsubscribe(artistID: string) {
+    setActionErr(null);
     const prev = subs;
+    const name = subs.find((s) => s.id === artistID)?.name ?? 'that artist';
     setSubs(subs.filter((s) => s.id !== artistID));
     const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(artistID)}`, {
       method: 'DELETE',
     });
-    if (!r.ok) setSubs(prev);
+    if (!r.ok) {
+      setSubs(prev);
+      setActionErr(`Couldn't unsubscribe from ${name}. Try again.`);
+    }
   }
 
   return (
@@ -101,6 +116,8 @@ export default function SubscribePage() {
           Settings).
         </p>
       </div>
+
+      <ActionError message={actionErr} onDismiss={() => setActionErr(null)} />
 
       <Card>
         <CardContent className="p-4">
@@ -173,6 +190,11 @@ export default function SubscribePage() {
                 );
               })}
             </ul>
+          )}
+          {results.length > 0 && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Artist results powered by Spotify
+            </p>
           )}
         </CardContent>
       </Card>

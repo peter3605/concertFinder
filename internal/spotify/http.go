@@ -55,17 +55,25 @@ func (c *Client) doGETRetry(ctx context.Context, url, accessToken string) ([]byt
 		case resp.StatusCode/100 == 2:
 			return body, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
-			d := retryAfter(resp.Header.Get("Retry-After"))
-			if d == 0 || d > maxRetryAfter {
-				if !sleepBackoff(ctx, attempt) {
-					return nil, fmt.Errorf("429 after backoff exhausted")
+			lastErr = fmt.Errorf("spotify 429")
+			// Honor Retry-After, clamped to maxRetryAfter. Clamping must
+			// shorten the wait toward 30s, never collapse it to the
+			// sub-second backoff: an upstream asking for 120s used to fall
+			// into the `d > maxRetryAfter` branch and get retried in ~100ms,
+			// which is the fastest way to turn a soft limit into a ban.
+			if d := retryAfter(resp.Header.Get("Retry-After")); d > 0 {
+				if d > maxRetryAfter {
+					d = maxRetryAfter
 				}
-			} else {
 				if !sleepFor(ctx, d) {
 					return nil, ctx.Err()
 				}
+				continue
 			}
-			lastErr = fmt.Errorf("spotify 429")
+			// No usable Retry-After — fall back to exponential backoff.
+			if !sleepBackoff(ctx, attempt) {
+				return nil, lastErr
+			}
 			continue
 		case resp.StatusCode/100 == 5:
 			lastErr = fmt.Errorf("spotify %d: %s", resp.StatusCode, truncate(body))

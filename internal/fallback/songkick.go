@@ -41,6 +41,13 @@ func NewSongkickClient(apiKey string) *SongkickClient {
 	return &SongkickClient{HTTP: &http.Client{Timeout: 10 * time.Second}, APIKey: apiKey}
 }
 
+// Enabled reports whether this client can actually reach Songkick. Callers
+// check it before spending per-user quota: without a key every request
+// returns ErrNoAPIKey, and charging for those burns the daily allowance on
+// calls that never leave the process — which then reads downstream as a
+// genuine rate cap.
+func (c *SongkickClient) Enabled() bool { return c != nil && c.APIKey != "" }
+
 type songkickArtistSearchResp struct {
 	ResultsPage struct {
 		Results struct {
@@ -198,24 +205,33 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 		case resp.StatusCode/100 == 2:
 			return body, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
+			lastErr = fmt.Errorf("songkick 429")
 			d := time.Duration(0)
 			if raw := resp.Header.Get("Retry-After"); raw != "" {
 				if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
 					d = time.Duration(secs) * time.Second
 				}
 			}
-			if d == 0 || d > songkickMaxRetryAfter {
-				if !songkickBackoff(ctx, attempt) {
-					return nil, fmt.Errorf("songkick 429: retries exhausted")
+			// Honor Retry-After, clamped to songkickMaxRetryAfter — clamping
+			// shortens the wait toward 30s, it does not discard it. See
+			// spotify/http.go for why the previous form was wrong.
+			if d > 0 {
+				if d > songkickMaxRetryAfter {
+					d = songkickMaxRetryAfter
 				}
-			} else {
+				t := time.NewTimer(d)
 				select {
-				case <-time.After(d):
+				case <-t.C:
 				case <-ctx.Done():
+					t.Stop()
 					return nil, ctx.Err()
 				}
+				t.Stop()
+				continue
 			}
-			lastErr = fmt.Errorf("songkick 429")
+			if !songkickBackoff(ctx, attempt) {
+				return nil, fmt.Errorf("songkick 429: retries exhausted")
+			}
 			continue
 		case resp.StatusCode/100 == 5:
 			lastErr = fmt.Errorf("songkick %d", resp.StatusCode)
