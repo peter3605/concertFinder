@@ -17,6 +17,14 @@ func atVenue(name, venue string, day int) concerts.Concert {
 	}
 }
 
+// clickThrough is what the user actually sees after clicking a facet: the
+// filtered concerts, grouped into the event cards the list renders. Facet
+// counts are asserted against this rather than against the raw concert
+// count, because one card can hold several of the user's artists.
+func clickThrough(cs []concerts.Concert, f concerts.Filters) int {
+	return len(concerts.GroupEvents(concerts.Apply(cs, f)))
+}
+
 // The invariant that matters for any facet: the number on the chip has to
 // equal the number of results you get when you click it. Genre facets got
 // this wrong once by counting exact tags while filtering on substrings.
@@ -35,10 +43,10 @@ func TestVenueFacetCountsMatchWhatFilteringReturns(t *testing.T) {
 			len(facets.Venues), facets.Venues)
 	}
 	for _, f := range facets.Venues {
-		got := concerts.Apply(cs, concerts.Filters{Venue: f.Value})
-		if len(got) != f.Count {
+		got := clickThrough(cs, concerts.Filters{Venue: f.Value})
+		if got != f.Count {
 			t.Errorf("venue %q: facet says %d, filtering returns %d",
-				f.Value, f.Count, len(got))
+				f.Value, f.Count, got)
 		}
 	}
 }
@@ -104,10 +112,32 @@ func TestGenreFacetCountsMatchWhatFilteringReturns(t *testing.T) {
 	}
 	facets := computeFacets(cs)
 	for _, f := range facets.Genres {
-		got := concerts.Apply(cs, concerts.Filters{Genre: f.Value})
-		if len(got) != f.Count {
+		got := clickThrough(cs, concerts.Filters{Genre: f.Value})
+		if got != f.Count {
 			t.Errorf("genre %q: facet says %d, filtering returns %d",
-				f.Value, f.Count, len(got))
+				f.Value, f.Count, got)
+		}
+	}
+}
+
+// A and C share a bill, so "rock" is one card holding two of the user's
+// artists — not two cards. Counting concerts here would promise twice the
+// results the click delivers, which is the same class of bug as the old
+// substring genre match.
+func TestGenreFacetCountsEventsNotArtists(t *testing.T) {
+	mk := func(name string, genres ...string) concerts.Concert {
+		c := atVenue(name, "Union Stage", 1)
+		c.Artist.Genres = genres
+		return c
+	}
+	cs := []concerts.Concert{
+		mk("A", "rock"),
+		mk("B", "post-rock"),
+		mk("C", "rock", "jazz"),
+	}
+	for _, f := range computeFacets(cs).Genres {
+		if f.Value == "rock" && f.Count != 1 {
+			t.Errorf("two artists on one bill is one rock card, got %d", f.Count)
 		}
 	}
 }

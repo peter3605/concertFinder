@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { mutatingFetch } from '@/lib/api';
-import type { ConcertsResponse, FiltersState } from '@/lib/types';
+import type { Act, ConcertsResponse, FiltersState } from '@/lib/types';
 
 type State =
   | { kind: 'loading' }
@@ -158,24 +158,29 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
   // Optimistic mutators — flip local state instantly, let the caller do the
   // network call. If it fails, caller can pass a rollback via the same
   // functions.
+  // Both mutators reach into an event's acts, since saves and subscriptions
+  // are per artist even though the artists share a card. patchAct rewrites
+  // the one act the user clicked; patchArtistSubscription rewrites that
+  // artist everywhere, because subscribing is a property of the artist and
+  // they may appear on several bills in the same list.
+  function patchActs(
+    prev: State,
+    match: (act: Act) => boolean,
+    patch: Partial<{ saved: boolean; subscribed: boolean }>,
+  ): State {
+    if (prev.kind !== 'loaded') return prev;
+    const events = prev.data.events.map((e) =>
+      e.acts.some(match) ? { ...e, acts: e.acts.map((a) => (match(a) ? { ...a, ...patch } : a)) } : e,
+    );
+    return { kind: 'loaded', data: { ...prev.data, events } };
+  }
+
   function patchConcert(dedupKey: string, patch: Partial<{ saved: boolean; subscribed: boolean }>) {
-    setState((prev) => {
-      if (prev.kind !== 'loaded') return prev;
-      const next = prev.data.concerts.map((c) =>
-        c.dedup_key === dedupKey ? { ...c, ...patch } : c,
-      );
-      return { kind: 'loaded', data: { ...prev.data, concerts: next } };
-    });
+    setState((prev) => patchActs(prev, (a) => a.dedup_key === dedupKey, patch));
   }
 
   function patchArtistSubscription(artistID: string, subscribed: boolean) {
-    setState((prev) => {
-      if (prev.kind !== 'loaded') return prev;
-      const next = prev.data.concerts.map((c) =>
-        c.artist.id === artistID ? { ...c, subscribed } : c,
-      );
-      return { kind: 'loaded', data: { ...prev.data, concerts: next } };
-    });
+    setState((prev) => patchActs(prev, (a) => a.artist.id === artistID, { subscribed }));
   }
 
   async function toggleSaved(dedupKey: string, currentlySaved: boolean) {

@@ -25,6 +25,33 @@ export type Concert = {
   subscribed?: boolean;
 };
 
+// One of the user's artists on a bill. Saving and subscribing stay per
+// artist even though the artists share a card, so each act keeps the
+// dedup_key that save/unsave posts back.
+export type Act = {
+  artist: Artist;
+  dedup_key: string;
+  saved?: boolean;
+  subscribed?: boolean;
+};
+
+// One show, carrying every artist from the user's profile playing it. A
+// festival the user matched six artists at is a single Event — previously
+// it was six Concert rows filling most of a screen for one night out.
+export type Event = {
+  event_key: string;
+  // Earliest act's set time; acts within a festival start at different
+  // times, so this is for sorting and month grouping, not a claim about
+  // when a particular act plays.
+  date: string;
+  venue: string;
+  city: string;
+  state?: string;
+  country?: string;
+  acts: Act[];
+  links: TicketLink[];
+};
+
 export type Location = {
   latitude: number;
   longitude: number;
@@ -36,8 +63,10 @@ export type Facet = { value: string; count: number };
 
 export type ConcertsResponse = {
   location: Location;
+  // Number of events — one per card. Not a count of artist matches, which
+  // would report a festival as six.
   count: number;
-  concerts: Concert[];
+  events: Event[];
   facets: { genres: Facet[]; venues: Facet[] };
   computed_at?: string;
   refreshing: boolean;

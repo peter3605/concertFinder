@@ -28,7 +28,7 @@ export default function SavedPage() {
         </p>
       </div>
       <ActionError message={actionError} onDismiss={dismissActionError} />
-      {state.kind === 'loaded' && state.data.concerts.length > 0 && (
+      {state.kind === 'loaded' && state.data.events.length > 0 && (
         <FilterBar
           filters={filters}
           facets={state.data.facets.genres}

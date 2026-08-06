@@ -1,7 +1,7 @@
 import { RefreshCw } from 'lucide-react';
-import { ConcertCard } from '@/components/concert-card';
+import { EventCard } from '@/components/event-card';
 import { timeAgo } from '@/lib/api';
-import type { Concert, ConcertsResponse } from '@/lib/types';
+import type { Event, ConcertsResponse } from '@/lib/types';
 
 // Shared list rendering used by both the Concerts page and the Saved page.
 // Handles the header meta line, empty states, and the month grouping.
@@ -65,20 +65,18 @@ export function ConcertsList({
         </p>
       )}
 
-      {groupByMonth(data.concerts).map((g) => (
+      {groupByMonth(data.events).map((g) => (
         <section key={g.key}>
           <h2 className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
             {g.label}
           </h2>
           <div className="grid gap-3">
-            {g.items.map((c) => (
-              <ConcertCard
-                key={c.dedup_key}
-                concert={c}
+            {g.items.map((e) => (
+              <EventCard
+                key={e.event_key}
+                event={e}
                 onToggleSave={onToggleSave}
-                onToggleSubscribe={(artistID, currentlySubscribed) =>
-                  onToggleSubscribe(artistID, c.artist.name, currentlySubscribed)
-                }
+                onToggleSubscribe={onToggleSubscribe}
               />
             ))}
           </div>
@@ -98,12 +96,12 @@ function formatRetry(iso: string): string {
   return sameDay ? time : `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${time}`;
 }
 
-// Group by the month the show falls in *locally*. ConcertCard renders each
+// Group by the month the show falls in *locally*. EventCard renders each
 // date with the browser's timezone, so bucketing by UTC month put a show at
 // e.g. 2026-09-01T00:30Z under "September" while its card read "Aug 31".
-function groupByMonth(concerts: Concert[]) {
-  const groups = new Map<string, Concert[]>();
-  for (const c of concerts) {
+function groupByMonth(events: Event[]) {
+  const groups = new Map<string, Event[]>();
+  for (const c of events) {
     const d = new Date(c.date);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     if (!groups.has(key)) groups.set(key, []);

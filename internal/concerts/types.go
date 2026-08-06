@@ -34,6 +34,45 @@ type ArtistRef struct {
 	Genres []string `json:"genres,omitempty"`
 }
 
+// Act is one of the user's artists appearing at an Event. It keeps the
+// artist's own DedupKey, because saves and subscriptions stay keyed per
+// artist even after the artists are grouped onto one card — see Event.
+type Act struct {
+	Artist   ArtistRef `json:"artist"`
+	DedupKey string    `json:"dedup_key"`
+	// Saved and Subscribed are per-user, per-request tags applied by the
+	// HTTP handler, mirroring the fields they replace on Concert.
+	Saved      bool `json:"saved,omitempty"`
+	Subscribed bool `json:"subscribed,omitempty"`
+}
+
+// Event is one show — a single (date, venue, city) — carrying every artist
+// from the user's profile playing it. Festivals and bills where the user
+// matched the headliner and the opener used to emit one Concert row per
+// artist, so a single festival could fill most of a screen with what is
+// really one thing the user can attend once.
+//
+// Grouping happens here, at assembly time, and deliberately NOT in
+// DedupKey: concerts.dedup_key is the primary key of the `concerts` table
+// and half of user_saved_concerts' primary key, so folding the artist out
+// of it would orphan every existing save and erase the per-artist rows the
+// subscribe control and genre facets are built on.
+type Event struct {
+	EventKey string `json:"event_key"`
+	// Date is the earliest act's start time. Acts at one festival have
+	// their own set times, so this is a representative instant for sorting
+	// and month-grouping, not a claim about when any given act plays.
+	Date      time.Time    `json:"date"`
+	Venue     string       `json:"venue"`
+	City      string       `json:"city"`
+	State     string       `json:"state,omitempty"`
+	Country   string       `json:"country,omitempty"`
+	Latitude  float64      `json:"latitude,omitempty"`
+	Longitude float64      `json:"longitude,omitempty"`
+	Acts      []Act        `json:"acts"`
+	Links     []TicketLink `json:"links"`
+}
+
 // Concert is the canonical shape returned to the frontend. One row per
 // deduped (artist, date, venue, city).
 type Concert struct {
