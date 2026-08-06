@@ -37,12 +37,14 @@ type ConcertsHandler struct {
 }
 
 type concertsResponse struct {
-	Location   concerts.Location  `json:"location"`
-	Count      int                `json:"count"`
-	Concerts   []concerts.Concert `json:"concerts"`
-	Facets     facetSet           `json:"facets"`
-	ComputedAt *time.Time         `json:"computed_at,omitempty"`
-	Refreshing bool               `json:"refreshing"`
+	Location concerts.Location `json:"location"`
+	// Count is a number of events, matching one card each — not a number of
+	// artist matches, which would overcount every festival.
+	Count      int              `json:"count"`
+	Events     []concerts.Event `json:"events"`
+	Facets     facetSet         `json:"facets"`
+	ComputedAt *time.Time       `json:"computed_at,omitempty"`
+	Refreshing bool             `json:"refreshing"`
 	// Complete is false when the scan behind these results didn't cover
 	// every artist. Surfaced so the UI can distinguish "your area is quiet"
 	// from "we only got partway through" — otherwise a truncated feed is
@@ -222,10 +224,15 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		filtered = kept
 	}
 
+	// Group last, after filtering and tagging: an act carries its own saved
+	// and subscribed flags onto the card, and an event survives a filter if
+	// any of its acts does.
+	events := concerts.GroupEvents(filtered)
+
 	writeJSON(w, concertsResponse{
 		Location:   loc,
-		Count:      len(filtered),
-		Concerts:   filtered,
+		Count:      len(events),
+		Events:     events,
 		Facets:     facets,
 		ComputedAt: computedAt,
 		Refreshing: refreshing,
@@ -265,27 +272,33 @@ func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
 	return f
 }
 
+// computeFacets counts *events*, not concerts. The list renders one card
+// per event, so a genre pill has to count the cards that clicking it
+// leaves behind: a festival where the user matched six rock acts is one
+// rock card, not six. Each bucket therefore collects distinct event keys
+// and reports how many it holds.
 func computeFacets(cs []concerts.Concert) facetSet {
-	genreCounts := map[string]int{}
+	genreEvents := map[string]map[string]struct{}{}
 	// Venues are bucketed by their normalized form — the same key
 	// concerts.Apply filters on — so a room that two sources spell
 	// differently ("9:30 CLUB" / "9:30 Club") is one facet with one honest
 	// count. spellings tracks the raw variants so we can show a real name
 	// rather than the normalized slug.
-	venueCounts := map[string]int{}
+	venueEvents := map[string]map[string]struct{}{}
 	spellings := map[string]map[string]int{}
 	for _, c := range cs {
+		ek := concerts.EventKey(c.Date, c.Venue, c.City)
 		seen := map[string]bool{}
 		for _, g := range c.Artist.Genres {
 			if seen[g] {
 				continue
 			}
 			seen[g] = true
-			genreCounts[g]++
+			addEvent(genreEvents, g, ek)
 		}
 		if raw := strings.TrimSpace(c.Venue); raw != "" {
 			key := concerts.Normalize(raw)
-			venueCounts[key]++
+			addEvent(venueEvents, key, ek)
 			if spellings[key] == nil {
 				spellings[key] = map[string]int{}
 			}
@@ -293,19 +306,26 @@ func computeFacets(cs []concerts.Concert) facetSet {
 		}
 	}
 
-	genres := make([]facet, 0, len(genreCounts))
-	for g, n := range genreCounts {
-		genres = append(genres, facet{Value: g, Count: n})
+	genres := make([]facet, 0, len(genreEvents))
+	for g, evs := range genreEvents {
+		genres = append(genres, facet{Value: g, Count: len(evs)})
 	}
 	sortFacets(genres)
 
-	venues := make([]facet, 0, len(venueCounts))
-	for key, n := range venueCounts {
-		venues = append(venues, facet{Value: pickSpelling(spellings[key]), Count: n})
+	venues := make([]facet, 0, len(venueEvents))
+	for key, evs := range venueEvents {
+		venues = append(venues, facet{Value: pickSpelling(spellings[key]), Count: len(evs)})
 	}
 	sortFacets(venues)
 
 	return facetSet{Genres: genres, Venues: venues}
+}
+
+func addEvent(buckets map[string]map[string]struct{}, bucket, eventKey string) {
+	if buckets[bucket] == nil {
+		buckets[bucket] = map[string]struct{}{}
+	}
+	buckets[bucket][eventKey] = struct{}{}
 }
 
 // sortFacets orders by descending count, then value, so the list is stable

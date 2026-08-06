@@ -181,6 +181,50 @@ normalize = lowercase → strip_punctuation → strip leading "the "/"a "/"an " 
 
 Records sharing a key merge into one canonical event with multiple ticket links sorted by source priority: artist's official site → Ticketmaster/Live Nation → Bandsintown (tracking params preserved) → Songkick/other.
 
+## Event grouping (multi-artist bills)
+
+Dedup collapses *sources*; grouping collapses *artists*. A festival where
+the user's profile matched six artists is six `Concert` rows with the same
+date, venue, and city — one night out rendered as most of a screen. The
+`/me/concerts` and `/me/saved-concerts` responses therefore return
+`events[]`, not `concerts[]`: `concerts.GroupEvents` folds rows sharing
+
+```
+event_key = sha256(iso_date(dt) + normalize(venue) + normalize(city))
+```
+
+into one `Event` carrying an `Acts[]` list, with ticket links unioned and
+deduped by URL.
+
+- **Grouping happens at assembly time, never in `DedupKey`.** `dedup_key`
+  is the primary key of the `concerts` table and half of
+  `user_saved_concerts`' primary key, so folding the artist out of it would
+  orphan every existing save and erase the per-artist rows the subscribe
+  control and genre facets are built on. Storage stays one row per
+  (artist, date, venue, city).
+- **Saves and subscriptions stay per artist.** Each `Act` carries its own
+  `dedup_key`, `saved`, and `subscribed`, and the card renders one
+  star + bell pair per act. Subscribing patches that artist across *every*
+  event in the list, since an artist can appear on several bills.
+- **`event_key` is day-granular on purpose.** Acts at one festival have
+  different set times, so keying on the full timestamp would split exactly
+  the bills this exists to merge. The cost is that a venue string naming a
+  multi-room complex merges genuinely separate shows on the same night;
+  that is the accepted trade, because the alternative loses every festival.
+- **Facets and `count` are counts of events, not artist matches.** The
+  facet invariant ("a facet's count must equal what clicking it returns")
+  is now measured against the grouped list — `computeFacets` collects
+  distinct event keys per bucket, and `internal/http/facets_test.go`
+  asserts `len(GroupEvents(Apply(...)))`. Counting concerts here would
+  promise twice the cards a click delivers, the same class of bug as the
+  old substring genre match.
+- Grouping runs *after* filtering and after the saved/subscribed overlay,
+  so an event survives a filter if any of its acts does.
+
+Not yet grouped: the email digest and instant-notify renderers
+(`internal/email/digest.go`) still emit one line per concert, so a festival
+mails as six rows and the subject counts six.
+
 ## Required Environment Variables (Appendix A)
 
 Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `BANDSINTOWN_APP_ID`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`.

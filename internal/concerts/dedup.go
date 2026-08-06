@@ -68,6 +68,23 @@ func DedupKey(artistName string, date time.Time, venue, city string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// EventKey identifies a show independent of who is playing it: the same
+// composite as DedupKey with the artist left out. Two of the user's artists
+// on the same night at the same room are one thing to attend.
+//
+// The date is truncated to a UTC day for the same reason DedupKey does it —
+// and note that a finer grain would defeat the purpose here, since acts at
+// one festival have different set times. The cost is that a venue string
+// naming a multi-room complex merges genuinely separate shows; that is
+// accepted, because the alternative loses every festival.
+func EventKey(date time.Time, venue, city string) string {
+	h := sha256.New()
+	h.Write([]byte(date.UTC().Format("2006-01-02")))
+	h.Write([]byte(Normalize(venue)))
+	h.Write([]byte(Normalize(city)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // SortLinks sorts a link slice in-place by source priority, then URL.
 func SortLinks(links []TicketLink) {
 	sort.SliceStable(links, func(i, j int) bool {

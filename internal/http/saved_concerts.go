@@ -75,11 +75,16 @@ func (h *SavedConcertsHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	facets := computeFacets(saved)
 	filtered := concerts.Apply(saved, parseFilters(r, loc))
+	// Grouped the same way as /me/concerts. Saving two acts on one bill
+	// yields one card here too, with both stars filled — otherwise the same
+	// festival looks like six separate saves the user has to unsave one by
+	// one.
+	events := concerts.GroupEvents(filtered)
 
 	writeJSON(w, concertsResponse{
 		Location: loc,
-		Count:    len(filtered),
-		Concerts: filtered,
+		Count:    len(events),
+		Events:   events,
 		Facets:   facets,
 		// A saved list is never mid-refresh: it reflects the saves table
 		// directly rather than a snapshot that a background scan rebuilds.
