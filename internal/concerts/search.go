@@ -97,7 +97,19 @@ const DefaultCacheTTL = 12 * time.Hour
 // DefaultFallbackBudget is the fallback's share of a scan when unset. Sized
 // well under ScanBudget so Ticketmaster — the source that produces most
 // results — always finishes.
-const DefaultFallbackBudget = 60 * time.Second
+//
+// Raised from 60s after Bandsintown was removed. At 60s a measured 200-artist
+// scan logged "fallback budget exhausted" with artists_not_escalated=34: a
+// sixth of the profile got no secondary lookup at all. That was tolerable
+// while BIT was a second primary and the fallback was a third chance; with
+// Ticketmaster as the only primary it means those artists are simply absent
+// from the feed, and silently — budget exhaustion is deliberately not counted
+// as incompleteness, so the scan still reports complete.
+//
+// 120s buys ~54 more lookups at the resolvers' 1.1s turnstile. The scan that
+// produced that measurement ran 2 minutes against a 5-minute ScanBudget, so
+// the extra minute fits with room left for the TM fan-out.
+const DefaultFallbackBudget = 120 * time.Second
 
 // FallbackAdmissionWait is how long a scan will wait for the process-wide
 // fallback slot before giving up on the fallback for this run. Short on
