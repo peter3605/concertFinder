@@ -10,20 +10,49 @@ import (
 
 // --- MusicBrainz URL cache ---
 
-// GetMBURL returns (url, true, nil) on a cached row (empty string means MB
-// was asked and had no homepage), or ("", false, nil) if the artist has
-// never been looked up.
-func GetMBURL(ctx context.Context, pool *pgxpool.Pool, artistKey string) (string, bool, error) {
-	const q = `SELECT official_url FROM mb_url_cache WHERE artist_key = $1`
+// NegativeMBURLTTL is how long a "MusicBrainz has no homepage for this
+// artist" record stays trusted. Positive resolutions never expire — an
+// artist's official site is stable, and re-fetching it would spend the
+// 1 req/sec turnstile for nothing.
+//
+// Negatives have to expire, for the same reason concerts.NegativeResolutionTTL
+// exists on the Ticketmaster side: MusicBrainz is a user-edited database and
+// URL relationships are added to it continuously, so "no homepage" is a
+// statement about today, not about the artist. Cached permanently it became a
+// silent permanent exclusion from the fallback chain — no error, no log, the
+// artist just never appears. That matters more now that the fallback is the
+// only secondary source.
+const NegativeMBURLTTL = 30 * 24 * time.Hour
+
+// GetMBURL returns (url, resolvedAt, true, nil) on a cached row (empty URL
+// means MB was asked and had no homepage), or ("", zero, false, nil) if the
+// artist has never been looked up or its negative record has aged out.
+//
+// resolvedAt is returned so the caller's in-memory hot layer can apply the
+// same expiry. Without it, promoting a negative into that cache would restart
+// its clock and the row could outlive NegativeMBURLTTL by up to another full
+// TTL.
+func GetMBURL(ctx context.Context, pool *pgxpool.Pool, artistKey string) (string, time.Time, bool, error) {
+	// Positive rows always count as a hit regardless of age; negatives
+	// expire. Mirrors GetVenueGeo — the cutoff is computed here rather than
+	// assembled from string fragments in SQL, which is what broke the
+	// janitor's interval predicates.
+	const q = `
+SELECT official_url, resolved_at
+FROM mb_url_cache
+WHERE artist_key = $1
+  AND (official_url <> '' OR resolved_at > $2)
+`
 	var url string
-	err := pool.QueryRow(ctx, q, artistKey).Scan(&url)
+	var resolvedAt time.Time
+	err := pool.QueryRow(ctx, q, artistKey, time.Now().Add(-NegativeMBURLTTL)).Scan(&url, &resolvedAt)
 	if err != nil {
 		if errors.Is(err, ErrNoRows) {
-			return "", false, nil
+			return "", time.Time{}, false, nil
 		}
-		return "", false, err
+		return "", time.Time{}, false, err
 	}
-	return url, true, nil
+	return url, resolvedAt, true, nil
 }
 
 // SaveMBURL upserts. Empty URL is a valid record — the "MB tried and found

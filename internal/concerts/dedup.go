@@ -88,7 +88,7 @@ func EventKey(date time.Time, venue, city string) string {
 // SortLinks sorts a link slice in-place by source priority, then URL.
 func SortLinks(links []TicketLink) {
 	sort.SliceStable(links, func(i, j int) bool {
-		pi, pj := sourcePriority[links[i].Source], sourcePriority[links[j].Source]
+		pi, pj := priorityOf(links[i].Source), priorityOf(links[j].Source)
 		if pi != pj {
 			return pi < pj
 		}

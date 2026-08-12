@@ -9,12 +9,9 @@ import (
 )
 
 func TestCapsLookup(t *testing.T) {
-	c := Caps{Ticketmaster: 100, Bandsintown: 200, Songkick: 50}
+	c := Caps{Ticketmaster: 100, Songkick: 50}
 	if c.Cap(SourceTicketmaster) != 100 {
 		t.Errorf("TM cap wrong")
-	}
-	if c.Cap(SourceBandsintown) != 200 {
-		t.Errorf("BIT cap wrong")
 	}
 	if c.Cap(SourceSongkick) != 50 {
 		t.Errorf("Songkick cap wrong")
@@ -73,7 +70,7 @@ func TestReservationFullySpentButNoDenialIsNotExhausted(t *testing.T) {
 	// whole block while still covering everything. Reporting that as
 	// exhausted marked complete scans incomplete, which the SWR handler
 	// read as permanently stale — an endless re-enqueue loop, seen live
-	// with a 200-artist profile against the 200/day Bandsintown cap.
+	// with a 200-artist profile against a 200/day cap.
 	r := &Reservation{granted: 200}
 	for i := 0; i < 200; i++ {
 		if !r.Take() {
@@ -148,7 +145,6 @@ func TestAllowWithoutReservationsAllows(t *testing.T) {
 func TestReservationsAnyExhausted(t *testing.T) {
 	rs := &Reservations{blocks: map[Source]*Reservation{
 		SourceTicketmaster: {granted: 1},
-		SourceBandsintown:  {unlimited: true},
 		SourceSongkick:     {unlimited: true},
 	}}
 	if rs.AnyExhausted() {
@@ -162,7 +158,7 @@ func TestReservationsAnyExhausted(t *testing.T) {
 	if !rs.AnyExhausted() {
 		t.Error("a denied take should surface via AnyExhausted")
 	}
-	if !rs.Take(SourceBandsintown) {
+	if !rs.Take(SourceSongkick) {
 		t.Error("unlimited source should still allow after another source capped")
 	}
 }

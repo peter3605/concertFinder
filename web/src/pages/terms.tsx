@@ -40,8 +40,8 @@ export default function TermsPage() {
 
       <h2>External providers</h2>
       <p>
-        Ticket-purchase links go to third parties (Ticketmaster, Bandsintown,
-        Songkick, or an artist's official site). Those providers set prices,
+        Ticket-purchase links go to third parties (Ticketmaster, Songkick, or
+        an artist's official site). Those providers set prices,
         availability, and their own terms; issues with a purchase are
         between you and them.
       </p>

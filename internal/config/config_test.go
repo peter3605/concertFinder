@@ -14,7 +14,6 @@ func loadDefaults(t *testing.T) *Config {
 	t.Helper()
 	for _, k := range []string{
 		"RATE_CAP_TM_PER_USER_DAILY",
-		"RATE_CAP_BIT_PER_USER_DAILY",
 		"RATE_CAP_SONGKICK_PER_USER_DAILY",
 		"CONCERT_CACHE_TTL_HOURS",
 		"PHASE2_FALLBACK_BUDGET_SECONDS",
@@ -46,7 +45,6 @@ func TestDailyCapsCoverAFullScan(t *testing.T) {
 		cap  int
 	}{
 		{"ticketmaster", cfg.RateCapTMPerUserDaily},
-		{"bandsintown", cfg.RateCapBITPerUserDaily},
 	} {
 		if c.cap > 0 && c.cap < spotify.MaxScoredArtists {
 			t.Errorf("%s daily cap %d is below MaxScoredArtists (%d): a single "+

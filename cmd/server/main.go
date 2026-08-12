@@ -22,7 +22,6 @@ import (
 
 	"github.com/peterho/concertfinder/internal/affinity"
 	"github.com/peterho/concertfinder/internal/auth"
-	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
 	"github.com/peterho/concertfinder/internal/db"
@@ -126,7 +125,6 @@ func main() {
 		}
 		ticketHTTP := &http.Client{Timeout: 10 * time.Second}
 		tmClient := ticketmaster.NewClient(ticketHTTP, cfg.TicketmasterAPIKey)
-		bitClient := bandsintown.NewClient(ticketHTTP, cfg.BandsintownAppID)
 
 		affinityH = &webhttp.AffinityHandler{Service: affinitySvc}
 
@@ -139,13 +137,11 @@ func main() {
 			Pool: pool,
 			Caps: rate.Caps{
 				Ticketmaster: cfg.RateCapTMPerUserDaily,
-				Bandsintown:  cfg.RateCapBITPerUserDaily,
 				Songkick:     cfg.RateCapSongkickPerUserDaily,
 			},
 		}
 		logger.Info("rate ledger enabled",
 			"tm_daily", cfg.RateCapTMPerUserDaily,
-			"bit_daily", cfg.RateCapBITPerUserDaily,
 			"songkick_daily", cfg.RateCapSongkickPerUserDaily,
 			"max_artists_per_scan", spotify.MaxScoredArtists,
 		)
@@ -156,10 +152,6 @@ func main() {
 		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < spotify.MaxScoredArtists {
 			logger.Warn("TM per-user daily cap is below the per-scan artist count; scans will be capped short",
 				"cap", cfg.RateCapTMPerUserDaily, "artists", spotify.MaxScoredArtists)
-		}
-		if cfg.RateCapBITPerUserDaily > 0 && cfg.RateCapBITPerUserDaily < spotify.MaxScoredArtists {
-			logger.Warn("BIT per-user daily cap is below the per-scan artist count; scans will be capped short",
-				"cap", cfg.RateCapBITPerUserDaily, "artists", spotify.MaxScoredArtists)
 		}
 
 		var fallbackChain concerts.Fallbacker
@@ -204,7 +196,7 @@ func main() {
 			FallbackLocation: fallbackLoc,
 		}
 
-		// Factory returning a fresh SearchDeps for each scan job. TM/BIT/
+		// Factory returning a fresh SearchDeps for each scan job. TM +
 		// fallback are all safe to share across concurrent jobs (their
 		// internal state is either read-only config or independently locked).
 		// Per-user quota is not wired here: the scan worker reserves it and
@@ -226,7 +218,6 @@ func main() {
 			return concerts.SearchDeps{
 				Pool:           pool,
 				TM:             tmClient,
-				BIT:            bitClient,
 				CacheTTL:       cacheTTL,
 				Parallelism:    10,
 				Fallback:       fallbackChain,

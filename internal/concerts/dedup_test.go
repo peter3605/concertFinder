@@ -107,3 +107,23 @@ func TestMerger_SortByDateThenName(t *testing.T) {
 		t.Errorf("wrong order: %+v", got)
 	}
 }
+
+// A source that is no longer produced but still appears in stored rows must
+// keep sorting below the live ones. sourcePriority is a map, so a bare
+// lookup returns 0 for a miss — a higher priority than Ticketmaster's 2 —
+// which would promote retired links to the top of every card instead of
+// demoting them.
+func TestUnknownSourceSortsLast(t *testing.T) {
+	links := []TicketLink{
+		{Source: Source("some-retired-source"), URL: "https://retired"},
+		{Source: SourceTicketmaster, URL: "https://tm"},
+		{Source: SourceOfficial, URL: "https://official"},
+	}
+	SortLinks(links)
+	if links[0].Source != SourceOfficial || links[1].Source != SourceTicketmaster {
+		t.Fatalf("known sources should lead in priority order, got %+v", links)
+	}
+	if links[2].Source != Source("some-retired-source") {
+		t.Errorf("unknown source should sort last, got %+v", links)
+	}
+}

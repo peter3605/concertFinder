@@ -15,7 +15,6 @@ type Config struct {
 	SpotifyClientID     string
 	SpotifyRedirectURI  string
 	TicketmasterAPIKey  string
-	BandsintownAppID    string
 	DatabaseURL         string
 	EncryptionKey       string
 	SessionCookieDomain string
@@ -78,7 +77,6 @@ type Config struct {
 	// typical day, but the ceiling is worth revisiting before onboarding a
 	// crowd — the ledger enforces per-user limits, not the account total.
 	RateCapTMPerUserDaily       int
-	RateCapBITPerUserDaily      int
 	RateCapSongkickPerUserDaily int
 
 	// ConcertCacheTTLHours is how long cached per-artist upstream responses
@@ -118,7 +116,6 @@ func Load() (*Config, error) {
 		SpotifyClientID:     os.Getenv("SPOTIFY_CLIENT_ID"),
 		SpotifyRedirectURI:  os.Getenv("SPOTIFY_REDIRECT_URI"),
 		TicketmasterAPIKey:  os.Getenv("TICKETMASTER_API_KEY"),
-		BandsintownAppID:    os.Getenv("BANDSINTOWN_APP_ID"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
 		EncryptionKey:       os.Getenv("ENCRYPTION_KEY"),
 		SessionCookieDomain: os.Getenv("SESSION_COOKIE_DOMAIN"),
@@ -172,7 +169,6 @@ func Load() (*Config, error) {
 	// Defaults sized so one full scan of a 200-artist profile fits inside a
 	// day's allowance for each source; see the field comments.
 	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
-	c.RateCapBITPerUserDaily = intEnv("RATE_CAP_BIT_PER_USER_DAILY", 250)
 	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 100)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 
@@ -198,7 +194,6 @@ func Load() (*Config, error) {
 		"SPOTIFY_CLIENT_ID":     c.SpotifyClientID,
 		"SPOTIFY_REDIRECT_URI":  c.SpotifyRedirectURI,
 		"TICKETMASTER_API_KEY":  c.TicketmasterAPIKey,
-		"BANDSINTOWN_APP_ID":    c.BandsintownAppID,
 		"ENCRYPTION_KEY":        c.EncryptionKey,
 		"SESSION_COOKIE_DOMAIN": c.SessionCookieDomain,
 	} {

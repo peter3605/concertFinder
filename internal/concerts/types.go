@@ -7,10 +7,15 @@ import "time"
 type Source string
 
 const (
-	SourceOfficial     Source = "official"    // Phase 2
+	SourceOfficial     Source = "official" // Phase 2
 	SourceTicketmaster Source = "ticketmaster"
-	SourceBandsintown  Source = "bandsintown"
 	SourceSongkick     Source = "songkick" // Phase 2
+	// SourceBandsintown is no longer produced: the public API returned an
+	// AWS "explicit deny" 403 on every request and the partnership request
+	// went unanswered. The constant stays because rows written before the
+	// removal still carry these links, and they remain valid URLs to real
+	// shows until the janitor prunes them.
+	SourceBandsintown Source = "bandsintown"
 )
 
 // sourcePriority: lower is higher priority.
@@ -19,6 +24,19 @@ var sourcePriority = map[Source]int{
 	SourceTicketmaster: 2,
 	SourceBandsintown:  3,
 	SourceSongkick:     4,
+}
+
+// unknownSourcePriority sorts a link whose source isn't in the table *last*.
+// A bare map lookup yields 0 for a miss, which is a higher priority than
+// anything real — so dropping a source from the table would promote its
+// legacy links above Ticketmaster rather than demoting them.
+const unknownSourcePriority = 1 << 10
+
+func priorityOf(s Source) int {
+	if p, ok := sourcePriority[s]; ok {
+		return p
+	}
+	return unknownSourcePriority
 }
 
 // TicketLink is one purchase URL surfaced to the user.
