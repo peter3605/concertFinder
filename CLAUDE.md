@@ -168,9 +168,48 @@ Frontend polling is bounded: `MAX_REFRESH_POLLS` caps a refresh at ~10
 minutes of 10s polls, and transient fetch errors retry with backoff instead
 of killing the loop or replacing already-loaded data with an error screen.
 
-Snapshots are pre-warmed on login (via `OnLoginSuccess` hook) and refreshed
-nightly by `FanoutScanConcerts` (jobs spread across 60min to avoid a
-thundering herd).
+## When scans run
+
+Four triggers, all funnelling into the same `ScanConcerts` job, which river's
+args-level uniqueness collapses to one in flight per (user, location):
+
+1. **Login** — `OnLoginSuccess` pre-warms a snapshot.
+2. **A stale read** — the SWR handler, per the rules above.
+3. **The nightly fanout** — `FanoutScanConcerts`, one job per user with a
+   session in the last 14 days, spread across 60min to avoid a thundering herd.
+4. **`POST /me/concerts/refresh`** — an explicit user request.
+
+**Daily jobs use wall-clock schedules, never `river.PeriodicInterval`.**
+River's periodic scheduler keeps in-memory state only and re-anchors every job
+to process start, so a 24h interval means "24h after this process booted": the
+time of day drifts with each deploy, and — with `RunOnStart: false` — a process
+restarting more often than the interval fires the job *never*. Since deploys
+restart the server on every push to `main`, a two-deploy day was a day with no
+scan, no digest, and no janitor run. `jobs.DailyAt(hour, min)` computes the
+next real UTC occurrence instead, which makes restarts harmless and keeps
+`RunOnStart: false` correct. Hours come from `DAILY_*_HOUR_UTC`.
+
+**The digest must trail the scan by `config.MinScanDigestGapHours` (2h).** It
+emails whatever snapshot exists, so scheduling it alongside the scan makes
+every digest describe the *previous* day's results — silently, since a stale
+snapshot is still a valid one. Two hours clears the 60min spread plus
+`ScanBudget` and retries. `main.go` warns at startup when the gap is too small;
+`ScanDigestGapHours()` is modular so a 23:00 scan with a 01:00 digest reads as
+2, not −22.
+
+Deliberately *not* chained off `ScanConcertsWorker` the way instant-notify is:
+a scan fires on login, stale reads, and manual refresh, so chaining would email
+on all of them, and suppressing that needs a trigger field on
+`ScanConcertsArgs` — which changes what `ByArgs` uniqueness hashes and would
+stop two scans deduplicating against each other.
+
+**Manual refresh is throttled by `ManualRefreshMinInterval` (15min) measured
+from the snapshot's `computed_at`.** River's uniqueness stops two scans running
+at once but says nothing about the gap between completed ones, and a scan
+spends real quota. The refusal returns 429 with the instant it lifts plus a
+reason, so the UI distinguishes "you just refreshed" from "today's allowance is
+gone". `retry_after` outranks the interval — a manual click must never bypass
+the quota guard, since that scan is guaranteed to come back capped.
 
 ## Deduplication (design §6)
 

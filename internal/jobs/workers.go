@@ -330,6 +330,10 @@ type SendDigestWorker struct {
 	Sender           *email.Sender
 	UnsubscribeBase  string // e.g. https://your-domain.com — the /api/me/unsubscribe path is appended
 	UnsubscribeToken func(userID uuid.UUID) string
+	// Fallback is the server-wide default location, used when the user never
+	// saved one. Must match what FanoutScanConcertsWorker uses or the digest
+	// looks up a location_key no scan ever wrote.
+	Fallback FallbackLocation
 }
 
 func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestArgs]) error {
@@ -343,11 +347,27 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	// Load the user's current snapshot (their canonical location). Digest
 	// covers the location the user actually browses; multi-location users
 	// get one digest for their most-recently-set location.
-	loc, hit, err := db.GetUserLocation(ctx, w.Pool, user.ID)
-	if err != nil || !hit {
-		return nil
+	//
+	// A user with no saved location falls back to the server-wide default —
+	// the same thing FanoutScanConcertsWorker does when it enqueues their
+	// nightly scan. Returning early here instead meant an opted-in user who
+	// never set a location was scanned every night and never emailed, with
+	// nothing logged to say why.
+	target := concerts.Location{
+		Latitude:    w.Fallback.Latitude,
+		Longitude:   w.Fallback.Longitude,
+		RadiusMiles: w.Fallback.RadiusMiles,
 	}
-	locKey := LocationKey(concerts.Location{Latitude: loc.Latitude, Longitude: loc.Longitude, RadiusMiles: loc.RadiusMiles})
+	loc, hit, err := db.GetUserLocation(ctx, w.Pool, user.ID)
+	if err != nil {
+		return err
+	}
+	if hit {
+		target = concerts.Location{Latitude: loc.Latitude, Longitude: loc.Longitude, RadiusMiles: loc.RadiusMiles}
+	} else {
+		slog.Info("digest: user has no saved location, using server default", "user", user.ID)
+	}
+	locKey := LocationKey(target)
 	snap, hit, err := db.GetConcertSnapshot(ctx, w.Pool, user.ID, locKey)
 	if err != nil || !hit {
 		return nil

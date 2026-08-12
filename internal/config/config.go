@@ -48,6 +48,20 @@ type Config struct {
 	// (and still returns the stale snapshot immediately).
 	SnapshotStaleAfterHours int
 
+	// UTC hours at which the four daily jobs run. Wall-clock times rather
+	// than intervals: river's periodic scheduler re-anchors to process start,
+	// so an interval schedule drifts on every deploy and never fires at all
+	// on a process that restarts more often than the interval.
+	//
+	// DailyDigestHourUTC must trail DailyScanHourUTC by at least
+	// MinScanDigestGapHours — the digest reads the snapshot the scan writes,
+	// so running them together means every email describes the *previous*
+	// day's scan.
+	DailyAffinityHourUTC int
+	DailyScanHourUTC     int
+	DailyDigestHourUTC   int
+	DailyJanitorHourUTC  int
+
 	// Per-user daily caps on outbound API calls (design §8.3). 0 disables
 	// enforcement for that source.
 	//
@@ -148,6 +162,13 @@ func Load() (*Config, error) {
 	} else {
 		c.SnapshotStaleAfterHours = 6
 	}
+	// Daily job times. Defaults put the fanout scan at 07:00 UTC (early
+	// morning across the US) and the digest two hours later, which clears the
+	// scan's 60-minute spread plus its budget and retries.
+	c.DailyAffinityHourUTC = hourEnv("DAILY_AFFINITY_HOUR_UTC", 6)
+	c.DailyScanHourUTC = hourEnv("DAILY_SCAN_HOUR_UTC", 7)
+	c.DailyDigestHourUTC = hourEnv("DAILY_DIGEST_HOUR_UTC", 9)
+	c.DailyJanitorHourUTC = hourEnv("DAILY_JANITOR_HOUR_UTC", 10)
 	// Defaults sized so one full scan of a 200-artist profile fits inside a
 	// day's allowance for each source; see the field comments.
 	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
@@ -193,4 +214,31 @@ func intEnv(key string, def int) int {
 		return v
 	}
 	return def
+}
+
+// hourEnv is intEnv clamped to a valid hour. An out-of-range value falls back
+// to the default rather than being passed through: time.Date would happily
+// normalize hour 25 into the next day, silently moving a job.
+func hourEnv(key string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v >= 0 && v <= 23 {
+		return v
+	}
+	return def
+}
+
+// MinScanDigestGapHours is how far the daily digest must trail the daily scan.
+// The scan fanout smears its per-user jobs across jobs.SpreadWindow (60min),
+// each job may run for jobs.ScanBudget (5min), and a failed one retries at
+// attempt x 4min up to jobs.ScanMaxAttempts — roughly 90 minutes worst case.
+// Two hours clears that.
+//
+// Under-shooting this doesn't fail loudly: the digest reads whatever snapshot
+// exists, so it just describes the previous day's scan forever.
+const MinScanDigestGapHours = 2
+
+// ScanDigestGapHours returns how many hours after the daily scan the digest
+// runs. Modular, so a scan at 23:00 with a digest at 01:00 reads as a 2-hour
+// gap rather than a negative one.
+func (c Config) ScanDigestGapHours() int {
+	return ((c.DailyDigestHourUTC - c.DailyScanHourUTC) + 24) % 24
 }

@@ -268,6 +268,14 @@ func main() {
 			Sender:           emailSender,
 			UnsubscribeBase:  cfg.SiteBaseURL,
 			UnsubscribeToken: unsubscribeH.Token,
+			// Same fallback the scan fanout uses. Without it, an opted-in
+			// user who never saved a location is scanned nightly and never
+			// emailed.
+			Fallback: jobs.FallbackLocation{
+				Latitude:    cfg.UserLatitude,
+				Longitude:   cfg.UserLongitude,
+				RadiusMiles: cfg.UserRadiusMiles,
+			},
 		})
 		river.AddWorker(workers, &jobs.SendInstantNotifyWorker{
 			Pool:             pool,
@@ -286,26 +294,39 @@ func main() {
 		river.AddWorker(workers, fanoutAff)
 		river.AddWorker(workers, fanoutScan)
 		river.AddWorker(workers, fanoutDigest)
+		// Wall-clock schedules, not 24h intervals — see jobs.DailyAt for why
+		// an interval schedule silently stops running on a frequently
+		// redeployed process. RunOnStart stays false because DailyAt computes
+		// the next real occurrence, so a restart resumes the schedule instead
+		// of resetting a countdown.
+		if gap := cfg.ScanDigestGapHours(); gap < config.MinScanDigestGapHours {
+			logger.Warn("daily digest runs too soon after the daily scan; it will report the previous day's results",
+				"scan_hour_utc", cfg.DailyScanHourUTC,
+				"digest_hour_utc", cfg.DailyDigestHourUTC,
+				"gap_hours", gap,
+				"min_gap_hours", config.MinScanDigestGapHours,
+			)
+		}
 		periodic := []*river.PeriodicJob{
 			river.NewPeriodicJob(
-				river.PeriodicInterval(24*time.Hour),
+				jobs.DailyAt(cfg.DailyAffinityHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutAffinityRefreshArgs{}, nil },
-				&river.PeriodicJobOpts{RunOnStart: false},
+				&river.PeriodicJobOpts{ID: "daily_affinity_refresh", RunOnStart: false},
 			),
 			river.NewPeriodicJob(
-				river.PeriodicInterval(24*time.Hour),
+				jobs.DailyAt(cfg.DailyScanHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutScanConcertsArgs{}, nil },
-				&river.PeriodicJobOpts{RunOnStart: false},
+				&river.PeriodicJobOpts{ID: "daily_scan_concerts", RunOnStart: false},
 			),
 			river.NewPeriodicJob(
-				river.PeriodicInterval(24*time.Hour),
+				jobs.DailyAt(cfg.DailyDigestHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutSendDigestArgs{}, nil },
-				&river.PeriodicJobOpts{RunOnStart: false},
+				&river.PeriodicJobOpts{ID: "daily_send_digest", RunOnStart: false},
 			),
 			river.NewPeriodicJob(
-				river.PeriodicInterval(24*time.Hour),
+				jobs.DailyAt(cfg.DailyJanitorHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.JanitorArgs{}, nil },
-				&river.PeriodicJobOpts{RunOnStart: false},
+				&river.PeriodicJobOpts{ID: "daily_janitor", RunOnStart: false},
 			),
 		}
 		riverClient, err = river.NewClient[pgx.Tx](riverDriver, &river.Config{
@@ -414,6 +435,7 @@ func main() {
 			r.Use(auth.CSRF(signingKey))
 			r.Get("/affinity", affinityH.Get)
 			r.Get("/concerts", concertsH.Get)
+			r.Post("/concerts/refresh", concertsH.Refresh)
 			r.Get("/location", locationH.Get)
 			r.Put("/location", locationH.Put)
 			r.Get("/saved-concerts", savedH.List)

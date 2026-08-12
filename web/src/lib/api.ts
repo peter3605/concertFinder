@@ -19,6 +19,17 @@ export async function mutatingFetch(input: string, init: RequestInit = {}): Prom
   return fetch(input, { ...init, credentials: 'same-origin', headers });
 }
 
+// Renders a future instant as a local time the user can act on ("after
+// 8:00 PM") rather than an opaque UTC timestamp. Used for both the daily
+// quota reset and the manual-refresh cooldown.
+export function formatRetry(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'the next refresh';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${time}`;
+}
+
 export function timeAgo(iso: string): string {
   const secs = Math.max(1, Math.floor((Date.now() - Date.parse(iso)) / 1000));
   if (secs < 60) return `${secs}s ago`;

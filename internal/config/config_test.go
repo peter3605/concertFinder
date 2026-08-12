@@ -19,6 +19,10 @@ func loadDefaults(t *testing.T) *Config {
 		"CONCERT_CACHE_TTL_HOURS",
 		"PHASE2_FALLBACK_BUDGET_SECONDS",
 		"PHASE2_FALLBACK_CONCURRENCY",
+		"DAILY_AFFINITY_HOUR_UTC",
+		"DAILY_SCAN_HOUR_UTC",
+		"DAILY_DIGEST_HOUR_UTC",
+		"DAILY_JANITOR_HOUR_UTC",
 	} {
 		t.Setenv(k, "")
 	}
@@ -91,5 +95,42 @@ func TestFallbackConcurrencyDefaultsToOne(t *testing.T) {
 	// budget.
 	if cfg := loadDefaults(t); cfg.Phase2FallbackConcurrency != 1 {
 		t.Errorf("Phase2FallbackConcurrency = %d, want 1", cfg.Phase2FallbackConcurrency)
+	}
+}
+
+// The digest reads the snapshot the nightly scan writes. Scheduled too close
+// together, it reads yesterday's — silently, since a stale snapshot is still
+// a valid one. The gap has to clear the scan fanout's 60-minute spread plus
+// the per-job budget and retries.
+func TestDigestRunsFarEnoughAfterTheScan(t *testing.T) {
+	cfg := loadDefaults(t)
+	if gap := cfg.ScanDigestGapHours(); gap < MinScanDigestGapHours {
+		t.Errorf("digest runs %dh after the scan (scan %02d:00, digest %02d:00), want >= %dh: "+
+			"every digest would describe the previous day's scan",
+			gap, cfg.DailyScanHourUTC, cfg.DailyDigestHourUTC, MinScanDigestGapHours)
+	}
+}
+
+// The gap is modular, so a scan late in the day with a digest after midnight
+// is two hours apart rather than negative twenty-two.
+func TestScanDigestGapWrapsAroundMidnight(t *testing.T) {
+	cfg := Config{DailyScanHourUTC: 23, DailyDigestHourUTC: 1}
+	if got := cfg.ScanDigestGapHours(); got != 2 {
+		t.Errorf("23:00 -> 01:00 gap = %d, want 2", got)
+	}
+}
+
+// An hour outside 0-23 must fall back to the default. time.Date normalizes
+// hour 25 into the next day, so passing it through would quietly move a job
+// to a time nobody chose.
+func TestOutOfRangeHourFallsBackToDefault(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x/y")
+	t.Setenv("DAILY_SCAN_HOUR_UTC", "25")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DailyScanHourUTC != 7 {
+		t.Errorf("DailyScanHourUTC = %d, want the 7 default", cfg.DailyScanHourUTC)
 	}
 }
