@@ -243,6 +243,117 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ManualRefreshMinInterval is how recently a scan must have run before the
+// refresh button refuses. A scan spends real upstream quota — the caps are
+// sized at roughly one full scan's worth of calls per source per day — so
+// without a floor a user holding down the button burns their own allowance
+// and ends the day on a partial feed.
+//
+// River's uniqueness already prevents two scans running at once; this is
+// about the gap *between* completed scans, which uniqueness says nothing
+// about.
+const ManualRefreshMinInterval = 15 * time.Minute
+
+type refreshResponse struct {
+	Refreshing bool `json:"refreshing"`
+	// RetryAfter is when the button becomes usable again. Set on every
+	// refusal so the UI can say when rather than just no.
+	RetryAfter *time.Time `json:"retry_after,omitempty"`
+	// Reason distinguishes "you just refreshed" from "your daily quota is
+	// spent", which need different words in front of the user.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Refresh handles POST /me/concerts/refresh: an explicit user request to
+// rescan now, rather than waiting for the SWR staleness window or the nightly
+// fanout. Deliberately bypasses the staleness check — the whole point is to
+// refresh a snapshot that is not yet stale — but not the quota guard.
+func (h *ConcertsHandler) Refresh(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if h.River == nil {
+		http.Error(w, "background jobs disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	loc := h.FallbackLocation
+	if userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID); err != nil {
+		slog.Warn("refresh: user location lookup failed", "err", err, "user", u.ID)
+	} else if hit {
+		loc = concerts.Location{
+			Latitude:    userLoc.Latitude,
+			Longitude:   userLoc.Longitude,
+			RadiusMiles: userLoc.RadiusMiles,
+		}
+	}
+	locKey := jobs.LocationKey(loc)
+
+	var snapshot *db.ConcertSnapshot
+	if snap, hit, err := db.GetConcertSnapshot(r.Context(), h.Pool, u.ID, locKey); err != nil {
+		// Leave snapshot nil and let the scan run: failing to read the
+		// snapshot is no reason to refuse a refresh the user asked for.
+		slog.Warn("refresh: snapshot read failed", "err", err, "user", u.ID)
+	} else if hit {
+		snapshot = &snap
+	}
+	if retryAfter, reason := refreshRefusal(snapshot, time.Now()); reason != "" {
+		writeRefreshRefusal(w, retryAfter, reason)
+		return
+	}
+
+	args := jobs.ScanConcertsArgs{
+		UserID:      u.ID,
+		Latitude:    loc.Latitude,
+		Longitude:   loc.Longitude,
+		RadiusMiles: loc.RadiusMiles,
+	}
+	// Nil opts: uniqueness is declared on ScanConcertsArgs, and passing opts
+	// here would override it. A click landing while a scan is already in
+	// flight therefore dedupes into that scan and still reports refreshing —
+	// which is the honest answer to "refresh now".
+	if _, err := h.River.Insert(r.Context(), args, nil); err != nil {
+		slog.Warn("refresh: scan enqueue failed", "err", err, "user", u.ID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, refreshResponse{Refreshing: true})
+}
+
+// refreshRefusal decides whether a manual refresh should be turned away,
+// returning the instant it becomes allowed and a machine-readable reason.
+// An empty reason means "go ahead".
+//
+// A nil snapshot — none exists, or the read failed — always proceeds: there
+// is nothing to protect and the user is asking for the very thing that would
+// create one.
+func refreshRefusal(snap *db.ConcertSnapshot, now time.Time) (*time.Time, string) {
+	if snap == nil {
+		return nil, ""
+	}
+	// Quota exhaustion outranks recency. A capped scan cannot do better until
+	// the rate ledger's UTC day rolls over, so letting the click through would
+	// enqueue a job guaranteed to come back capped — and stamp another
+	// complete=false snapshot on the way.
+	if snap.RetryAfter != nil && now.Before(*snap.RetryAfter) {
+		return snap.RetryAfter, "quota_exhausted"
+	}
+	if next := snap.ComputedAt.Add(ManualRefreshMinInterval); now.Before(next) {
+		return &next, "too_soon"
+	}
+	return nil, ""
+}
+
+func writeRefreshRefusal(w http.ResponseWriter, retryAfter *time.Time, reason string) {
+	writeJSONStatus(w, http.StatusTooManyRequests, refreshResponse{
+		Refreshing: false,
+		RetryAfter: retryAfter,
+		Reason:     reason,
+	})
+}
+
 func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
 	q := r.URL.Query()
 	f := concerts.Filters{Genre: q.Get("genre"), Venue: q.Get("venue"), Origin: origin}

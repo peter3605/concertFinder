@@ -1,6 +1,6 @@
 import { RefreshCw } from 'lucide-react';
 import { EventCard } from '@/components/event-card';
-import { timeAgo } from '@/lib/api';
+import { formatRetry, timeAgo } from '@/lib/api';
 import type { Event, ConcertsResponse } from '@/lib/types';
 
 // Shared list rendering used by both the Concerts page and the Saved page.
@@ -84,16 +84,6 @@ export function ConcertsList({
       ))}
     </div>
   );
-}
-
-// Renders the quota-reset instant as a local time the user can act on
-// ("after 8:00 PM") rather than an opaque UTC timestamp.
-function formatRetry(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'the next refresh';
-  const sameDay = d.toDateString() === new Date().toDateString();
-  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  return sameDay ? time : `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${time}`;
 }
 
 // Group by the month the show falls in *locally*. EventCard renders each
