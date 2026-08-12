@@ -7,25 +7,17 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
-
-// bitLockedOutMarker identifies the AWS-flavored 403 that Bandsintown's public
-// API is currently returning for every request. Logging each occurrence
-// generates hundreds of identical WARN lines per search with no signal — a
-// single startup notice would be nicer, but this is the least-invasive fix.
-const bitLockedOutMarker = "explicit deny in an identity-based policy"
 
 // errRateCapped marks a source that was skipped because the user's daily
 // quota for it is spent. Distinct from "returned no events" on purpose: an
@@ -62,15 +54,14 @@ type Fallbacker interface {
 // context as a set of pre-charged reservations that the scan worker takes
 // out before calling in. See internal/rate.
 type SearchDeps struct {
-	Pool             *pgxpool.Pool
-	TM               *ticketmaster.Client
-	BIT              *bandsintown.Client
+	Pool *pgxpool.Pool
+	TM   *ticketmaster.Client
 	// CacheTTL is how long a cached per-artist upstream response is trusted.
 	// Zero means DefaultCacheTTL.
-	CacheTTL time.Duration
-	Parallelism      int           // §8.1 = 10
-	Fallback         Fallbacker    // nil = Phase 1 behavior (no fallback)
-	MinFallbackScore float64       // artists with Score < this bypass the fallback
+	CacheTTL         time.Duration
+	Parallelism      int        // §8.1 = 10
+	Fallback         Fallbacker // nil = Phase 1 behavior (no fallback)
+	MinFallbackScore float64    // artists with Score < this bypass the fallback
 	// FallbackBudget caps the wall-clock time *all* fallback work in one
 	// scan may consume, across every artist. It exists because the chain's
 	// external lookups are globally serialized at 1 req/sec (MusicBrainz,
@@ -78,7 +69,7 @@ type SearchDeps struct {
 	// artists and not with parallelism: measured at ~250s of MusicBrainz
 	// plus ~86s of Nominatim on a 200-artist profile, against a 300s
 	// ScanBudget. Unbounded, the fallback alone can consume the entire
-	// scan and starve TM/BIT.
+	// scan and starve the Ticketmaster fan-out.
 	//
 	// Zero means DefaultFallbackBudget. Negative disables the fallback.
 	FallbackBudget time.Duration
@@ -104,8 +95,8 @@ type SearchDeps struct {
 const DefaultCacheTTL = 12 * time.Hour
 
 // DefaultFallbackBudget is the fallback's share of a scan when unset. Sized
-// well under ScanBudget so TM/BIT — the sources that actually produce most
-// results — always finish.
+// well under ScanBudget so Ticketmaster — the source that produces most
+// results — always finishes.
 const DefaultFallbackBudget = 60 * time.Second
 
 // FallbackAdmissionWait is how long a scan will wait for the process-wide
@@ -234,7 +225,7 @@ func (e *IncompleteError) Error() string {
 
 func (e *IncompleteError) Unwrap() error { return e.Cause }
 
-// Search fans out to TM + BIT for each artist, respects ctx, and returns
+// Search fans out to Ticketmaster for each artist, respects ctx, and returns
 // deduped concerts sorted by date.
 //
 // A non-nil error does NOT mean the returned slice is unusable: on an
@@ -260,7 +251,7 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 
 	// One deadline shared by every artist's fallback work, so the cap is on
 	// the scan's total fallback spend rather than per-artist (200 artists ×
-	// a per-artist limit would be no cap at all). TM/BIT keep the full ctx.
+	// a per-artist limit would be no cap at all). Ticketmaster keeps the full ctx.
 	budget := resolveFallbackBudget(d.FallbackBudget)
 
 	// Claim the process-wide fallback slot. Unadmitted scans skip the
@@ -358,10 +349,11 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 	return out, nil
 }
 
-// searchOne resolves + queries TM and BIT for one artist in parallel.
-// Returns a context error when the artist could not be covered because the
-// scan budget expired; individual source failures (a BIT 403, a TM 5xx) are
-// logged and folded into a partial result rather than failing the artist.
+// searchOne resolves + queries Ticketmaster for one artist, escalating to the
+// fallback chain when TM has nothing. Returns a context error when the artist
+// could not be covered because the scan budget expired; a source failure (a TM
+// 5xx) is logged and folded into a partial result rather than failing the
+// artist.
 //
 // fallbackCtx is the scan-wide fallback deadline (see SearchDeps.FallbackBudget);
 // it is a child of ctx, so it is never the longer-lived of the two.
@@ -398,93 +390,50 @@ func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredA
 			resolution = db.ArtistResolution{
 				SpotifyArtistID:          a.ID,
 				TicketmasterAttractionID: attractionID,
-				BandsintownName:          a.Name,
 			}
 			if err := db.UpsertArtistResolution(ctx, d.Pool, resolution); err != nil {
 				slog.Warn("resolution save failed", "artist", a.Name, "err", err)
 			}
 		}
-	} else if resolution.BandsintownName == "" {
-		resolution.BandsintownName = a.Name
 	}
 
-	// TM + BIT run independently. A failure in one source must not cancel or
-	// discard the other: BIT has been intermittently returning 403 for the
-	// entire public API surface, and losing all TM results because BIT is
-	// down defeats the point of having two sources.
+	// Ticketmaster is the only primary source. capped records that TM was
+	// skipped for quota rather than genuinely returning nothing, which gates
+	// the fallback escalation below.
 	var (
-		tmEvents  []ticketmaster.Event
-		bitEvents []bandsintown.Event
-		// Set when a source was skipped for quota rather than returning
-		// nothing. Gates the fallback escalation below.
-		capped atomic.Bool
+		tmEvents []ticketmaster.Event
+		capped   bool
 	)
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if resolution.TicketmasterAttractionID == "" {
-			return
-		}
+	if resolution.TicketmasterAttractionID != "" {
 		evs, err := loadOrFetchTM(ctx, d, a.ID, resolution.TicketmasterAttractionID, loc)
-		if err != nil {
-			switch {
-			case errors.Is(err, errRateCapped):
-				capped.Store(true)
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				// ctx cleanup — not actionable
-			default:
-				slog.Warn("tm fetch failed", "artist", a.Name, "err", err)
-			}
-			return
+		switch {
+		case err == nil:
+			tmEvents = evs
+		case errors.Is(err, errRateCapped):
+			capped = true
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// ctx cleanup — not actionable
+		default:
+			slog.Warn("tm fetch failed", "artist", a.Name, "err", err)
 		}
-		tmEvents = evs
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		name := resolution.BandsintownName
-		if name == "" {
-			name = a.Name
-		}
-		evs, err := loadOrFetchBIT(ctx, d, a.ID, name, loc)
-		if err != nil {
-			switch {
-			case errors.Is(err, errRateCapped):
-				capped.Store(true)
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				// ctx cleanup — not actionable
-			case strings.Contains(err.Error(), bitLockedOutMarker):
-				// BIT's public API is currently 403'ing every request. Don't
-				// spam the log with one line per artist for a known outage.
-			default:
-				slog.Warn("bit fetch failed", "artist", a.Name, "err", err)
-			}
-			return
-		}
-		bitEvents = evs
-	}()
-
-	wg.Wait()
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	out := make([]Concert, 0, len(tmEvents)+len(bitEvents))
+	out := make([]Concert, 0, len(tmEvents))
 	for _, e := range tmEvents {
 		out = append(out, tmEventToConcert(e, a))
 	}
-	for _, e := range bitEvents {
-		out = append(out, bitEventToConcert(e, a))
-	}
-	// Escalate to the fallback chain only when the primary sources actually
-	// reported nothing. If either was skipped for quota we don't know that
-	// yet, and the fallback is far more expensive than what we just declined
-	// to spend.
-	if len(out) == 0 && !capped.Load() && d.Fallback != nil && a.Score >= d.MinFallbackScore {
+	// Escalate to the fallback chain only when Ticketmaster actually reported
+	// nothing. A quota skip is not evidence the artist has no shows, and the
+	// fallback is far more expensive than the call we just declined to spend.
+	//
+	// With Bandsintown gone this is the single secondary source, so it now
+	// carries every artist TM doesn't cover rather than only those neither
+	// primary knew about.
+	if len(out) == 0 && !capped && d.Fallback != nil && a.Score >= d.MinFallbackScore {
 		// Don't even enter the chain once the scan-wide fallback budget is
 		// spent — every lookup inside would queue on a 1 req/sec turnstile
 		// only to be cancelled.
@@ -550,29 +499,6 @@ func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID str
 	return evs, nil
 }
 
-func loadOrFetchBIT(ctx context.Context, d SearchDeps, artistID, name string, loc Location) ([]bandsintown.Event, error) {
-	key := cacheKey("bit", artistID, loc)
-	if blob, ok, err := db.GetCachedConcerts(ctx, d.Pool, key, d.CacheTTL); err != nil {
-		slog.Warn("cache read failed", "key", key, "err", err)
-	} else if ok {
-		var out []bandsintown.Event
-		if err := json.Unmarshal(blob, &out); err == nil {
-			return out, nil
-		}
-	}
-	if !rate.Allow(ctx, rate.SourceBandsintown) {
-		return nil, errRateCapped
-	}
-	evs, err := d.BIT.ArtistEvents(ctx, name, loc.Latitude, loc.Longitude, loc.RadiusMiles)
-	if err != nil {
-		return nil, fmt.Errorf("bit: %w", err)
-	}
-	if blob, err := json.Marshal(evs); err == nil {
-		_ = db.SaveCachedConcerts(ctx, d.Pool, key, blob)
-	}
-	return evs, nil
-}
-
 func artistRefFromScored(a spotify.ScoredArtist) ArtistRef {
 	return ArtistRef{ID: a.ID, Name: a.Name, Genres: a.Genres}
 }
@@ -588,22 +514,6 @@ func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 		Latitude:  e.Venue.Latitude,
 		Longitude: e.Venue.Longitude,
 		Links:     []TicketLink{{Source: SourceTicketmaster, URL: e.URL}},
-	}
-	c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
-	return c
-}
-
-func bitEventToConcert(e bandsintown.Event, a spotify.ScoredArtist) Concert {
-	c := Concert{
-		Artist:    artistRefFromScored(a),
-		Date:      e.Datetime,
-		Venue:     e.Venue.Name,
-		City:      e.Venue.City,
-		State:     e.Venue.Region,
-		Country:   e.Venue.Country,
-		Latitude:  e.Venue.Latitude,
-		Longitude: e.Venue.Longitude,
-		Links:     []TicketLink{{Source: SourceBandsintown, URL: e.URL}},
 	}
 	c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
 	return c

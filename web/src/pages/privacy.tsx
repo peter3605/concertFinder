@@ -66,7 +66,6 @@ export default function PrivacyPage() {
       </p>
       <ul>
         <li>Ticketmaster Discovery API</li>
-        <li>Bandsintown Public API</li>
         <li>Songkick API (optional)</li>
         <li>MusicBrainz (for artist website resolution)</li>
         <li>OpenStreetMap Nominatim (for venue geocoding)</li>

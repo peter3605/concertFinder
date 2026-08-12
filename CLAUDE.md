@@ -17,7 +17,7 @@ cd web && npm run build
 
 ## What ConcertFinder Is
 
-A web app that builds a personalized concert feed from a user's Spotify listening data by fanning out across ticketing APIs (Ticketmaster, Bandsintown, later Songkick) for shows by artists the user already engages with. US-only. Phase 1 is single-user local; multi-user AWS deployment is Phase 3.
+A web app that builds a personalized concert feed from a user's Spotify listening data by fanning out across ticketing APIs for shows by artists the user already engages with. Ticketmaster is the only primary source; the Phase 2 fallback chain (MusicBrainz → official artist site → JSON-LD) is the only secondary. US-only. Phase 1 is single-user local; multi-user AWS deployment is Phase 3.
 
 ## Planned Architecture
 
@@ -29,7 +29,6 @@ Planned Go layout (see design §2.3):
 /cmd/{server,worker}    entrypoints
 /internal/spotify       Spotify client + affinity scoring
 /internal/ticketmaster  TM client
-/internal/bandsintown   BIT client
 /internal/concerts      aggregation, dedup, scoring
 /internal/auth          PKCE, token storage, refresh middleware
 /internal/db            sqlc-generated code
@@ -51,11 +50,27 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **Spotify redirect URI must be `https://127.0.0.1:3000/callback`** for local dev — `http://localhost` is rejected by Spotify as of Nov 2025.
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
-- **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now 250/250/100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
-- **Every outbound TM/BIT/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less.
+- **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now TM=250 / Songkick=100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
+- **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less.
 - **Endpoints removed by Spotify (Feb 2026) that are NOT available:** `/recommendations`, `/audio-features`, `/audio-analysis`, `/artists/{id}/related-artists`, `/artists/{id}/top-tracks`, batch `/tracks`. Do not write code that calls these. Affinity is constructed entirely from the user's own explicit signals.
 - **`GET /playlists/{id}/items` (Feb 2026 change):** only works for playlists the user owns or collaborates on. Skip merely-followed playlists.
-- **Preserve Bandsintown tracking parameters** verbatim in event URLs shown to users — required by their display terms.
+- **Bandsintown has been removed** (migration 0015). Its public API returned an AWS `explicit deny in an identity-based policy` 403 on every request for the whole time it was wired up, and the partnership request went unanswered. Ticketmaster is the sole primary source. Do not re-add a BIT client without first confirming the API actually answers; the previous integration silently contributed nothing while costing a per-artist call and a quota slot.
+- **Every negative cache expires; positives don't.** Three lookups cache
+  "we asked and there was nothing", and all three have been a silent
+  permanent exclusion at some point: `concerts.NegativeResolutionTTL` (30d,
+  Ticketmaster attractions), `db.NegativeMBURLTTL` (30d, MusicBrainz
+  homepages), `db.negativeGeoTTL` (30d, Nominatim places). The reasoning is
+  the same each time — an artist signs to TM later, MusicBrainz is a
+  user-edited wiki that gains URL relationships continuously, Nominatim
+  misses are often transient — and the failure mode is the same: no error,
+  no log, the artist or venue simply never appears again. Positive results
+  are kept forever on purpose; re-fetching them spends a 1 req/sec turnstile
+  for data that doesn't change. **A TTL enforced only in SQL is not
+  enforced**: `MusicBrainzClient` consults a 5000-entry in-process LRU
+  *before* the DB, and at 200 artists a scan nothing ever evicts a negative,
+  so `mbCacheEntry` carries `resolvedAt` and `GetMBURL` returns the row's
+  timestamp rather than letting a promoted negative restart its clock.
+- **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids RDS-specific features. Email delivery uses SMTP against SES so the app is not coupled to AWS.
@@ -88,13 +103,13 @@ snapshot in `user_concert_snapshots`:
    river job. Response includes `refreshing: true` and the frontend polls
    every 10s to pick up the new snapshot (bounded — see below).
 
-The actual TM/BIT/fallback fan-out happens inside `ScanConcertsWorker`
+The actual Ticketmaster + fallback fan-out happens inside `ScanConcertsWorker`
 (design §6.1 concurrency lives there, not in the HTTP handler):
 
 - Top-N artists (N=200) with a per-artist goroutine bounded by a **buffered
   semaphore of capacity 10**.
-- Each artist fans out to TM and BIT in parallel (independent goroutines —
-  BIT failure never cancels TM).
+- Each artist queries Ticketmaster, escalating to the fallback chain only
+  when TM returns nothing and the artist was not skipped for quota.
 - `ScanBudget = 5 * time.Minute` per job. Fallback resolver + venue geocoder
   are rate-limited (MB and Nominatim are both 1 req/sec/IP).
 - **The fallback chain gets its own scan-wide deadline**
@@ -218,7 +233,7 @@ dedup_key = sha256(normalize(artist) + iso_date(dt) + normalize(venue) + normali
 normalize = lowercase → strip_punctuation → strip leading "the "/"a "/"an " → collapse whitespace
 ```
 
-Records sharing a key merge into one canonical event with multiple ticket links sorted by source priority: artist's official site → Ticketmaster/Live Nation → Bandsintown (tracking params preserved) → Songkick/other.
+Records sharing a key merge into one canonical event with multiple ticket links sorted by source priority: artist's official site → Ticketmaster/Live Nation → Songkick/other → anything unrecognized (see `priorityOf`).
 
 ## Event grouping (multi-artist bills)
 
@@ -266,11 +281,11 @@ mails as six rows and the subject counts six.
 
 ## Required Environment Variables (Appendix A)
 
-Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `BANDSINTOWN_APP_ID`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`.
+Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`.
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
-Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_BIT_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`.
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`.
 
 Loaded from `.env` in all environments; in prod the file lives at `/opt/concertfinder/.env` on the EC2 instance.
 
@@ -278,7 +293,7 @@ Loaded from `.env` in all environments; in prod the file lives at `/opt/concertf
 
 When proposing or implementing work, check which phase it belongs to before expanding scope:
 
-- **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM + BIT only, semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
+- **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM only (BIT was in scope at the time and has since been removed), semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
 - **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. Begin Extended Quota Mode application.
 - **Phase 3:** AWS single-instance deployment (EC2 t4g.small + RDS db.t4g.micro, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 

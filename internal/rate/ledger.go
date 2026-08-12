@@ -5,8 +5,6 @@
 //   - Ticketmaster: 5000 req/day account-wide. One user with 200 unresolved
 //     artists on a daily cron can burn through this in under a week of two
 //     users.
-//   - Bandsintown: personal-use quota is soft but they will start denying
-//     traffic if any single client is loud.
 //   - Songkick: 5000 req/day per developer key.
 //
 // Quota is handed out in *reservations* rather than one row-trip per call.
@@ -34,19 +32,17 @@ type Source string
 
 const (
 	SourceTicketmaster Source = "ticketmaster"
-	SourceBandsintown  Source = "bandsintown"
 	SourceSongkick     Source = "songkick"
 )
 
 // AllSources is every quota-tracked source. Keeps callers from having to
 // enumerate them by hand when reserving or inspecting a whole scan.
-var AllSources = []Source{SourceTicketmaster, SourceBandsintown, SourceSongkick}
+var AllSources = []Source{SourceTicketmaster, SourceSongkick}
 
 // Caps holds the per-user, per-day upper bound for each source. Zero
 // disables enforcement for that source.
 type Caps struct {
 	Ticketmaster int
-	Bandsintown  int
 	Songkick     int
 }
 
@@ -55,8 +51,6 @@ func (c Caps) Cap(s Source) int {
 	switch s {
 	case SourceTicketmaster:
 		return c.Ticketmaster
-	case SourceBandsintown:
-		return c.Bandsintown
 	case SourceSongkick:
 		return c.Songkick
 	}
@@ -160,7 +154,7 @@ func (r *Reservation) Take() bool {
 // cap of exactly N spends its whole block while covering every artist, and
 // calling that exhausted marks a complete scan incomplete. The SWR handler
 // then treats the snapshot as permanently stale and re-enqueues forever —
-// observed live with a 200-artist profile and the 200/day Bandsintown cap.
+// observed live with a 200-artist profile against a 200/day cap.
 // What callers actually want to know is whether coverage was lost.
 func (r *Reservation) Exhausted() bool {
 	if r == nil || r.unlimited {

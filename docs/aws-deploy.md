@@ -92,7 +92,7 @@ sudo -u concertfinder git clone https://github.com/peter3605/concertFinder.git /
 ```
 
 Create `/opt/concertfinder/.env` with production values (Spotify creds,
-Ticketmaster key, Bandsintown ID, RDS `DATABASE_URL`, encryption key,
+Ticketmaster key, RDS `DATABASE_URL`, encryption key,
 `SITE_DOMAIN` for Caddy). Use `/etc/environment`-style syntax; owner
 `concertfinder`, mode `600`. Example:
 
@@ -102,7 +102,6 @@ ENCRYPTION_KEY=<openssl rand -hex 32>
 SPOTIFY_CLIENT_ID=<from developer.spotify.com>
 SPOTIFY_REDIRECT_URI=https://your-domain.com/callback
 TICKETMASTER_API_KEY=<from developer.ticketmaster.com>
-BANDSINTOWN_APP_ID=concertfinder-prod
 SESSION_COOKIE_DOMAIN=your-domain.com
 LISTEN_ADDR=:8080
 SITE_DOMAIN=your-domain.com

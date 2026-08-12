@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/peterho/concertfinder/internal/bandsintown"
 	"github.com/peterho/concertfinder/internal/concerts"
+	"github.com/peterho/concertfinder/internal/geocoding"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 )
@@ -43,7 +43,7 @@ func isCtxErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// FindEvents returns concerts for an artist that TM+BIT missed. loc is the
+// FindEvents returns concerts for an artist Ticketmaster missed. loc is the
 // user's location; results are haversine-filtered to it.
 func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location) []concerts.Concert {
 	// Tier A — Songkick. (The "cached official URL" step from earlier
@@ -150,7 +150,7 @@ func filterByRadius(ctx context.Context, cs []concerts.Concert, loc concerts.Loc
 		if lat == 0 && lng == 0 {
 			continue
 		}
-		if bandsintown.HaversineMiles(loc.Latitude, loc.Longitude, lat, lng) <= float64(loc.RadiusMiles) {
+		if geocoding.HaversineMiles(loc.Latitude, loc.Longitude, lat, lng) <= float64(loc.RadiusMiles) {
 			out = append(out, c)
 		}
 	}

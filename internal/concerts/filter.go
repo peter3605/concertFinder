@@ -1,9 +1,10 @@
 package concerts
 
 import (
-	"math"
 	"strings"
 	"time"
+
+	"github.com/peterho/concertfinder/internal/geocoding"
 )
 
 // Weekday enum for the "weekday/weekend" filter (design §10.2).
@@ -64,7 +65,7 @@ func Apply(cs []Concert, f Filters) []Concert {
 			continue
 		}
 		if f.RadiusMiles > 0 && c.Latitude != 0 && c.Longitude != 0 {
-			if haversineMiles(f.Origin.Latitude, f.Origin.Longitude, c.Latitude, c.Longitude) > float64(f.RadiusMiles) {
+			if geocoding.HaversineMiles(f.Origin.Latitude, f.Origin.Longitude, c.Latitude, c.Longitude) > float64(f.RadiusMiles) {
 				continue
 			}
 		}
@@ -97,14 +98,4 @@ func matchesWeekday(t time.Time, want Weekday) bool {
 	default:
 		return true
 	}
-}
-
-func haversineMiles(lat1, lng1, lat2, lng2 float64) float64 {
-	const earthMiles = 3958.8
-	rad := math.Pi / 180
-	dLat := (lat2 - lat1) * rad
-	dLng := (lng2 - lng1) * rad
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLng/2)*math.Sin(dLng/2)
-	return earthMiles * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

@@ -103,13 +103,19 @@ func (c *MusicBrainzClient) ResolveOfficialURL(ctx context.Context, artistName s
 		return "", nil
 	}
 	if v, ok := c.cache.Get(key); ok {
-		return v.(string), nil
+		if e, ok := v.(mbCacheEntry); ok && e.live() {
+			return e.url, nil
+		}
+		// Stale negative — fall through and ask MusicBrainz again.
 	}
 
-	// Warm layer: DB hit? Promote to in-memory cache and return.
+	// Warm layer: DB hit? Promote to in-memory cache and return. The DB
+	// already applied NegativeMBURLTTL, and we carry its resolved_at across
+	// so the hot copy expires on the same schedule rather than restarting
+	// the clock.
 	if c.Pool != nil {
-		if urlStr, hit, err := db.GetMBURL(ctx, c.Pool, key); err == nil && hit {
-			c.cache.Set(key, urlStr)
+		if urlStr, resolvedAt, hit, err := db.GetMBURL(ctx, c.Pool, key); err == nil && hit {
+			c.cache.Set(key, mbCacheEntry{url: urlStr, resolvedAt: resolvedAt})
 			return urlStr, nil
 		}
 	}
@@ -125,11 +131,26 @@ func (c *MusicBrainzClient) ResolveOfficialURL(ctx context.Context, artistName s
 			return "", err
 		}
 	}
-	c.cache.Set(key, resolved)
+	c.cache.Set(key, mbCacheEntry{url: resolved, resolvedAt: time.Now()})
 	if c.Pool != nil {
 		_ = db.SaveMBURL(ctx, c.Pool, key, resolved)
 	}
 	return resolved, nil
+}
+
+// mbCacheEntry is one hot-cache record. It carries resolvedAt because the
+// hot layer is consulted before the DB, so applying NegativeMBURLTTL only in
+// SQL would leave a negative pinned in memory for the life of the process —
+// 5000 slots against 200 artists a scan means nothing evicts it.
+type mbCacheEntry struct {
+	url        string
+	resolvedAt time.Time
+}
+
+// live reports whether the entry may still be trusted. Positives never
+// expire; negatives do.
+func (e mbCacheEntry) live() bool {
+	return e.url != "" || time.Since(e.resolvedAt) < db.NegativeMBURLTTL
 }
 
 func (c *MusicBrainzClient) searchArtist(ctx context.Context, name string) (string, error) {

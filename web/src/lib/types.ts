@@ -102,7 +102,11 @@ export const EMPTY_FILTERS: FiltersState = {
 
 export const SOURCE_LABELS: Record<string, string> = {
   ticketmaster: 'Ticketmaster',
-  bandsintown: 'Bandsintown',
   official: 'Official site',
   songkick: 'Songkick',
+  // No longer produced, but rows written before Bandsintown was removed still
+  // carry these links. Keeping the label means they render as a name rather
+  // than a raw slug for the few days it takes the janitor and nightly scans
+  // to age them out.
+  bandsintown: 'Bandsintown',
 };
