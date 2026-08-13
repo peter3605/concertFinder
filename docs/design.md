@@ -2,9 +2,15 @@
 
 **Spotify-Driven Concert Discovery — Project Proposal & Design Document**
 
-- Version: 1.0
-- Status: Draft
+- Version: 1.1
+- Status: Phases 1–3 implemented; resynced against the code 2026-08-12
 - Geographic Scope: United States
+
+> **Reading this document.** It is the authoritative record of *intent* —
+> why the architecture is shaped the way it is, and what the constraints
+> are. Where it describes behavior that has since changed in code, the
+> section is annotated inline. `CLAUDE.md` is authoritative for what the
+> code does *today*; this document is authoritative for why.
 
 ---
 
@@ -63,19 +69,19 @@ ConcertFinder is a three-tier application: a React single-page frontend, a Go ba
 | Layer | Technology | Rationale |
 |---|---|---|
 | Frontend | React + TypeScript + Vite | Lightweight SPA; backend is Go so Next.js features are unused. |
-| Backend | Go 1.22+ (chi router) | I/O concurrency for fan-out across ticket APIs; single static binary; strong typing. |
+| Backend | Go 1.25 (chi router) | I/O concurrency for fan-out across ticket APIs; single static binary; strong typing. |
 | Database | PostgreSQL 16 | Mature, portable across hosting providers; no provider-specific features used. |
 | DB access | pgx + sqlc | Type-safe SQL generation without ORM weight. |
 | Background jobs | river (Postgres-backed) | No Redis dependency until volume justifies it. |
 | Local dev | Docker Compose | One command to bring up the full stack. |
-| Logging | log/slog (stdlib) | Structured JSON logging, native to Go 1.22. |
-| Hosting (Phase 3) | AWS (ECS Fargate + RDS) | Builds on existing operator experience. |
+| Logging | log/slog (stdlib) | Structured JSON logging, stdlib since Go 1.21. |
+| Hosting (Phase 3) | AWS EC2 t4g.small + RDS db.t4g.micro | Free-tier anchored single instance; see §10.3 and §11. ECS Fargate was the original sketch and is deferred (§11.3). |
 
 ### 2.2 Why a Backend (and not browser-only)
 
 A backend-first design is mandatory rather than optional, for the following reasons:
 
-- Third-party API keys for Ticketmaster, Bandsintown, and other paid or rate-limited services cannot live in browser code.
+- Third-party API keys for Ticketmaster and other paid or rate-limited services cannot live in browser code.
 - Spotify refresh tokens are long-lived and must be stored encrypted at rest. Browser storage is unsuitable.
 - Concert search is a fan-out across many APIs per request. Server-side coordination enables shared caching, rate-limit pooling, and progressive result streaming.
 - Multi-user support in later phases requires server-side session management and per-user data isolation.
@@ -86,22 +92,36 @@ The Go backend follows a standard layered structure with feature-oriented intern
 
 ```
 /cmd
-  /server         main.go for the API
-  /worker         main.go for background jobs (Phase 2+)
+  /server         main.go for the API; river workers run in-process
 /internal
-  /spotify        Spotify client, types, affinity scoring
+  /spotify        Spotify client and types
+  /affinity       affinity scoring over Spotify signals
   /ticketmaster   Ticketmaster client, types
-  /bandsintown    Bandsintown client, types
-  /concerts       aggregation, dedup, scoring
-  /auth           PKCE handshake, token storage, refresh middleware
-  /db             sqlc-generated code
+  /fallback       Phase 2 chain: MusicBrainz, JSON-LD, Songkick, geocoding turnstiles
+  /concerts       aggregation, dedup, event grouping, filters, search fan-out
+  /geocoding      shared distance math and place normalization
+  /auth           PKCE handshake, token storage, refresh middleware, rate limiting
+  /db             pgx queries, migrations, caches
   /http           HTTP handlers, middleware
+  /jobs           river job args, workers, and wall-clock schedules
+  /rate           per-user daily API quota ledger
+  /email          digest and instant-notify rendering, SMTP sender
+  /config         env parsing and cross-setting invariants
 /migrations       SQL migration files
-/web              React + TS frontend (or separate repo)
+/web              React + TS frontend
 /infra            Terraform definitions (Phase 3)
 ```
 
 Each external API has its own dedicated package with its own types. Shared "models" packages are deliberately avoided; external API schemas drift independently and should not couple to one another.
+
+Two departures from the original sketch, both from Phase 3:
+
+- **There is no `/cmd/worker`.** River workers are registered in the same
+  process as the API server. A separate worker binary would double the
+  deploy surface and the RDS connection count for a workload that idles
+  most of the day; splitting it later is a `main.go` change, since the
+  workers already take their dependencies as struct fields.
+- **`/internal/bandsintown` was deleted** (see §5.3).
 
 ---
 
@@ -258,15 +278,22 @@ Spotify's Developer Terms prohibit long-term caching of Spotify Content and proh
 
 ## 5. Concert Search Layer
 
-For each artist on the curated affinity list, ConcertFinder fans out to multiple concert data sources in parallel. The fan-out is bounded by a semaphore to respect rate limits, with per-request context timeouts to ensure the end-user request does not hang on a slow source.
+For each artist on the curated affinity list, ConcertFinder fans out to concert data sources in parallel. The fan-out is bounded by a semaphore to respect rate limits, with context deadlines so a slow source cannot hang the scan.
 
 ### 5.1 Sources
 
 | Source | Endpoint | Coverage | Auth |
 |---|---|---|---|
 | Ticketmaster Discovery | `GET /discovery/v2/events.json` | Ticketmaster + Live Nation network; most large tours | API key (free, instant signup) |
-| Bandsintown | `GET rest.bandsintown.com/artists/{name}/events` | Broad indie coverage; smaller venues | `app_id` parameter (no auth, partnership for high volume) |
-| Songkick (Phase 2) | `GET api.songkick.com/api/3.0/...` | Variable indie coverage | API key |
+| Phase 2 fallback chain | MusicBrainz → artist site JSON-LD | Long tail; whatever the artist publishes themselves | None (MusicBrainz is open) |
+| Songkick (Phase 2, unused) | `GET api.songkick.com/api/3.0/...` | Variable indie coverage | API key — never obtained; tier is skipped without `SONGKICK_API_KEY` |
+
+**Ticketmaster is the sole primary source.** The design originally paired it
+with Bandsintown so that a miss by one was covered by the other; that
+redundancy no longer exists (§5.3). The practical consequence is that the
+Phase 2 fallback chain went from a long-tail supplement to the *only*
+secondary source, which is why its budget and concurrency are tuned as
+carefully as they are in §5.4.4.
 
 ### 5.2 Ticketmaster Resolution Pattern
 
@@ -277,15 +304,52 @@ Naively keyword-searching events by artist name produces false positives (cover 
 
 Free tier limits are 5 requests/sec and 5,000 requests/day. With a 200-artist list this allows roughly 25 full refresh cycles per day before throttling. Per-artist resolution is cached in the `artist_resolutions` table (see section 7).
 
-### 5.3 Bandsintown
+**Resolution caching is asymmetric, and deliberately so.** A positive
+resolution (name → `attractionId`) is kept forever; a negative one expires
+after `concerts.NegativeResolutionTTL` (30 days). Resolution requires an exact
+name match, and an unsigned artist can sign to Ticketmaster at any time — a
+permanent negative would exclude them silently and forever, with no error and
+no log line. The same asymmetry applies to every negative cache in the system;
+see §7.3.
 
-Bandsintown's public API accepts an `app_id` query parameter (any chosen string, used for attribution). The endpoint accepts artist name as a path parameter. URL returned in event records contains tracking parameters that must be preserved when displaying the link, per Bandsintown's display requirements.
+### 5.3 Bandsintown (removed)
 
-Bandsintown's coverage is artist-driven (artists submit their own tour dates), which is why it is stronger for smaller and DIY acts than Ticketmaster. The public API is sufficient for personal and small-scale use; high-volume production use requires applying to their partnership program. This is a Phase 3 concern.
+*Historical. Bandsintown was a primary source in the original design and
+through Phases 1–2. It was removed in Phase 3 (migration 0015) and no client
+remains in the tree.*
+
+Bandsintown's public API accepts an `app_id` query parameter (any chosen
+string, used for attribution) and takes the artist name as a path parameter.
+Its coverage is artist-driven — artists submit their own tour dates — which is
+why it was expected to be stronger than Ticketmaster for smaller and DIY acts.
+
+**What actually happened:** every request returned HTTP 403 with an AWS
+`explicit deny in an identity-based policy` body, for the entire period the
+integration was wired up. A partnership-program request went unanswered. The
+integration therefore contributed zero results while costing one call per
+artist per scan and a slot in the per-user quota ledger — a source that looked
+live in the code and in the logs, and was not.
+
+**If a future phase reconsiders it:** confirm the API answers a real request
+before writing a client. The failure mode here was not that Bandsintown was
+unavailable, it was that unavailability was indistinguishable from "this artist
+has no shows," so the source was believed to be working for months.
+
+Retiring a source does not retire its data: `concerts.data` blobs written
+before removal still carry `"source":"bandsintown"` ticket links until the
+janitor prunes those events, so the `Source` constant and its display label
+outlive the client. See §6 for why the priority table must keep an entry for it.
 
 ### 5.4 Small-Artist Fallback (Phase 2)
 
-When both primary sources return zero results for a high-affinity artist (above a configurable score threshold), ConcertFinder escalates to a layered fallback. This is Phase 2 work; Phase 1 omits it entirely.
+When the primary source returns zero results for a high-affinity artist (above `PHASE2_MIN_SCORE`), ConcertFinder escalates to a layered fallback. This is Phase 2 work; Phase 1 omits it entirely.
+
+**Escalation requires a real miss, not just an empty result.** If Ticketmaster
+was skipped because the user's daily quota ran out, the artist is *not*
+escalated. Treating a quota refusal as "no results" pushes the artist into the
+far more expensive fallback chain — spending more precisely because we were
+trying to spend less. This is why `rate.Allow` returns a distinguishable
+`errRateCapped` rather than an empty slice.
 
 #### 5.4.1 Tier A: Structured Fallbacks
 
@@ -294,7 +358,7 @@ When both primary sources return zero results for a high-affinity artist (above 
 
 #### 5.4.2 Tier B: URL Resolution and JSON-LD Extraction
 
-1. Resolve the artist's official homepage URL. The default resolver is **MusicBrainz** (`/ws/2/artist` search → `/ws/2/artist/{mbid}?inc=url-rels` → filter for `type == "official homepage"`) — free, no API key, ToS-clean, and community-maintained coverage that skews well toward long-tail artists. A Brave Search implementation is retained as a plug-in alternative behind `BRAVE_SEARCH_API_KEY`; if that env var is set the chain uses Brave instead. Cache the resolution per Spotify artist ID indefinitely.
+1. Resolve the artist's official homepage URL. The default resolver is **MusicBrainz** (`/ws/2/artist` search → `/ws/2/artist/{mbid}?inc=url-rels` → filter for `type == "official homepage"`) — free, no API key, ToS-clean, and community-maintained coverage that skews well toward long-tail artists. A Brave Search implementation is retained as a plug-in alternative behind `BRAVE_SEARCH_API_KEY`; if that env var is set the chain uses Brave instead. Resolutions are cached by normalized artist name in `mb_url_cache`, shared across every user and every restart — a hit costs a DB read instead of a slot in a 1 req/sec global turnstile. Positives are kept indefinitely; negatives expire after `db.NegativeMBURLTTL` (30 days), because MusicBrainz is a user-edited database that gains URL relationships continuously.
 2. Fetch the artist's homepage and any common tour-page paths (`/tour`, `/shows`, `/live`). Look for `<script type="application/ld+json">` blocks containing schema.org `MusicEvent` entities. Many artist sites (Squarespace, Bandzoogle templates) publish these automatically for SEO.
 3. If no structured data is found, surface a prefilled Google search link to the user as the terminal fallback. Do not build heuristic HTML parsers; the maintenance burden is unjustifiable.
 
@@ -307,6 +371,48 @@ When both primary sources return zero results for a high-affinity artist (above 
 - Per-domain rate limit: minimum 3 seconds between requests to the same host.
 - Aggressive caching: 6–24 hour TTL on fetched pages.
 - DICE.fm is explicitly excluded as their Terms of Service prohibit automated access.
+
+#### 5.4.4 Budgeting the Chain (Phase 3)
+
+The chain's two resolvers — MusicBrainz and Nominatim — each impose a hard
+1 req/sec/IP limit, enforced client-side by a single process-wide turnstile
+per resolver. Everything below follows from that one fact.
+
+- **Cost scales with escalating artists, not with parallelism.** Adding
+  goroutines buys nothing when every lookup queues behind the same turnstile.
+  A cold 200-artist profile measured ~250s of MusicBrainz plus ~86s of
+  Nominatim against a 300s `ScanBudget`; unbounded, the fallback consumes the
+  entire scan and starves the Ticketmaster fan-out that produces most results.
+- **The chain gets its own scan-wide deadline** (`PHASE2_FALLBACK_BUDGET_SECONDS`,
+  default 120s), shared by every artist in the scan. A *per-artist* cap is not
+  a cap: multiplied by 200 artists it bounds nothing.
+- **Running out of budget is logged, not counted as scan incompleteness.**
+  Flagging it would mark `complete = false` on nearly every cold scan, which
+  the SWR handler reads as permanently stale and converts into a rescan loop
+  (§6.0). The trade is real and worth naming: a partially-escalated scan is
+  silently partial.
+- **The budget is per scan; the turnstiles are per process.** N concurrent
+  scans split one resolver's throughput while each still holds a full budget,
+  so coverage thins as users are added — ~55 lookups solo becomes ~11 each at
+  five-way concurrency, with no error and no log.
+  `PHASE2_FALLBACK_CONCURRENCY` (default 1, matching the turnstiles) admits a
+  bounded number of scans to the chain; the rest skip it and log *why*,
+  distinctly from budget exhaustion. Skipping is acceptable because resolver
+  results persist in `mb_url_cache` / `venue_geo_cache` and scans repeat
+  nightly, so coverage accrues across runs.
+- **Anything enforcing a rate limit must be cancellable.** The turnstile is a
+  capacity-1 channel, not a `sync.Mutex`: `Lock()` is not context-aware, so
+  200 artists queued behind a ~1.1s-per-holder mutex could not be released by
+  the scan deadline at all. Observed before the fix: a 5-minute job that ran
+  for 978 seconds.
+
+**Measured limits.** Raising the budget from 60s to 120s eliminated the
+`artists_not_escalated=34` exhaustion (a sixth of a 200-artist profile getting
+no secondary lookup) but did not change the number of concerts found. The
+binding constraints are upstream of the budget: MusicBrainz lacks an official
+homepage for roughly a fifth of matched artists, and of the sites it does
+resolve, only some still publish schema.org `MusicEvent` JSON-LD. Widening the
+budget bought correctness, not coverage.
 
 ---
 
@@ -332,22 +438,73 @@ Records sharing a dedup key are merged into a single canonical event with multip
 
 1. Artist's own official site (when surfaced via the Phase 2 fallback)
 2. Ticketmaster / Live Nation network link
-3. Bandsintown link (with tracking parameters preserved)
-4. Songkick or other aggregator links last
+3. Songkick or other aggregator links
+4. Anything unrecognized, last
 
 All discovered ticket links are presented to the user, sorted by the priority above. This serves two purposes: it gives the user choice of vendor (which can affect price and fees), and it provides graceful degradation if any one link is broken or sold out.
+
+**Unknown sources sort last, explicitly.** `priorityOf` returns a large
+sentinel for a source missing from the table rather than letting a bare map
+lookup yield the zero value — which is numerically *better* than
+Ticketmaster's 2 and would promote unrecognized links to the top of every
+card. This is also why the retired Bandsintown constant keeps its table entry
+(§5.3): stored links outlive their client, and deleting the entry would
+silently reorder every card holding one.
 
 ### 6.0 Snapshot / SWR Pattern (Phase 3)
 
 The synchronous streaming pattern below was superseded during Phase 3 by a
 stale-while-revalidate design against `user_concert_snapshots`. GET
 `/api/me/concerts` returns the last completed scan immediately and enqueues
-a background refresh when the snapshot is older than
-`SNAPSHOT_STALE_AFTER_HOURS`. The fan-out itself now runs inside the river
-`ScanConcerts` worker, with the same §8.1 concurrency (semaphore=10, per-job
-budget=5min). Pre-warm on login + nightly cron ensures active users always
-have a warm snapshot. See `CLAUDE.md > SWR read pattern` for the current
-handler flow.
+a background refresh when the snapshot is stale. The fan-out itself now runs
+inside the river `ScanConcerts` worker, with the same §8.1 concurrency
+(semaphore=10, per-job budget=5min). See `CLAUDE.md > SWR read pattern` for
+the current handler flow.
+
+**A snapshot is stale when it is missing, older than
+`SNAPSHOT_STALE_AFTER_HOURS` (default 6), or marked `complete = false`.** That
+third condition is what keeps partial scans visible. `concerts.Search` returns
+an `*IncompleteError` alongside its partial results when artists were skipped
+or a source hit its quota; the worker persists what it found — a half-filled
+page beats an empty one — but records the incompleteness. Stamping
+`computed_at = now()` on a truncated scan and calling it success makes it
+indistinguishable from a complete one, and it is then trusted for the full
+staleness window.
+
+**Quota exhaustion is a wait, not a retry.** A scan that ran out of daily
+quota cannot do better until the rate ledger's UTC day rolls over, so the
+worker records `retry_after` on the snapshot and returns success rather than
+erroring. The SWR handler refuses to enqueue before that instant and reports
+`refreshing: false`. Both halves are required: without them, `complete = false`
+means "permanently stale," and the frontend's 10s poll re-enqueues an
+impossible scan every 10 seconds for the rest of the day while river
+separately retries it. Incompleteness caused by *skipped artists* still
+retries normally — time alone does not fix that one.
+
+**One scan per (user, location) at a time**, expressed as args-level
+`ByArgs` + `ByState` uniqueness over every non-terminal state. Never as
+`ByPeriod`: a scan takes ~60s, so a 30s window lapses mid-run and a second
+scan starts underneath the first. Because a scan reserves the user's whole
+daily quota block up front, that second scan gets zero permits, reports itself
+rate-capped, and overwrites the first one's good snapshot with
+`complete = false`.
+
+**Four triggers, one job.** Login pre-warm, a stale read, the nightly fanout,
+and `POST /api/me/concerts/refresh` all insert the same `ScanConcerts` args,
+and river's uniqueness collapses them to one in flight. Manual refresh is
+additionally throttled by `ManualRefreshMinInterval` (15 min) measured from
+the snapshot's `computed_at` — uniqueness prevents two scans running at once
+but says nothing about the gap between completed ones, and every scan spends
+real quota. `retry_after` outranks that interval, so a manual click can never
+bypass the quota guard.
+
+**Filters are applied over the snapshot, and every facet count must equal what
+clicking it returns.** Each filter matches by the same rule its facet buckets
+by — genre is an exact case-insensitive tag match (substring matching turned a
+"rock · 12" pill into forty results by also matching "indie rock" and
+"post-rock"), and venue is compared under the dedup normalizer so one room
+spelled two ways by two feeds is one facet with one count. Counts are of
+*events*, not artist matches (§6.2).
 
 ### 6.1 Streaming Result Pattern (historical — Phase 2)
 
@@ -357,6 +514,49 @@ A naive implementation would block until all artist searches complete, then retu
 - A collector goroutine deduplicates incrementally and pushes results to an in-memory aggregated set.
 - The HTTP handler enforces a 15-second context timeout (configurable). Any artist searches still in flight are canceled cleanly via `context.Done()`.
 - The frontend can poll a follow-up endpoint to retrieve any results that completed after the initial response (Phase 2 enhancement).
+
+### 6.2 Event Grouping — Multi-Artist Bills (Phase 3)
+
+Deduplication collapses *sources*. Grouping collapses *artists*. They are
+different problems, and §12.2 raised the second one as an open question; this
+is the answer.
+
+A festival where the user's profile matched six artists is six `Concert` rows
+sharing a date, venue, and city — one night out rendered as most of a screen.
+`/me/concerts` and `/me/saved-concerts` therefore return `events[]`, not
+`concerts[]`, folded by
+
+```
+event_key = sha256(iso_date(dt) + normalize(venue) + normalize(city))
+```
+
+into one `Event` carrying an `Acts[]` list, with ticket links unioned and
+deduped by URL.
+
+- **Grouping happens at assembly time, never inside `DedupKey`.** `dedup_key`
+  is the primary key of the `concerts` table and half of the primary key of
+  `user_saved_concerts`, so folding the artist out of it would orphan every
+  existing save and erase the per-artist rows the subscribe control and the
+  genre facets are built on. Storage stays one row per (artist, date, venue,
+  city).
+- **Saves and subscriptions stay per artist.** Each `Act` carries its own
+  `dedup_key`, `saved`, and `subscribed`; the card renders one star + bell per
+  act. Subscribing patches that artist across every event in the list, since
+  an artist can appear on several bills.
+- **`event_key` is day-granular on purpose.** Acts at a festival have
+  different set times, so keying on the full timestamp would split exactly the
+  bills this exists to merge. The cost is that a venue string naming a
+  multi-room complex merges genuinely separate shows on the same night. That
+  is the accepted trade: the alternative loses every festival.
+- **Counts are of events.** Facet counts collect distinct event keys per
+  bucket, because the invariant in §6.0 is measured against the grouped list —
+  counting concerts would promise twice the cards a click delivers.
+- Grouping runs *after* filtering and after the saved/subscribed overlay, so
+  an event survives a filter if any of its acts does.
+- **The email renderers group too**, at render time only (§10.3). The net-new
+  bookkeeping behind them stays keyed on `dedup_key`, one per (artist, show),
+  so an act added later to a bill the user was already emailed about still
+  mails on its own.
 
 ---
 
@@ -405,11 +605,12 @@ CREATE TABLE affinity_profiles (
 );
 
 -- Artist name resolution across platforms (stable; not Spotify data)
+-- The bandsintown_name column was dropped in migration 0015 (§5.3) and
+-- official_url in 0011 — homepage resolution lives in mb_url_cache, keyed by
+-- normalized name so it is shared across users rather than per Spotify ID.
 CREATE TABLE artist_resolutions (
   spotify_artist_id           TEXT PRIMARY KEY,
   ticketmaster_attraction_id  TEXT,
-  bandsintown_name            TEXT,
-  official_url                TEXT,
   resolved_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -422,18 +623,60 @@ CREATE TABLE concert_cache (
 CREATE INDEX ON concert_cache(fetched_at);
 ```
 
+### 7.1a Tables Added in Phases 2–3
+
+`/migrations` is authoritative; this is the map of what each table is for.
+
+| Table | Added for | Purpose |
+|---|---|---|
+| `oauth_handshakes` | Phase 1 | Short-lived PKCE verifier + CSRF state, keyed by handshake cookie. |
+| `concerts` | Phase 3 (0012) | Canonical event rows keyed by `dedup_key`. Snapshots reference these rather than embedding blobs, so one show is stored once across all users. |
+| `user_concert_snapshots` | Phase 3 | Per (user, location_key) scan result: ordered `dedup_keys[]`, `computed_at`, `complete` (0013), `retry_after` (0014). |
+| `user_saved_concerts` | Phase 3 | Per-user stars. Primary key includes `dedup_key`, which is why §6.2 forbids folding the artist out of it. |
+| `user_subscribed_artists` | Phase 3 | Per-artist bell; drives instant notifications. |
+| `user_digest_sent` | Phase 3 | Exact net-new bookkeeping for email — one row per (user, `dedup_key`) already mailed. |
+| `rate_ledger` | Phase 3 | Per (user, source, UTC day) API call counter (§8.3). |
+| `mb_url_cache` | Phase 2 | MusicBrainz homepage resolutions, shared globally by normalized artist name. |
+| `venue_geo_cache` | Phase 2 | Nominatim geocodes by normalized place key. |
+
 ### 7.2 Encryption of Refresh Tokens
 
-Refresh tokens are encrypted at rest using AES-256-GCM. The key is loaded from the environment variable `ENCRYPTION_KEY` as a 32-byte hex-encoded value. A unique nonce is generated per token and stored alongside the ciphertext. In Phase 3 the key is sourced from AWS Secrets Manager rather than environment configuration.
+Refresh tokens are encrypted at rest using AES-256-GCM. The key is loaded from the environment variable `ENCRYPTION_KEY` as a 32-byte hex-encoded value. A unique nonce is generated per token and stored alongside the ciphertext. Phase 3 keeps reading it from the process environment (injected from `/opt/concertfinder/.env`); Secrets Manager is deferred per §11.3, and moving to it is a config change rather than a code change.
 
 ### 7.3 Cache TTLs
 
 | Table / Cache | TTL | Rationale |
 |---|---|---|
-| `affinity_profiles` | 24 hours | Balance freshness against Spotify API load. |
-| `artist_resolutions` | Indefinite, refresh quarterly | Stable cross-platform mappings. |
-| `concert_cache` | 4 hours | Stay within ticket API rate limits; concerts rarely change hour-to-hour. |
+| `affinity_profiles` | 24 hours | Balance freshness against Spotify API load. Also the ToS ceiling (§4.4). |
+| `artist_resolutions` | Positive: indefinite. Negative: 30d (`concerts.NegativeResolutionTTL`) | Stable mappings; see §5.2 for why the negative must expire. |
+| `mb_url_cache` | Positive: indefinite. Negative: 30d (`db.NegativeMBURLTTL`) | MusicBrainz gains URL relationships continuously. |
+| `venue_geo_cache` | Positive: indefinite. Negative: 30d (`db.negativeGeoTTL`) | City coordinates don't drift; Nominatim misses are often transient. |
+| `concert_cache` | 12 hours (`CONCERT_CACHE_TTL_HOURS`) | See the ordering constraint below. |
+| `user_concert_snapshots` | 6 hours (`SNAPSHOT_STALE_AFTER_HOURS`) | Staleness threshold for the SWR read, not a delete. |
 | `sessions` | 30 days last_seen, 90 days created | Reasonable browser persistence. |
+
+**Every negative cache expires; positives don't.** Three lookups record "we
+asked and there was nothing," and each has been a silent permanent exclusion at
+some point. The reasoning is identical in all three cases — the underlying
+answer can change without anyone telling us — and so is the failure mode: no
+error, no log, the artist or venue simply never appears again. Positives are
+kept forever on purpose, since re-fetching them spends a 1 req/sec turnstile
+for data that does not change.
+
+**A TTL enforced only in SQL is not enforced.** `MusicBrainzClient` consults a
+5000-entry in-process LRU *before* the DB, and at 200 artists per scan nothing
+ever evicts a negative — so the hot entry carries its own `resolved_at`, and
+`GetMBURL` returns the row's timestamp rather than letting a promoted negative
+restart its clock.
+
+**`concert_cache`'s TTL is bounded on both sides.** It must stay *above*
+`SNAPSHOT_STALE_AFTER_HOURS`, so an SWR-triggered refresh is served from cache
+rather than re-billing the upstream, and *below* the janitor's 7-day prune of
+the same table. It is also the main lever on what a user costs: a scan covers
+200 artists, so every expiry is worth roughly one call per artist per source.
+At the original 4 hours the cache lapsed several times a day and scans ran out
+of quota partway through, returning a fraction of a user's shows.
+`internal/config` has tests pinning all three relationships.
 
 ---
 
@@ -441,30 +684,68 @@ Refresh tokens are encrypted at rest using AES-256-GCM. The key is loaded from t
 
 ### 8.1 Fan-Out Pattern
 
-The end-to-end request flow for a "get my concerts" call:
+*Phase 3 moved this out of the HTTP handler and into `ScanConcertsWorker`. The
+concurrency shape is unchanged; what changed is who waits for it — the read
+path now serves a snapshot (§6.0) and the fan-out runs in the background.*
 
-1. Resolve user from session cookie.
-2. Load (or compute) the user's affinity profile. Cached for 24 hours.
-3. Take the top-N artists from the profile (N=200 in Phase 1).
-4. Spawn one goroutine per artist, governed by a buffered semaphore (capacity 10). Each goroutine fans out internally to Ticketmaster + Bandsintown in parallel.
-5. Send results to a collector channel. A separate goroutine deduplicates and accumulates.
-6. Return results when all goroutines complete or the 15-second context timeout fires, whichever comes first.
+The flow inside one scan job:
+
+1. Load (or compute) the user's affinity profile. Cached for 24 hours.
+2. Take the top-N artists from the profile (N=200).
+3. Reserve the user's per-source daily quota for the whole scan up front, as a
+   `rate.Reservations` block on the context, rather than one DB round trip per
+   call (§8.3).
+4. Spawn one goroutine per artist, governed by a buffered semaphore (capacity
+   10). Each queries Ticketmaster, escalating to the Phase 2 chain only on a
+   genuine miss (§5.4).
+5. Deduplicate and accumulate; normalize merged results into the shared
+   `concerts` table and write the ordered `dedup_keys` to the snapshot row.
+6. Stop at `ScanBudget` (5 minutes). Partial results are persisted with
+   `complete = false` rather than discarded (§6.0).
 
 ### 8.2 Rate Limit Handling
 
 Every external API call is wrapped in a retry helper with the following policy:
 
-- On HTTP 429: read the `Retry-After` header. If present and numeric, sleep that many seconds (capped at 30s) and retry. If absent, use exponential backoff with jitter: `min(2^attempt * 100ms + random(0-100ms), 30s)`.
+- On HTTP 429: read the `Retry-After` header. If present and numeric, sleep that many seconds (**clamped** to 30s) and retry. If absent, use exponential backoff with jitter: `min(2^attempt * 100ms + random(0-100ms), 30s)`.
 - On 5xx: exponential backoff with jitter, capped at 3 retries. Do *not* retry 4xx other than 429.
-- All retries respect the parent `context.Context` deadline. The HTTP handler's 15-second budget is shared with all retries.
+- All retries respect the parent `context.Context` deadline — now the scan
+  job's `ScanBudget` rather than an HTTP handler's timeout.
+
+"Clamped" is load-bearing: a `Retry-After` longer than 30s is *shortened*
+toward 30s, never replaced by the sub-second backoff path. Falling back to the
+short backoff when the header looks unreasonable turns a soft rate limit into
+a ban.
 
 ### 8.3 Per-User Rate Accounting (Phase 3)
 
 In a multi-user deployment, a single heavy user must not exhaust Ticketmaster's 5,000-request daily quota for everyone. Per-user accounting is added in Phase 3:
 
-- Track request counts per user per upstream service in a Postgres counter table (or Redis if/when added).
-- Soft cap: 100 Ticketmaster requests per user per day (configurable).
-- On user cap exceeded: degrade gracefully (serve cached results, surface a "refresh limited" message), do not fail entirely.
+- Track request counts per user per upstream service in the `rate_ledger`
+  table, bucketed by UTC day.
+- Quota is taken out per scan as a reservation block on the context, not one
+  DB round trip per call; unspent permits are handed back at the end.
+- Caps: `RATE_CAP_TM_PER_USER_DAILY` (250), `RATE_CAP_SONGKICK_PER_USER_DAILY`
+  (100). 0 disables the cap for that source.
+- On user cap exceeded: degrade gracefully (serve cached results, surface a
+  "refresh limited" message), do not fail entirely.
+
+**The cap must exceed the artist count, not just fit under the shared
+ceiling.** A scan needs roughly one call per artist per source once
+`concert_cache` lapses, so a cap below `MaxScoredArtists` (200) means a user
+can *never* cover their own profile: every scan spends the allowance partway
+through and reports itself incomplete. This shipped as TM=100 against 200
+artists, and presented as a concert list quietly holding half the shows it
+should. `main.go` warns at startup when a cap drops below the artist count.
+
+**Every outbound call spends quota, including attraction resolution** — not
+just the events query. A source that runs out returns `errRateCapped`, which
+must not be read as "no results" (§5.4).
+
+**Sizing trade-off.** Ticketmaster's account-wide budget is 5,000/day, so 250
+per user supports roughly 20 concurrently active users rather than 50. The
+ledger enforces per-user limits only; it does not model the account total.
+Revisit before onboarding a crowd.
 
 ---
 
@@ -488,19 +769,48 @@ Every third-party data source has terms that constrain how its data may be used.
 
 ### 9.3 Bandsintown Public API Terms
 
+*No longer applicable — the integration was removed (§5.3). Retained because
+stored ticket links from the period still carry Bandsintown URLs, and those
+links keep their tracking and attribution parameters when displayed.*
+
 - Preserve all tracking and attribution parameters in event URLs when presenting to users.
 - Display the artist's upcoming events in a manner consistent with their display requirements.
 - High-volume production use requires applying to their partnership program. The public API is sufficient for personal and demo-scale use.
 
-### 9.4 Privacy
+### 9.4 MusicBrainz and Nominatim
 
-User data stored by ConcertFinder is limited to: Spotify user ID, display name, encrypted refresh token, location settings, derived affinity profile (24h TTL), and session metadata. The application does not collect email, payment information, browsing data outside the application, or any data not directly used for the concert recommendation feature. A privacy policy document is required before any public deployment (Phase 3).
+Both are free community services whose terms are enforced by etiquette rather
+than by an API key, which makes them easy to violate accidentally:
+
+- Requests must carry a `User-Agent` identifying the application and a contact
+  URL. Anonymous requests are rejected outright.
+- 1 request/second/IP, hard. Enforced client-side by a process-wide turnstile
+  per service (§5.4.4), not per scan and not per goroutine.
+- Results are cached aggressively and globally (`mb_url_cache`,
+  `venue_geo_cache`) so repeat scans and additional users cost nothing.
+- MusicBrainz returns 503 when busy even inside the documented limit; the
+  client retries with backoff rather than treating it as a negative answer.
+
+### 9.5 Privacy
+
+User data stored by ConcertFinder is limited to: Spotify user ID, display
+name, encrypted refresh token, location settings, derived affinity profile
+(24h TTL), saved/subscribed concert keys, email delivery bookkeeping, and
+session metadata.
+
+**Email address is collected as of Phase 3**, via the `user-read-email` scope,
+solely to deliver the digest and instant notifications the user opted into. It
+is stored in plaintext (it is a delivery address, not a credential) and is
+removed with the rest of the user's rows on account deletion. The application
+collects no payment information, no browsing data outside the application, and
+nothing else not directly used for the concert feed. `/privacy` and `/terms`
+pages ship with the Phase 3 deployment.
 
 ---
 
 ## 10. Phased Roadmap
 
-### 10.1 Phase 1: Single-User Local MVP
+### 10.1 Phase 1: Single-User Local MVP — *complete*
 
 Target: working end-to-end demo on the developer's machine. Estimated effort: 2–3 focused weekends.
 
@@ -508,7 +818,7 @@ Target: working end-to-end demo on the developer's machine. Estimated effort: 2�
 
 - Spotify PKCE authentication; refresh token encrypted in Postgres.
 - Full affinity profile from all six Spotify signal sources.
-- Concert search: Ticketmaster (via attraction resolution) + Bandsintown.
+- Concert search: Ticketmaster (via attraction resolution) + Bandsintown (the latter since removed — §5.3).
 - Concurrent fan-out with semaphore + context timeout.
 - Deduplication by normalized (artist, date, venue, city).
 - Single grouped-by-month concert list view in the frontend.
@@ -524,20 +834,20 @@ Target: working end-to-end demo on the developer's machine. Estimated effort: 2�
 - Filters (genre, price, distance).
 - AWS deployment.
 
-### 10.2 Phase 2: Full Coverage Locally
+### 10.2 Phase 2: Full Coverage Locally — *complete*
 
 Target: feature-complete on the local machine, ready to consider hosting.
 
 **In Scope**
 
-- Small-artist fallback: Songkick + Tier B JSON-LD extraction from artist sites via Brave Search resolution.
+- Small-artist fallback: Songkick + Tier B JSON-LD extraction from artist sites. Shipped with **MusicBrainz** as the default resolver rather than Brave Search (§5.4.2); Songkick is wired but inert without an API key, which was never obtained.
 - Location picker UI with geocoding.
 - Filters: genre, distance, date range, weekday/weekend.
 - Background daily affinity refresh via river.
-- Result streaming: frontend polls for late-arriving results after initial response.
+- Result streaming: frontend polls for late-arriving results after initial response. Superseded by SWR polling against the snapshot (§6.0).
 - Begin Spotify Extended Quota Mode application.
 
-### 10.3 Phase 3: Hosted Multi-User on AWS
+### 10.3 Phase 3: Hosted Multi-User on AWS — *application complete; deployment not*
 
 Target: shareable public URL; small group of users beyond the developer.
 
@@ -545,10 +855,14 @@ Target: shareable public URL; small group of users beyond the developer.
 
 **In Scope**
 
-- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Route 53, Elastic IP.
-- Per-user rate-limit accounting against shared API quotas.
-- Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP).
+- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Route 53, Elastic IP. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
+- Per-user rate-limit accounting against shared API quotas (§8.3).
+- Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
+- SWR snapshot read path with background scans (§6.0), replacing the synchronous fan-out.
+- Manual refresh endpoint, throttled independently of river's job uniqueness.
+- Event grouping for multi-artist bills (§6.2), in both the web list and the email renderers.
+- Account deletion.
 - Observability: minimum-viable CloudWatch alarms on EC2 status check + RDS free storage. Application logs stay in Docker (`docker compose logs`).
 - Terraform definitions checked into `/infra` covering RDS, EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Route 53, Elastic IP, and the two CloudWatch alarms above.
 
@@ -556,11 +870,42 @@ Target: shareable public URL; small group of users beyond the developer.
 
 - ECS Fargate, CloudFront/S3 frontend split, Secrets Manager, ALB, blue/green deploys, CloudWatch dashboards + log shipping.
 
+#### 10.3.1 Scheduled Work
+
+Four daily jobs — affinity refresh, scan fanout, digest fanout, janitor — run
+from wall-clock UTC schedules (`DAILY_*_HOUR_UTC`, defaults 06/07/09/10), not
+from `river.PeriodicInterval`.
+
+**Why not intervals.** River's periodic scheduler holds in-memory state only
+and re-anchors every job to process start, so a 24-hour interval means "24
+hours after this process booted." The time of day drifts with each deploy, and
+with `RunOnStart: false` a process restarting more often than the interval
+fires the job *never*. Deploys restart the server on every push to `main`, so
+a two-deploy day was a day with no scan, no digest, and no janitor run — and
+nothing logged that. `jobs.DailyAt(hour, min)` computes the next real UTC
+occurrence instead, which makes restarts harmless and `RunOnStart: false`
+correct rather than dangerous.
+
+**The digest must trail the scan** by at least `config.MinScanDigestGapHours`
+(2h). The digest emails whatever snapshot exists, so scheduling it alongside
+the scan makes every digest describe the *previous* day's results — silently,
+because a stale snapshot is still a valid one. Two hours clears the fanout's
+60-minute spread plus `ScanBudget` and retries. The gap is computed modulo 24
+so a 23:00 scan with a 01:00 digest reads as 2, not −22; `main.go` warns at
+startup when it is too small.
+
+**The digest is deliberately not chained off `ScanConcertsWorker`** the way
+instant-notify is. A scan fires on login, on stale reads, and on manual
+refresh, so chaining would email on all of them. Suppressing that needs a
+trigger field on `ScanConcertsArgs` — which changes what `ByArgs` uniqueness
+hashes and would stop two scans deduplicating against each other (§6.0). The
+scheduled offset avoids the trap entirely.
+
 ### 10.4 Phase 4: Polish and Scale
 
 Target: production-quality public app. Speculative.
 
-- Additional sources (SeatGeek, possibly Bandsintown partnership API).
+- Additional sources. SeatGeek is the leading candidate; Ticketmaster being the sole primary (§5.3) makes a second one more valuable than it looked in Phase 1. Bandsintown would require their partnership program to actually respond.
 - User-favorited venues, calendar integration.
 - Mobile-friendly responsive design improvements.
 - Possible international expansion (significant data-source rework).
@@ -631,47 +976,112 @@ The single-instance architecture is a deliberate free-tier / low-ops choice, not
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | Spotify Web API changes invalidate an endpoint we depend on | Medium | Verified all endpoints against current spec; monitor changelog; concentrate API contact in `/internal/spotify` package for blast-radius containment. |
-| Ticketmaster rate limit insufficient at scale | Medium | Per-user accounting in Phase 3; apply for higher tier; aggressive `concert_cache` TTL. |
-| Bandsintown restricts public API for high volume | Medium | Application for partnership tier is part of Phase 3 prep. |
+| Ticketmaster rate limit insufficient at scale | Medium | Per-user accounting in Phase 3 (§8.3); apply for higher tier; aggressive `concert_cache` TTL. At 250/user against a 5,000/day account budget this binds at ~20 active users. |
+| ~~Bandsintown restricts public API for high volume~~ | **Realized** | The public API 403'd every request and the partnership request went unanswered. Source removed (§5.3). Ticketmaster is now the only primary, so a Ticketmaster outage is a total outage. |
+| A dead source is indistinguishable from an empty one | High | The Bandsintown failure ran for months because "403" and "this artist has no shows" both rendered as an empty list. Sources must surface transport failure distinctly from a negative result — the same rule that keeps `errRateCapped` out of the empty-result path (§5.4). |
 | Spotify Extended Quota Mode application is rejected or delayed | Low | Phase 1 and 2 do not require it. Begin application early in Phase 2. |
 | Small-artist coverage remains poor despite fallbacks | High | Explicit non-goal of exhaustive coverage; "search Google" link is acceptable terminal fallback. |
 | Privacy / GDPR concerns at multi-user scale | Low (US-only) | Phase 3 requires privacy policy; minimal PII collected. |
 
 ### 12.2 Open Questions
 
-- What is the right top-N cutoff for the artist list submitted to ticket search? 200 is a starting guess; will tune in Phase 1.
-- Should concerts the user has already viewed be deprioritized in subsequent loads? Probably yes in Phase 3; out of scope for Phase 1.
-- How should multi-artist shows (festivals, opening acts) be presented? Currently each artist match yields a row; merging by event ID across artists is a Phase 2 question.
-- Email notification cadence in Phase 3: daily digest vs. immediate? Probably daily; user-configurable.
+**Answered**
+
+- *How should multi-artist shows (festivals, opening acts) be presented?*
+  Grouped by `event_key` at assembly time, one card per event with a per-act
+  star and bell. Storage stays one row per artist. See §6.2.
+- *Email notification cadence: daily digest vs. immediate?* Both, independently
+  opted into. The daily digest covers everything new in the feed; instant
+  notification fires only for explicitly subscribed artists.
+- *Top-N cutoff.* 200 held up, but it is not a free parameter — it sets the
+  floor for the per-user rate caps (§8.3) and dominates fallback cost (§5.4.4).
+
+**Still open**
+
+- Should concerts the user has already viewed be deprioritized in subsequent
+  loads? Still unimplemented; the snapshot has no read-state.
+- Is the Phase 2 fallback chain worth its complexity? It costs a global
+  1 req/sec turnstile, a budget, and a concurrency gate, and a measured
+  200-artist scan found the same number of concerts at a 60s and a 120s budget
+  (§5.4.4). Worth an explicit measurement of how many *shows* it contributes
+  before tuning it further.
+- Songkick was designed in as a Phase 2 tier but never activated. Either get a
+  key and measure it, or remove the tier.
+- Ticketmaster is now a single point of failure for the entire primary feed.
+  No second primary source has been identified; SeatGeek is the obvious
+  candidate (§10.4).
 
 ---
 
 ## Appendix A: Configuration Reference
 
-Environment variables required by the Go API. In local development these are loaded from `.env` (gitignored). In Phase 3 they are injected from AWS Secrets Manager via the ECS task definition.
+Environment variables read by the Go API. `.env.example` is the authoritative,
+commented copy; this table is the map. In production the file lives at
+`/opt/concertfinder/.env` on the instance and `docker compose` injects it —
+Secrets Manager is deferred (§11.3), so the loading path is the same in both
+environments.
+
+**Core**
 
 | Variable | Purpose |
 |---|---|
-| `SPOTIFY_CLIENT_ID` | OAuth client ID. `[TODO: register and populate]` |
-| `SPOTIFY_REDIRECT_URI` | OAuth callback URL (`https://127.0.0.1:3000/callback` for dev) |
+| `SPOTIFY_CLIENT_ID` | OAuth client ID |
+| `SPOTIFY_REDIRECT_URI` | OAuth callback URL (`https://127.0.0.1:3000/api/auth/callback` for dev) |
 | `TICKETMASTER_API_KEY` | Ticketmaster Discovery API key |
-| `BANDSINTOWN_APP_ID` | Bandsintown attribution identifier |
 | `DATABASE_URL` | Postgres connection string |
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-GCM key for refresh token encryption |
 | `SESSION_COOKIE_DOMAIN` | Cookie domain (`127.0.0.1` for dev) |
 | `LISTEN_ADDR` | Bind address for the API server |
+| `USER_LATITUDE` / `USER_LONGITUDE` / `USER_RADIUS_MILES` | Fallback location for users who never set one; the Phase 1 hardcoded location |
+
+**Phase 2 — fallback chain (§5.4)**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PHASE2_FALLBACKS_ENABLED` | `false` | Master switch for the chain |
+| `PHASE2_MIN_SCORE` | `2.0` | Affinity floor for escalating an artist |
+| `PHASE2_FALLBACK_BUDGET_SECONDS` | `120` | Scan-wide wall-clock for the whole chain; negative disables it |
+| `PHASE2_FALLBACK_CONCURRENCY` | `1` | Scans admitted to the chain at once, process-wide |
+| `BRAVE_SEARCH_API_KEY` | unset | Overrides MusicBrainz as the URL resolver when set |
+| `SONGKICK_API_KEY` | unset | Tier is skipped entirely without it |
+
+**Phase 3 — snapshots, quota, scheduling, email**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SNAPSHOT_STALE_AFTER_HOURS` | `6` | Staleness threshold for the SWR read (§6.0) |
+| `CONCERT_CACHE_TTL_HOURS` | `12` | Upstream response cache; bounded on both sides (§7.3) |
+| `RATE_CAP_TM_PER_USER_DAILY` | `250` | Must exceed the 200-artist scan (§8.3) |
+| `RATE_CAP_SONGKICK_PER_USER_DAILY` | `100` | 0 disables the cap |
+| `DAILY_AFFINITY_HOUR_UTC` | `6` | Wall-clock schedule, not an interval (§10.3.1) |
+| `DAILY_SCAN_HOUR_UTC` | `7` | |
+| `DAILY_DIGEST_HOUR_UTC` | `9` | Must trail the scan by ≥ 2h |
+| `DAILY_JANITOR_HOUR_UTC` | `10` | |
+| `EMAIL_DELIVERY_MODE` | `log` | `log` writes to slog; `smtp` sends |
+| `SMTP_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `FROM` | — | SES SMTP credentials |
+| `SITE_BASE_URL` | `https://127.0.0.1:3000` | Base for unsubscribe links in email |
+| `CONTACT_EMAIL` | — | Operator contact shown on `/privacy` and `/terms` |
+
+Out-of-range or unparseable values fall back to the defaults above rather than
+failing startup. `internal/config` additionally validates the relationships
+between these settings — the cache/staleness/prune ordering and the
+scan→digest gap — and warns at startup rather than silently running a
+configuration that cannot work.
 
 ---
 
 ## Appendix B: Initial External Account Setup Checklist
 
-1. Register a Spotify application at `developer.spotify.com/dashboard`. Configure `https://127.0.0.1:3000/callback` as a redirect URI. Note the Client ID.
+1. Register a Spotify application at `developer.spotify.com/dashboard`. Configure `https://127.0.0.1:3000/api/auth/callback` as a redirect URI. Note the Client ID.
 2. Confirm developer account holds a Spotify Premium subscription (required for Development Mode as of Feb 2026).
 3. Sign up for Ticketmaster Discovery API at `developer.ticketmaster.com`. Confirm API key.
-4. Choose a Bandsintown `app_id` string (any identifier you want associated with your traffic).
-5. Install `mkcert` and generate a local CA for `https://127.0.0.1`.
-6. Install Go 1.22+, Node 20+, Docker Desktop.
-7. Clone the repository and run `docker compose up` to bring up the stack.
+4. Install `mkcert` and generate a local CA for `https://127.0.0.1`.
+5. Install Go 1.25+, Node 20+, Docker Desktop.
+6. Clone the repository, copy `.env.example` to `.env` and fill it in, then bring up the stack (`docs/local-dev.md`).
+
+Nothing else requires an account. MusicBrainz and Nominatim are open (they
+require a descriptive `User-Agent`, not a key); Songkick and Brave Search are
+optional and inert when unset.
 
 ---
 
@@ -685,3 +1095,9 @@ Environment variables required by the Go API. In local development these are loa
 | Attraction (Ticketmaster) | Ticketmaster's name for an artist or performer entity. Events are linked to attractions. |
 | JSON-LD | JavaScript Object Notation for Linked Data. A standard for embedding structured data in web pages, often used for schema.org markup. |
 | Extended Quota Mode | Spotify Web API mode that lifts the Development Mode user cap, requiring application and approval. |
+| `dedup_key` | Hash of (artist, date, venue, city). Identifies one artist's appearance at one show; the primary key of the `concerts` table. Collapses the *same show reported by different sources*. |
+| `event_key` | Hash of (date, venue, city) — artist omitted. Identifies one show; collapses *different artists on the same bill*. Presentation-only; never stored as a key. |
+| Snapshot | A completed scan's result for one (user, location), stored as an ordered list of `dedup_key`s plus its freshness and completeness state. |
+| SWR | Stale-while-revalidate. Serve the existing snapshot immediately, enqueue a refresh in the background if it is stale. |
+| Turnstile | The capacity-1 channel enforcing a minimum gap between requests to a rate-limited service. Chosen over a mutex because it can be abandoned when the context is cancelled. |
+| Reservation | A block of per-user API quota taken out at the start of a scan and partially returned at the end, instead of one ledger write per call. |
