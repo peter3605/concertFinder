@@ -275,9 +275,17 @@ deduped by URL.
 - Grouping runs *after* filtering and after the saved/subscribed overlay,
   so an event survives a filter if any of its acts does.
 
-Not yet grouped: the email digest and instant-notify renderers
-(`internal/email/digest.go`) still emit one line per concert, so a festival
-mails as six rows and the subject counts six.
+- **The email renderers group too, but only at render time.** `RenderDigest`
+  and `RenderInstantNotify` call `GroupEvents` on the way in and count events
+  in the subject; a festival that matched six artists mails as one entry, not
+  six rows under "6 new shows". What must **not** move is the net-new
+  bookkeeping around them — `db.FilterUnsentDedupKeys` / `db.RecordDigestSent`
+  stay keyed on `dedup_key`, one per (artist, show), so an act added to a bill
+  the user was already emailed about still mails on its own. Grouping the
+  sent-set instead would mark the whole bill delivered on first sight.
+  Instant-notify is safe to fold despite being per-subscription because its
+  input is already narrowed to subscribed artists, so a merged entry can only
+  name artists the user asked about — it never leaks the rest of the lineup.
 
 ## Required Environment Variables (Appendix A)
 
