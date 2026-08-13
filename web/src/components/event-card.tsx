@@ -49,14 +49,19 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
             {multi ? (
               <>
                 <h3 className="mt-1 truncate text-lg font-semibold">{event.venue}</h3>
-                <div className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
-                  <MapPin className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">
-                    {event.city}
-                    {event.state ? `, ${event.state}` : ''}
+                {/* Wraps rather than truncates. On a phone the act count is
+                    ~110px of fixed width, which left the city with almost
+                    nothing to truncate into; letting the count drop to its
+                    own line keeps both readable. */}
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <MapPin className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">
+                      {event.city}
+                      {event.state ? `, ${event.state}` : ''}
+                    </span>
                   </span>
-                  <span aria-hidden>·</span>
-                  <span className="shrink-0">{event.acts.length} of your artists</span>
+                  <Badge variant="muted">{event.acts.length} of your artists</Badge>
                 </div>
               </>
             ) : (
@@ -110,7 +115,7 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
         {multi && (hidden > 0 || expanded) && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="self-start text-sm text-muted-foreground underline-offset-4 hover:underline"
+            className="-my-1.5 self-start py-1.5 text-sm text-muted-foreground underline-offset-4 hover:underline coarse:-my-2.5 coarse:py-2.5"
             aria-expanded={expanded}
           >
             {expanded ? 'Show fewer' : `Show ${hidden} more`}

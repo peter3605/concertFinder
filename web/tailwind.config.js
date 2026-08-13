@@ -63,5 +63,15 @@ export default {
       },
     },
   },
-  plugins: [require('@tailwindcss/typography')],
+  plugins: [
+    require('@tailwindcss/typography'),
+    // `coarse:` targets touch input rather than a screen width. Tapping
+    // accuracy is a property of the finger, not of the viewport: a phone in
+    // landscape can be wider than the `md` breakpoint while still being
+    // touch-only, and a small laptop window is narrow but still has a mouse.
+    // Sizing hit targets off a width breakpoint gets both of those wrong.
+    require('tailwindcss/plugin')(({ addVariant }) => {
+      addVariant('coarse', '@media (pointer: coarse)');
+    }),
+  ],
 };

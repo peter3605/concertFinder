@@ -142,7 +142,11 @@ function GenrePill({
       size="sm"
       onClick={onClick}
       aria-pressed={active}
-      className={cn('h-7 rounded-full px-3 text-xs')}
+      // Pills stay compact on a mouse and grow to 36px on touch. Not the
+      // full 44px the icon buttons get: these wrap across several rows, and
+      // at 44 the filter bar pushes the first concert card off the screen.
+      // 36 clears WCAG 2.5.8's 24px minimum with room to spare.
+      className={cn('h-7 rounded-full px-3 text-xs coarse:h-9 coarse:px-4 coarse:text-sm')}
     >
       {children}
     </Button>

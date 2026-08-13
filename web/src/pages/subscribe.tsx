@@ -135,7 +135,7 @@ export default function SubscribePage() {
               <button
                 onClick={() => setQuery('')}
                 aria-label="Clear"
-                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-accent"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-accent coarse:p-2.5"
               >
                 <X className="h-4 w-4" />
               </button>
