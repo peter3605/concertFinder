@@ -103,7 +103,7 @@ func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist
 	base.Path = strings.TrimRight(base.Path, "/")
 
 	var all []concerts.Concert
-	for _, p := range ProbeTourPaths {
+	for i, p := range ProbeTourPaths {
 		u := *base
 		u.Path = strings.TrimRight(base.Path, "/") + p
 		page, err := c.Fetcher.GetPage(ctx, u.String())
@@ -120,6 +120,23 @@ func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist
 		}
 		if len(all) > 0 {
 			// Design §5.4.2: homepage or first common path typically covers it.
+			break
+		}
+		// If the homepage carries no JSON-LD *at all*, the site publishes no
+		// structured data and the remaining five probe paths are five fetches
+		// for nothing. Measured over 91 resolved homepages: 44% had no JSON-LD
+		// anywhere, and no artist in that group produced a MusicEvent on any
+		// tour path. Skipping them is the difference between 1 and 6 fetches
+		// per dead site, each serialized behind the 3s per-host interval and
+		// charged to a scan-wide budget.
+		//
+		// The check is deliberately "any JSON-LD", not "MusicEvent": a site
+		// with Organization or WebSite markup is SEO-instrumented and might
+		// publish events on a page we haven't fetched yet. One with none
+		// won't. See TestJSONLDViability for the measurement.
+		if i == 0 && countJSONLDBlocks(page) == 0 {
+			slog.Debug("fallback: homepage has no JSON-LD, skipping tour paths",
+				"artist", artist.Name, "url", u.String())
 			break
 		}
 	}

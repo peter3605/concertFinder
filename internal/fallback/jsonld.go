@@ -45,6 +45,36 @@ func ExtractMusicEvents(htmlBytes []byte, pageURL, artistName string) []concerts
 	return out
 }
 
+// countJSONLDBlocks counts parseable `<script type="application/ld+json">`
+// elements. Deliberately distinct from "has MusicEvent": a site with *some*
+// JSON-LD is SEO-instrumented and may gain event markup later, whereas a site
+// with none publishes no structured data at all and is a dead end. See
+// tryOfficialSite for what that distinction buys.
+func countJSONLDBlocks(htmlBytes []byte) int {
+	doc, err := html.Parse(strings.NewReader(string(htmlBytes)))
+	if err != nil {
+		return 0
+	}
+	n := 0
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "script" {
+			for _, a := range node.Attr {
+				if a.Key == "type" && strings.EqualFold(a.Val, "application/ld+json") {
+					if node.FirstChild != nil && json.Valid([]byte(node.FirstChild.Data)) {
+						n++
+					}
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return n
+}
+
 func parseJSONLDBlock(block, pageURL, artistName string) []concerts.Concert {
 	block = strings.TrimSpace(block)
 	if block == "" {

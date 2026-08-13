@@ -406,13 +406,49 @@ per resolver. Everything below follows from that one fact.
   the scan deadline at all. Observed before the fix: a 5-minute job that ran
   for 978 seconds.
 
-**Measured limits.** Raising the budget from 60s to 120s eliminated the
-`artists_not_escalated=34` exhaustion (a sixth of a 200-artist profile getting
-no secondary lookup) but did not change the number of concerts found. The
-binding constraints are upstream of the budget: MusicBrainz lacks an official
-homepage for roughly a fifth of matched artists, and of the sites it does
-resolve, only some still publish schema.org `MusicEvent` JSON-LD. Widening the
-budget bought correctness, not coverage.
+#### 5.4.5 Measured Viability
+
+Raising the budget from 60s to 120s eliminated the `artists_not_escalated=34`
+exhaustion (a sixth of a 200-artist profile getting no secondary lookup) but
+did not change the number of concerts found — so the budget was not the
+binding constraint. `TestJSONLDViability` measures what is. Against 114
+artists that reached the chain (one real profile, 2026-08-12):
+
+| Stage | Count | Of asked |
+|---|---:|---:|
+| MusicBrainz asked | 114 | 100% |
+| …no official homepage | 23 | 20.2% |
+| …homepage resolved | 91 | 79.8% |
+| resolved → site unreachable (dead domain, 404, 403) | 12 | 10.5% |
+| resolved → reachable, **no JSON-LD at all** | 40 | 35.1% |
+| resolved → JSON-LD present, no `MusicEvent` | 32 | 28.1% |
+| resolved → **`MusicEvent` extracted** | **7** | **6.1%** |
+
+Three things follow, and only the first was expected:
+
+1. **The tier converts about 1 artist in 16.** Seven artists yielded 86
+   `MusicEvent` entities before radius filtering. That is not nothing — those
+   are shows no other source in the system would have found — but it sets the
+   ceiling on what any amount of budget tuning can buy.
+2. **Every one of the seven hits came from the homepage.** `/tour`, `/shows`,
+   `/live`, `/events`, and `/dates` contributed zero. For the 84 artists that
+   produced nothing, the chain was fetching six pages each, serialized behind
+   the 3s per-host interval and billed to the scan-wide budget. This is now
+   cut short: a homepage with no JSON-LD blocks at all ends the probe, since
+   no site in that group produced an event on any path. Sites that publish
+   *some* structured data still get the full walk, because they are the ones
+   plausibly one template change away from publishing events.
+3. **12 "resolved" homepages are dead.** MusicBrainz URL relationships are not
+   garbage-collected, so it returns domains that no longer resolve
+   (`macmillerofficial.com`), 404, or 403. These currently cost a full
+   six-path probe each and are cached as a positive resolution *forever*
+   (§7.3) — the URL resolved, so nothing marks it bad. Worth revisiting: a
+   positive that has never once been fetchable is functionally a negative.
+
+The tier's cost is dominated by artists it will never convert, which is why
+the funnel is worth re-measuring rather than assumed. `TestJSONLDViability` is
+opt-in (`CF_VIABILITY_DSN`) and reuses the production fetcher and extractor,
+so its numbers are the chain's numbers, not a re-implementation's.
 
 ---
 
@@ -1000,11 +1036,14 @@ The single-instance architecture is a deliberate free-tier / low-ops choice, not
 
 - Should concerts the user has already viewed be deprioritized in subsequent
   loads? Still unimplemented; the snapshot has no read-state.
-- Is the Phase 2 fallback chain worth its complexity? It costs a global
-  1 req/sec turnstile, a budget, and a concurrency gate, and a measured
-  200-artist scan found the same number of concerts at a 60s and a 120s budget
-  (§5.4.4). Worth an explicit measurement of how many *shows* it contributes
-  before tuning it further.
+- Is the Phase 2 fallback chain worth its complexity? Now measured (§5.4.5):
+  it converts ~6% of the artists that reach it, and its cost is dominated by
+  the 94% it won't. Partly answered — the wasted tour-path probing is fixed —
+  but the judgment call stands, and it should be re-measured against a second
+  profile before anyone invests further in the tier.
+- Should a resolved homepage that has never once been fetchable decay back to
+  a negative? Twelve of 91 are dead domains cached as permanent positives
+  (§5.4.5).
 - Songkick was designed in as a Phase 2 tier but never activated. Either get a
   key and measure it, or remove the tier.
 - Ticketmaster is now a single point of failure for the entire primary feed.

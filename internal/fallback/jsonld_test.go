@@ -98,3 +98,45 @@ func TestExtractMusicEvents_NoEventsReturnsEmpty(t *testing.T) {
 		t.Fatalf("expected empty, got %+v", got)
 	}
 }
+
+// countJSONLDBlocks decides whether tryOfficialSite keeps probing tour paths
+// or gives up after the homepage, so a false negative here costs real
+// coverage: a site that does publish events would be abandoned unfetched.
+func TestCountJSONLDBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		html string
+		want int
+	}{
+		{"no scripts", `<html><body><h1>tour</h1></body></html>`, 0},
+		{"plain js is not json-ld", `<html><script>var x = {"@type":"MusicEvent"}</script></html>`, 0},
+		// The dead-end case the early exit exists for: a site with no
+		// structured data at all.
+		{"only stylesheets", `<html><head><link rel=stylesheet href=a.css></head></html>`, 0},
+		// The keep-going case: SEO-instrumented but no events *yet*. 44% of
+		// resolved homepages had no JSON-LD at all and 35% looked like this,
+		// so the two must not be conflated.
+		{"organization markup counts", `<html><script type="application/ld+json">{"@type":"Organization","name":"X"}</script></html>`, 1},
+		{"type attr is case-insensitive", `<html><script type="APPLICATION/LD+JSON">{"@type":"WebSite"}</script></html>`, 1},
+		{"multiple blocks", `<html><script type="application/ld+json">{"a":1}</script><script type="application/ld+json">[{"b":2}]</script></html>`, 2},
+		// Malformed JSON is not evidence of structured data — counting it
+		// would keep us fetching five more pages off a broken template.
+		{"invalid json does not count", `<html><script type="application/ld+json">{oops</script></html>`, 0},
+		{"empty block does not count", `<html><script type="application/ld+json"></script></html>`, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := countJSONLDBlocks([]byte(c.html)); got != c.want {
+				t.Errorf("countJSONLDBlocks = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// The tour-page fixture must still register as structured data — it is the
+// case where probing continues and pays off.
+func TestCountJSONLDBlocksOnTourFixture(t *testing.T) {
+	if got := countJSONLDBlocks([]byte(tourPageHTML)); got < 1 {
+		t.Errorf("tour fixture should register JSON-LD, got %d", got)
+	}
+}
