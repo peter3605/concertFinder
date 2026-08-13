@@ -24,8 +24,13 @@ const (
 	songkickMaxRetries    = 3
 	songkickMaxRetryAfter = 30 * time.Second
 	songkickBaseBackoff   = 200 * time.Millisecond
-	songkickUserAgent     = "ConcertFinder/0.1 (https://github.com/peter3605/concertFinder)"
+	songkickUserAgent     = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
 )
+
+// SongkickCallsPerLookup is how many upstream requests one
+// SearchArtistEvents costs: an artist-ID resolution plus a calendar fetch,
+// with no cache in between. Quota call sites charge this rather than 1.
+const SongkickCallsPerLookup = 2
 
 // SongkickClient wraps a minimal slice of the Songkick API. Includes retry
 // with backoff on 5xx / 429 and a UA header identifying us so Songkick can

@@ -1,17 +1,29 @@
 # Domain is injected via env at container start (or hardcode when stable).
 # Automatic HTTPS via Let's Encrypt — Caddy provisions the cert on first request.
 {$SITE_DOMAIN} {
-	# The Vite build output lives inside the api image (embedded via
-	# go:embed once we add that). Until then, the SPA is served from
-	# whatever the Go server serves at /.
-	reverse_proxy api:8080
-
 	encode gzip
 
-	# Preserve original scheme/host so the Go handlers see them correctly.
-	header_up X-Forwarded-Proto {scheme}
-	header_up X-Forwarded-Host  {host}
-	header_up X-Real-IP         {remote}
+	# header_up is a reverse_proxy subdirective, NOT a site-level one. Written
+	# at site level it is a hard config-adapt error ("unrecognized directive:
+	# header_up"), so Caddy refuses to start at all — and with
+	# `restart: unless-stopped` that is a crash loop with no TLS and no site,
+	# while the api container next to it looks perfectly healthy. Verified with
+	# `caddy validate`.
+	reverse_proxy api:8080 {
+		# Every one of these OVERWRITES whatever the client sent. That matters:
+		# chi's RealIP middleware reads True-Client-IP first, then X-Real-IP,
+		# then the *first* entry of X-Forwarded-For — and Caddy appends to XFF
+		# rather than replacing it. Left alone, any client could set
+		# True-Client-IP to a value of its choosing and RemoteAddr would carry
+		# it straight into the /api/auth IP rate limiter's bucket key, making
+		# the limiter bypassable by rotating a header.
+		header_up True-Client-IP    {remote_host}
+		header_up X-Real-IP         {remote_host}
+		header_up X-Forwarded-For   {remote_host}
+		# Preserve original scheme/host so the Go handlers see them correctly.
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host  {host}
+	}
 
 	log {
 		output stdout

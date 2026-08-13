@@ -25,7 +25,7 @@ func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, u
 	subject := fmt.Sprintf("ConcertFinder digest — %d new show%s", len(events), plural(len(events)))
 	text := renderDigestText(displayName, events, unsubURL)
 	htmlBody := renderDigestHTML(displayName, events, unsubURL)
-	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody}
+	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
 }
 
 func plural(n int) string {
@@ -179,7 +179,7 @@ func RenderInstantNotify(displayName, toEmail string, fresh []concerts.Concert, 
 	}
 	text := renderInstantText(displayName, events, unsubURL)
 	htmlBody := renderInstantHTML(displayName, events, unsubURL)
-	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody}
+	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
 }
 
 func renderInstantText(displayName string, es []concerts.Event, unsub string) string {

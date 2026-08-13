@@ -69,4 +69,3 @@ func GetConcertsByDedupKeys(ctx context.Context, pool *pgxpool.Pool, keys []stri
 	}
 	return out, rows.Err()
 }
-

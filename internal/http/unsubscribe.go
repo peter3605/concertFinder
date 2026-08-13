@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -33,7 +35,9 @@ type UnsubscribeHandler struct {
 
 // Token returns a URL-safe token that binds a user ID + issued-at timestamp
 // with an HMAC. Format:
-//   base64(user_id_bytes || issued_at_unix_be) + "." + base64(hmac_sha256(...))
+//
+//	base64(user_id_bytes || issued_at_unix_be) + "." + base64(hmac_sha256(...))
+//
 // The timestamp is included so tokens can be aged out; see UnsubscribeTokenMaxAge.
 func (h *UnsubscribeHandler) Token(userID uuid.UUID) string {
 	id, _ := userID.MarshalBinary()
@@ -47,26 +51,63 @@ func (h *UnsubscribeHandler) Token(userID uuid.UUID) string {
 	return enc.EncodeToString(payload) + "." + enc.EncodeToString(sum)
 }
 
-// Get flips digest_opt_in to false for the token's user and shows a plain
-// confirmation page.
+// Get renders a confirmation page with a button that POSTs back here. It
+// deliberately changes nothing.
+//
+// Unsubscribing on GET is how you get people silently unsubscribed without
+// them ever clicking: corporate mail security (Outlook Safe Links, scanning
+// gateways, some antivirus) fetches every URL in an inbound message to check
+// it, and a state-changing GET happily honors that fetch. The mutation lives
+// on POST, which those scanners do not issue — and which is also exactly what
+// RFC 8058 one-click unsubscribe sends, so the List-Unsubscribe-Post header
+// on our outgoing mail lands on the same handler with no extra work.
 func (h *UnsubscribeHandler) Get(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
+	if _, ok := h.verify(token); !ok {
+		http.Error(w, "invalid or expired unsubscribe link", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribe</title></head>
+<body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:4rem auto;line-height:1.5;color:#222">
+<h2>Unsubscribe from ConcertFinder email?</h2>
+<p>This turns off both the daily digest and instant new-show alerts. Your account and saved shows are not affected.</p>
+<form method="POST" action="/api/unsubscribe">
+<input type="hidden" name="token" value="%s">
+<button type="submit" style="font:inherit;padding:0.6rem 1.1rem;border:0;border-radius:6px;background:#1db954;color:#fff;cursor:pointer">Unsubscribe me</button>
+</form>
+</body></html>`, html.EscapeString(token))
+}
+
+// Post performs the opt-out. Reads the token from the query string or the
+// form body, so both the confirmation page above and a mail client's
+// one-click POST (which repeats the URL verbatim) work.
+func (h *UnsubscribeHandler) Post(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		_ = r.ParseForm()
+		token = r.PostFormValue("token")
+	}
 	userID, ok := h.verify(token)
 	if !ok {
 		http.Error(w, "invalid or expired unsubscribe link", http.StatusBadRequest)
 		return
 	}
-	if err := db.SetDigestOptIn(r.Context(), h.Pool, userID, false); err != nil {
+	// Both flags, not just the digest — see db.OptOutAllEmail.
+	if err := db.OptOutAllEmail(r.Context(), h.Pool, userID); err != nil {
 		slog.Error("unsubscribe: db write failed", "err", err, "user", userID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	slog.Info("unsubscribed from all email", "user", userID)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(`<!doctype html>
-<html><body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:4rem auto;line-height:1.5;color:#222">
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribed</title></head>
+<body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:4rem auto;line-height:1.5;color:#222">
 <h2>Unsubscribed</h2>
-<p>You&rsquo;ll no longer receive daily digest emails from ConcertFinder.</p>
-<p>You can turn them back on any time by logging in and toggling the digest option in settings.</p>
+<p>You&rsquo;ll no longer receive daily digests or instant new-show alerts from ConcertFinder.</p>
+<p>You can turn either back on any time by logging in and changing your email settings.</p>
 </body></html>`))
 }
 
