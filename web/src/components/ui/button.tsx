@@ -15,11 +15,16 @@ const buttonVariants = cva(
         ghost: 'hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
       },
+      // Heights grow on touch input. 44px is the smallest target Apple's HIG
+      // and WCAG 2.5.5 both accept; the desktop sizes stay where they are,
+      // since a mouse doesn't need the room and enlarging everything makes
+      // the UI look like a kiosk. Icon buttons are the ones that actually
+      // fail — 36px square with no label to widen them.
       size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
+        default: 'h-9 px-4 py-2 coarse:h-11',
+        sm: 'h-8 rounded-md px-3 text-xs coarse:h-10',
         lg: 'h-11 rounded-md px-6',
-        icon: 'h-9 w-9',
+        icon: 'h-9 w-9 coarse:h-11 coarse:w-11',
       },
     },
     defaultVariants: {
