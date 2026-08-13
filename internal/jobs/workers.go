@@ -441,7 +441,10 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		slog.Warn("digest: SMTP send failed after recording sent-set", "err", err, "user", user.ID)
 		return err
 	}
-	slog.Info("digest sent", "user", user.ID, "concerts", len(fresh))
+	// Both counts: the sent-set is per (artist, show) but the email reads one
+	// entry per event, so a lone "concerts" number no longer matches what the
+	// recipient sees.
+	slog.Info("digest sent", "user", user.ID, "concerts", len(fresh), "events", concerts.CountEventKeys(fresh))
 	return nil
 }
 
@@ -524,7 +527,7 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 		slog.Warn("instant notify: SMTP send failed after recording sent-set", "err", err, "user", user.ID)
 		return err
 	}
-	slog.Info("instant notify sent", "user", user.ID, "concerts", len(fresh))
+	slog.Info("instant notify sent", "user", user.ID, "concerts", len(fresh), "events", concerts.CountEventKeys(fresh))
 	return nil
 }
 
