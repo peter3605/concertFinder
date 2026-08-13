@@ -52,15 +52,31 @@ Copy the Client ID into `.env` as `SPOTIFY_CLIENT_ID`.
 ## Running
 
 ```
-docker compose up -d db          # start Postgres in the background
-go run ./cmd/server              # migrations apply automatically on startup
+docker compose up -d db                    # start Postgres in the background
+set -a && . ./.env && set +a               # see below — the binary won't read .env for you
+go run ./cmd/server                        # migrations apply automatically on startup
 cd web && npm install && npm run dev
 ```
 
+**Source `.env` yourself.** The server reads its configuration from the process
+environment and has no dotenv dependency; under `docker compose` it is compose
+that loads the file. Run `go run ./cmd/server` in a shell that hasn't sourced
+it and the config comes up empty, failing on `DATABASE_URL`.
+
+Check that `DATABASE_URL`'s port matches what compose actually publishes —
+`.env.example` says 5432, and if `docker-compose.yml` maps the container to a
+different host port you'll need to override it:
+
+```
+export DATABASE_URL='postgres://concertfinder:concertfinder@127.0.0.1:5433/concertfinder?sslmode=disable'
+```
+
 Then open https://127.0.0.1:3000 and click "Log in with Spotify". The first
-`/api/me/concerts` request will take longer (cold affinity + cold TM/BIT
-caches); subsequent requests are 24h-cached at the affinity layer and 4h at
-the concert layer.
+`/api/me/concerts` request returns an empty list with `refreshing: true` while
+a background scan runs — the frontend polls every 10s and fills in when the
+snapshot lands. That first scan is the slow one (cold affinity, cold
+Ticketmaster and MusicBrainz caches); afterwards the affinity profile is
+cached 24h and upstream responses `CONCERT_CACHE_TTL_HOURS` (12h).
 
 ## Resetting the local database
 

@@ -295,7 +295,12 @@ Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBA
 
 Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`.
 
-Loaded from `.env` in all environments; in prod the file lives at `/opt/concertfinder/.env` on the EC2 instance.
+All of these are read from the **process environment** — the binary has no
+dotenv dependency and never opens `.env` itself. `docker compose` is what loads
+the file, locally from `.env` and in prod from `/opt/concertfinder/.env` on the
+EC2 instance. Running `go run ./cmd/server` directly therefore needs the file
+sourced first (`set -a && . ./.env && set +a`), or the server comes up with an
+empty config and fails on `DATABASE_URL`.
 
 ## Phase Discipline
 
