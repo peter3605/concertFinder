@@ -57,7 +57,10 @@ type MusicBrainzClient struct {
 // Call WithPool to add DB persistence.
 func NewMusicBrainzClient(userAgent string) *MusicBrainzClient {
 	if userAgent == "" {
-		userAgent = "ConcertFinder/0.1 (https://github.com/peter3605/concertFinder)"
+		// Fallback only. main.go passes one built from the deployment's own
+		// base URL and contact address — MusicBrainz 403s anonymous traffic
+		// and expects to be able to reach the operator.
+		userAgent = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
 	}
 	return &MusicBrainzClient{
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
@@ -95,6 +98,7 @@ type mbArtistDetailResp struct {
 // MusicBrainz, or "" if we couldn't find one. Two-tier cache:
 //  1. In-memory hot cache (process-local, wiped on restart).
 //  2. mb_url_cache in Postgres (shared across restarts and replicas).
+//
 // Only the raw MB fetch respects the 1 req/sec rate limit; cache hits skip
 // it entirely.
 func (c *MusicBrainzClient) ResolveOfficialURL(ctx context.Context, artistName string) (string, error) {

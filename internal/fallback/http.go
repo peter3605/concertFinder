@@ -48,10 +48,10 @@ type Fetcher struct {
 
 func NewFetcher(pool *pgxpool.Pool) *Fetcher {
 	return &Fetcher{
-		HTTP:  &http.Client{Timeout: 20 * time.Second},
-		Pool:  pool,
-		last:  map[string]time.Time{},
-		rob:   newRobotsCache(),
+		HTTP: &http.Client{Timeout: 20 * time.Second},
+		Pool: pool,
+		last: map[string]time.Time{},
+		rob:  newRobotsCache(),
 	}
 }
 

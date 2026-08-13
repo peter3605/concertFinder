@@ -21,6 +21,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      - name: Go formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: Go vet
+        run: go vet ./...
+      # `go test` compiles packages that have tests; it does not prove the
+      # server binary builds. Several packages here have no test files.
+      - name: Go build
+        run: go build ./...
       - name: Go test
         run: go test ./...
 
@@ -33,6 +45,12 @@ jobs:
         run: npm --prefix web ci
       - name: Frontend typecheck
         run: npm --prefix web run lint
+      # The deploy step below builds the image ON the EC2 instance, so a
+      # frontend build failure used to surface there — mid-deploy, on a 2 GB
+      # box, with the previous containers already being replaced. Failing here
+      # instead costs 30 seconds and keeps the site up.
+      - name: Frontend build
+        run: npm --prefix web run build
 
   deploy:
     needs: test
@@ -43,6 +61,17 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # NOTE: the image is built on the EC2 instance. `build` is a separate
+      # step from `up -d` on purpose — `up -d --build` tears down the running
+      # containers as part of the same command, so a build that fails or runs
+      # the 2 GB box out of memory took the site down with it. Split, a failed
+      # build leaves the current containers serving and fails the SSM command
+      # loudly instead.
+      #
+      # Building in this workflow and pushing to ECR would remove the risk
+      # entirely (and free the instance from carrying a Node toolchain); it
+      # needs an ECR repository plus pull permissions on the instance profile,
+      # which is a change in /infra rather than here.
       - name: Deploy via SSM
         id: ssm
         run: |
@@ -57,7 +86,9 @@ jobs:
               "sudo -u concertfinder git fetch --all",
               "sudo -u concertfinder git reset --hard origin/main",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml pull || true",
-              "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d --build"
+              "sudo -u concertfinder docker compose -f docker-compose.prod.yml build",
+              "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d",
+              "sudo -u concertfinder docker image prune -f"
             ]' \
             --query 'Command.CommandId' \
             --output text)

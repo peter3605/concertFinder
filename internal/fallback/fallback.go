@@ -52,7 +52,12 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 	if c.Songkick.Enabled() {
 		// Per-user daily quota (design §8.3) rides on the context as a
 		// pre-charged reservation taken out by the scan worker.
-		if !rate.Allow(ctx, rate.SourceSongkick) {
+		//
+		// SongkickCallsPerLookup permits, not one: SearchArtistEvents is two
+		// HTTP requests (resolve the artist ID, then fetch its calendar) and
+		// there is no cache between them, so charging a single permit made
+		// RATE_CAP_SONGKICK_PER_USER_DAILY mean twice its stated number.
+		if !rate.AllowN(ctx, rate.SourceSongkick, SongkickCallsPerLookup) {
 			// Over the per-user Songkick cap; skip and fall through.
 		} else {
 			evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)

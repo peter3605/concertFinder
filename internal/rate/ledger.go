@@ -135,17 +135,39 @@ type Reservation struct {
 // Take consumes one permit. Returns false once the block is exhausted,
 // which callers must treat as "this source is unavailable for this user
 // right now" — not as "this source returned no results".
-func (r *Reservation) Take() bool {
+func (r *Reservation) Take() bool { return r.TakeN(1) }
+
+// TakeN consumes n permits at once, for a call site whose single logical
+// operation costs more than one upstream request. It is all-or-nothing: a
+// partial grant would let the operation start and then fail halfway, which
+// spends quota for no result.
+//
+// Compare-and-swap rather than the add-then-give-back form this started as.
+// That version briefly drove `used` past `granted` before correcting, and a
+// concurrent caller landing in that window was refused a permit that was
+// actually free. Up to 10 artist goroutines per scan reach the fallback at
+// once, so the window is real — and a spurious refusal is not a small thing
+// here: it sets `denied`, which reads as Exhausted, which stamps the snapshot
+// `complete = false` with a `retry_after` of tomorrow midnight. A phantom
+// contention loss would cost the user their feed for the rest of the day.
+func (r *Reservation) TakeN(n int) bool {
 	if r == nil || r.unlimited {
 		return true
 	}
-	// Overshoot is impossible: Add returns the post-increment value, so
-	// exactly `granted` callers see a value inside the block.
-	if r.used.Add(1) <= r.granted {
+	if n <= 0 {
 		return true
 	}
-	r.denied.Add(1)
-	return false
+	for {
+		cur := r.used.Load()
+		if cur+int64(n) > r.granted {
+			r.denied.Add(1)
+			return false
+		}
+		if r.used.CompareAndSwap(cur, cur+int64(n)) {
+			return true
+		}
+		// Lost the race; re-read and try again.
+	}
 }
 
 // Exhausted reports whether any caller was actually turned away.
@@ -239,11 +261,14 @@ func (l *Ledger) ReserveAll(ctx context.Context, userID uuid.UUID, want int) *Re
 
 // Take consumes one permit for a source. A nil *Reservations allows
 // everything, which is what unit tests and one-off scripts want.
-func (r *Reservations) Take(s Source) bool {
+func (r *Reservations) Take(s Source) bool { return r.TakeN(s, 1) }
+
+// TakeN consumes n permits for a source. See Reservation.TakeN.
+func (r *Reservations) TakeN(s Source, n int) bool {
 	if r == nil {
 		return true
 	}
-	return r.blocks[s].Take()
+	return r.blocks[s].TakeN(n)
 }
 
 // Exhausted reports whether a source's block ran out.
@@ -299,4 +324,11 @@ func FromContext(ctx context.Context) *Reservations {
 // The callsite-friendly form used throughout search and the fallback chain.
 func Allow(ctx context.Context, s Source) bool {
 	return FromContext(ctx).Take(s)
+}
+
+// AllowN consumes n permits for a source. Use it where one logical lookup
+// costs several upstream requests — charging one permit for a two-request
+// operation makes the configured cap mean half what it says.
+func AllowN(ctx context.Context, s Source, n int) bool {
+	return FromContext(ctx).TakeN(s, n)
 }

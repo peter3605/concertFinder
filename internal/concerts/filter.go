@@ -3,8 +3,6 @@ package concerts
 import (
 	"strings"
 	"time"
-
-	"github.com/peterho/concertfinder/internal/geocoding"
 )
 
 // Weekday enum for the "weekday/weekend" filter (design §10.2).
@@ -33,10 +31,11 @@ type Filters struct {
 	DateFrom time.Time // zero = no lower bound
 	DateTo   time.Time // zero = no upper bound
 	Weekday  Weekday   // default WeekdayAll
-	// RadiusMiles clips further than the user's saved radius. 0 = use the
-	// saved radius (already applied at fetch time).
-	RadiusMiles int
-	Origin      Location // needed only if RadiusMiles > 0
+	// There is deliberately no radius field here. One existed, clipping
+	// tighter than the user's saved radius, but no client ever sent the query
+	// parameter that set it — the radius the user picks is applied upstream at
+	// fetch time, against Ticketmaster and the fallback's haversine filter.
+	// Unreachable filtering that looks reachable is worse than none.
 }
 
 // Apply returns a filtered slice preserving order.
@@ -63,11 +62,6 @@ func Apply(cs []Concert, f Filters) []Concert {
 		}
 		if f.Weekday != WeekdayAll && !matchesWeekday(c.Date, f.Weekday) {
 			continue
-		}
-		if f.RadiusMiles > 0 && c.Latitude != 0 && c.Longitude != 0 {
-			if geocoding.HaversineMiles(f.Origin.Latitude, f.Origin.Longitude, c.Latitude, c.Longitude) > float64(f.RadiusMiles) {
-				continue
-			}
 		}
 		out = append(out, c)
 	}

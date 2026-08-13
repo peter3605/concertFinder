@@ -77,7 +77,7 @@ func TestScoreArtists_CapsAtMax(t *testing.T) {
 	n := MaxScoredArtists + 5
 	src.Followed = make([]ArtistRef, n)
 	for i := 0; i < n; i++ {
-		src.Followed[i] = ArtistRef{ID: string(rune('a' + i%26)) + string(rune('0'+i/26)), Name: "x"}
+		src.Followed[i] = ArtistRef{ID: string(rune('a'+i%26)) + string(rune('0'+i/26)), Name: "x"}
 	}
 	got := ScoreArtists(src)
 	if len(got) != MaxScoredArtists {

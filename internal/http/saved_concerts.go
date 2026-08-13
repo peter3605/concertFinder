@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -73,8 +74,12 @@ func (h *SavedConcertsHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Same past-show floor as /me/concerts, and for the same reason: the
+	// saved query orders by event_date ascending, so shows that have already
+	// happened sorted to the very top of the page.
+	saved = concerts.Apply(saved, concerts.Filters{DateFrom: startOfUTCDay(time.Now())})
 	facets := computeFacets(saved)
-	filtered := concerts.Apply(saved, parseFilters(r, loc))
+	filtered := concerts.Apply(saved, parseFilters(r))
 	// Grouped the same way as /me/concerts. Saving two acts on one bill
 	// yields one card here too, with both stars filled — otherwise the same
 	// festival looks like six separate saves the user has to unsave one by
