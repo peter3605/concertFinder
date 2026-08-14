@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -202,6 +205,93 @@ func Load() (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// SpotifyCallbackPath is where the OAuth callback handler is actually
+// mounted (chi: /api → /auth → auth.Mount). The redirect URI registered in
+// Spotify's dashboard has to end in exactly this.
+const SpotifyCallbackPath = "/api/auth/callback"
+
+// Validate reports configuration problems serious enough that the process
+// should not come up. Load stays permissive — it is also used by tests and by
+// half-configured local checkouts — so this is the gate main() runs before
+// binding a port.
+//
+// It exists because the failure modes here are all silent. A missing or
+// malformed ENCRYPTION_KEY used to log one warning and then skip wiring
+// *every* auth and /me route: the site served, the SPA loaded, health checks
+// went green, and login 404'd with nothing anywhere saying why. A redirect URI
+// pointing at /callback instead of /api/auth/callback lands on the SPA's
+// catch-all, so the browser finishes the OAuth dance on a logged-out page. A
+// SITE_BASE_URL left at its loopback default puts "https://127.0.0.1:3000" in
+// the unsubscribe link of real outbound email and in the User-Agent we send
+// MusicBrainz and Nominatim. None of these announce themselves; all of them
+// are trivially checkable here.
+func (c Config) Validate() []error {
+	var errs []error
+	required := []struct{ name, val string }{
+		{"SPOTIFY_CLIENT_ID", c.SpotifyClientID},
+		{"SPOTIFY_REDIRECT_URI", c.SpotifyRedirectURI},
+		{"TICKETMASTER_API_KEY", c.TicketmasterAPIKey},
+		{"SESSION_COOKIE_DOMAIN", c.SessionCookieDomain},
+	}
+	for _, r := range required {
+		if strings.TrimSpace(r.val) == "" {
+			errs = append(errs, fmt.Errorf("%s is required", r.name))
+		}
+	}
+
+	// ENCRYPTION_KEY gates refresh-token encryption, so without a valid one
+	// there is no authentication at all — never a warning.
+	switch key, err := hex.DecodeString(c.EncryptionKey); {
+	case c.EncryptionKey == "":
+		errs = append(errs, errors.New("ENCRYPTION_KEY is required (32-byte hex; generate with: openssl rand -hex 32)"))
+	case err != nil:
+		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must be hex-encoded: %w", err))
+	case len(key) != 32:
+		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must decode to 32 bytes, got %d", len(key)))
+	}
+
+	if u := c.SpotifyRedirectURI; u != "" && !strings.HasSuffix(strings.TrimRight(u, "/"), SpotifyCallbackPath) {
+		errs = append(errs, fmt.Errorf(
+			"SPOTIFY_REDIRECT_URI must end in %s (got %q) — any other path lands on the SPA catch-all and login completes into a logged-out page",
+			SpotifyCallbackPath, u))
+	}
+
+	// A real cookie domain means real users; a loopback base URL then means
+	// every unsubscribe link we mail points at the recipient's own machine.
+	if !isLoopbackHost(c.SessionCookieDomain) && isLoopbackHost(c.SiteBaseURL) {
+		errs = append(errs, fmt.Errorf(
+			"SITE_BASE_URL is still the local default (%s) but SESSION_COOKIE_DOMAIN is %q — unsubscribe links and the MusicBrainz/Nominatim User-Agent would both point at localhost",
+			c.SiteBaseURL, c.SessionCookieDomain))
+	}
+
+	if c.EmailDeliveryMode == "smtp" {
+		if c.SMTPHost == "" {
+			errs = append(errs, errors.New("SMTP_HOST is required when EMAIL_DELIVERY_MODE=smtp"))
+		}
+		if c.SMTPFrom == "" {
+			errs = append(errs, errors.New("SMTP_FROM is required when EMAIL_DELIVERY_MODE=smtp"))
+		}
+	}
+	return errs
+}
+
+// isLoopbackHost reports whether a domain or URL refers to the local machine.
+func isLoopbackHost(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return false
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	s, _, _ = strings.Cut(s, "/")
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
 }
 
 func intEnv(key string, def int) int {
