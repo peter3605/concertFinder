@@ -52,8 +52,20 @@ jobs:
       - name: Frontend build
         run: npm --prefix web run build
 
+  # docker-compose.prod.yml and the Caddyfile are the only files here that
+  # never run locally — docker-compose.yml has no Caddy service and `go run`
+  # reads neither. Both have shipped broken, and the symptom each time was a
+  # Caddy crash loop with a healthy-looking api container beside it. Parsing
+  # them in CI costs seconds; finding out in production costs the site.
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Caddyfile and compose files
+        run: ./scripts/check-deploy-config.sh
+
   deploy:
-    needs: test
+    needs: [test, deploy-config]
     runs-on: ubuntu-latest
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
