@@ -13,6 +13,34 @@ type RefreshAffinityArgs struct {
 
 func (RefreshAffinityArgs) Kind() string { return "refresh_affinity" }
 
+// InsertOpts bounds retries and collapses duplicate enqueues, neither of
+// which river's defaults do.
+//
+// MaxAttempts: the default is 25. A profile that cannot be computed —
+// a revoked Spotify grant is the common case — is not going to compute on the
+// twenty-fifth try either, and each attempt is a full six-endpoint fan-out
+// against the user's Spotify quota.
+//
+// UniqueOpts: the nightly fanout and the scan path can both want a refresh for
+// the same user, and hydration is expensive enough that running it twice
+// concurrently is pure waste. Same shape as ScanConcertsArgs — terminal states
+// stay out of the list so a finished refresh doesn't block the next one.
+func (RefreshAffinityArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: AffinityMaxAttempts,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true, // per user
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
+
 // FanoutAffinityRefreshArgs is enqueued by the daily periodic schedule. Its
 // worker finds active users and enqueues one RefreshAffinityArgs per user.
 // Splitting it in two keeps the periodic tick tiny and makes retries per-user.

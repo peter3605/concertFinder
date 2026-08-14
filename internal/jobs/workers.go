@@ -28,6 +28,21 @@ type RefreshAffinityWorker struct {
 	Affinity *affinity.Service
 }
 
+// AffinityMaxAttempts bounds river's retries for a profile refresh. See
+// RefreshAffinityArgs.InsertOpts.
+const AffinityMaxAttempts = 3
+
+// AffinityBudget is the max wall-clock for one refresh job. River's default
+// job timeout is 60s, which is the *same* number as affinity.ComputeTimeout —
+// so the two raced, and river could cancel the job at the exact moment the
+// compute was about to finish. This leaves room for the surrounding user load
+// and profile write on either side of the compute.
+const AffinityBudget = 90 * time.Second
+
+func (w *RefreshAffinityWorker) Timeout(*river.Job[RefreshAffinityArgs]) time.Duration {
+	return AffinityBudget
+}
+
 func (w *RefreshAffinityWorker) Work(ctx context.Context, job *river.Job[RefreshAffinityArgs]) error {
 	user, err := db.GetUserByID(ctx, w.Pool, job.Args.UserID)
 	if err != nil {
@@ -554,6 +569,12 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		{"expired_sessions", func(c context.Context) (int64, error) { return db.PruneExpiredSessions(c, w.Pool) }},
 		{"stale_snapshots", w.pruneStaleSnapshots},
 		{"old_digest_sent", func(c context.Context) (int64, error) { return db.PruneOldDigestSent(c, w.Pool, 180) }},
+		// The two resolver caches only ever grew. Their readers already
+		// ignore expired negatives, so this is about the rows, not
+		// correctness — but they accumulate one per artist and one per city
+		// we ever failed to resolve, forever. Positives are kept on purpose.
+		{"expired_mb_negatives", func(c context.Context) (int64, error) { return db.PruneExpiredNegativeMBURLs(c, w.Pool) }},
+		{"expired_geo_negatives", func(c context.Context) (int64, error) { return db.PruneExpiredNegativeGeo(c, w.Pool) }},
 	}
 	for _, s := range steps {
 		n, err := s.run(ctx)

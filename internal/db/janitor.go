@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -106,5 +107,24 @@ func PruneOldDigestSent(ctx context.Context, pool *pgxpool.Pool, days int) (int6
 func PrunePastConcerts(ctx context.Context, pool *pgxpool.Pool, days int) (int64, error) {
 	const q = `DELETE FROM concerts WHERE event_date < now() - make_interval(days => $1)`
 	tag, err := pool.Exec(ctx, q, days)
+	return tag.RowsAffected(), err
+}
+
+// PruneExpiredNegativeMBURLs deletes "MusicBrainz had no homepage" rows past
+// NegativeMBURLTTL. Readers already ignore them (GetMBURL applies the cutoff),
+// so this is purely about not accumulating rows forever for artists that were
+// asked about once and never resolved. Positive rows are kept: they never
+// expire, on purpose.
+func PruneExpiredNegativeMBURLs(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	const q = `DELETE FROM mb_url_cache WHERE official_url = '' AND resolved_at <= $1`
+	tag, err := pool.Exec(ctx, q, time.Now().Add(-NegativeMBURLTTL))
+	return tag.RowsAffected(), err
+}
+
+// PruneExpiredNegativeGeo is PruneExpiredNegativeMBURLs for venue_geo_cache:
+// drops the Nominatim misses whose TTL has passed, keeps every hit.
+func PruneExpiredNegativeGeo(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	const q = `DELETE FROM venue_geo_cache WHERE ok = false AND resolved_at <= $1`
+	tag, err := pool.Exec(ctx, q, time.Now().Add(-negativeGeoTTL))
 	return tag.RowsAffected(), err
 }

@@ -18,9 +18,16 @@ import (
 
 const NominatimEndpoint = "https://nominatim.openstreetmap.org/search"
 
-// TODO(config): if we ever deploy publicly, use a real contact URL/email so
-// Nominatim can reach us before rate-limiting. Env-configurable UA below.
-const defaultUserAgent = "ConcertFinderDev/0.1 (+https://github.com/peterho/concertFinder)"
+// defaultUserAgent is the last-resort identifier. Callers should pass a real
+// one built from SITE_BASE_URL + CONTACT_EMAIL (main.go does) — Nominatim's
+// usage policy requires a way to reach the operator, and their response to a
+// UA they can't act on is a block, which would take venue geocoding down
+// with no error we control.
+//
+// The previous default named a repository that does not exist
+// (github.com/peterho/... — the real one is peter3605), so it satisfied the
+// letter of the policy and none of its purpose.
+const defaultUserAgent = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
 
 // ErrNotFound signals a successful call that yielded no match.
 var ErrNotFound = errors.New("geocoding: not found")

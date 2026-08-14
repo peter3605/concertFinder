@@ -21,6 +21,11 @@ type AccountHandler struct {
 	// Tokens, when set, has its in-memory access-token entry for the user
 	// dropped on delete so nothing keeps working after the row is gone.
 	Tokens *auth.TokenService
+	// CookieDomain must match what auth set the session cookie with. A
+	// deletion Set-Cookie only matches a cookie with the same name, path AND
+	// domain, so clearing without it left the original cookie in the browser
+	// untouched whenever SESSION_COOKIE_DOMAIN was configured.
+	CookieDomain string
 }
 
 type deleteAccountRequest struct {
@@ -66,13 +71,17 @@ func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("account deleted", "user", u.ID)
 	// Clear session cookie so the browser stops sending stale credentials.
+	// Attributes must mirror auth.setSessionCookie exactly or the browser
+	// treats this as a different cookie and keeps the original.
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    "",
+		Domain:   h.CookieDomain,
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

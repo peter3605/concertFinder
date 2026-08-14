@@ -2,9 +2,10 @@ package spotify
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"sort"
-
-	"golang.org/x/sync/errgroup"
+	"sync"
 )
 
 // MaxScoredArtists is the top-N cap submitted to concert search (design §4.3).
@@ -146,54 +147,70 @@ func ScoreArtists(s Sources) []ScoredArtist {
 
 // HydrateSources fans out to all six affinity endpoints in parallel and, for
 // playlists, follows up with per-playlist item fetches for playlists the user
-// owns or collaborates on (design §4.1 Feb 2026 change). Any endpoint error
-// fails the whole hydration.
-func (c *Client) HydrateSources(ctx context.Context, accessToken, spotifyUserID string) (Sources, error) {
-	var s Sources
-	g, gctx := errgroup.WithContext(ctx)
+// owns or collaborates on (design §4.1 Feb 2026 change).
+//
+// A failing source degrades the profile; it does not destroy it. This used to
+// run on an errgroup where any single error aborted the other five and
+// returned nothing, so one Spotify 500 — or one source running past the
+// deadline — meant no profile, which meant ScanConcertsWorker returned an
+// error before writing any snapshot, which meant the user saw an empty feed
+// and a spinner. Five sources' worth of signal is a fine profile; none is not
+// a profile at all. Errors are collected and reported to the caller for
+// logging, and only a total wipeout is an error.
+//
+// Note this is deliberately NOT errgroup.WithContext: a shared cancelling
+// context is precisely the "one failure kills the rest" behavior being
+// removed here.
+func (c *Client) HydrateSources(ctx context.Context, accessToken, spotifyUserID string) (Sources, []error) {
+	var (
+		s    Sources
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		errs []error
+		ok   int
+	)
+	run := func(name string, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := fn()
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+				return
+			}
+			ok++
+		}()
+	}
 
-	g.Go(func() error {
-		v, err := c.RecentlyPlayed(gctx, accessToken)
-		if err != nil {
-			return err
-		}
+	run("recently_played", func() error {
+		v, err := c.RecentlyPlayed(ctx, accessToken)
 		s.Recent = v
-		return nil
+		return err
 	})
-	g.Go(func() error {
-		v, err := c.TopArtists(gctx, accessToken)
-		if err != nil {
-			return err
-		}
+	run("top_artists", func() error {
+		v, err := c.TopArtists(ctx, accessToken)
 		s.Top = v
-		return nil
+		return err
 	})
-	g.Go(func() error {
-		v, err := c.SavedTracks(gctx, accessToken)
-		if err != nil {
-			return err
-		}
+	run("saved_tracks", func() error {
+		v, err := c.SavedTracks(ctx, accessToken)
 		s.SavedTracks = v
-		return nil
+		return err
 	})
-	g.Go(func() error {
-		v, err := c.SavedAlbums(gctx, accessToken)
-		if err != nil {
-			return err
-		}
+	run("saved_albums", func() error {
+		v, err := c.SavedAlbums(ctx, accessToken)
 		s.SavedAlbums = v
-		return nil
+		return err
 	})
-	g.Go(func() error {
-		v, err := c.FollowedArtists(gctx, accessToken)
-		if err != nil {
-			return err
-		}
+	run("followed_artists", func() error {
+		v, err := c.FollowedArtists(ctx, accessToken)
 		s.Followed = v
-		return nil
+		return err
 	})
-	g.Go(func() error {
-		pls, err := c.UserPlaylists(gctx, accessToken)
+	run("playlists", func() error {
+		pls, err := c.UserPlaylists(ctx, accessToken)
 		if err != nil {
 			return err
 		}
@@ -204,48 +221,54 @@ func (c *Client) HydrateSources(ctx context.Context, accessToken, spotifyUserID 
 				mine = append(mine, p)
 			}
 		}
-		items, err := c.fetchPlaylistItemsBounded(gctx, accessToken, mine, 5)
-		if err != nil {
-			return err
+		if len(mine) > maxOwnedPlaylists {
+			mine = mine[:maxOwnedPlaylists]
 		}
+		items, err := c.fetchPlaylistItemsBounded(ctx, accessToken, mine, 5)
 		s.PlaylistItems = items
-		return nil
+		return err
 	})
 
-	if err := g.Wait(); err != nil {
-		return Sources{}, err
+	wg.Wait()
+	if ok == 0 {
+		return Sources{}, errs
 	}
-	return s, nil
+	return s, errs
 }
 
 // fetchPlaylistItemsBounded fetches items for each playlist with a bounded
 // concurrency of `parallel`. Order in the returned slice matches `pls`.
+//
+// One unreadable playlist is skipped rather than failing the batch: a
+// playlist can be deleted between the listing call and this one, and losing
+// every other playlist's contribution over it is a poor trade at a weight of
+// 0.2. The scorer already tolerates nil entries.
 func (c *Client) fetchPlaylistItemsBounded(ctx context.Context, accessToken string, pls []Playlist, parallel int) ([][]PlaylistItem, error) {
 	if parallel < 1 {
 		parallel = 1
 	}
 	out := make([][]PlaylistItem, len(pls))
 	sem := make(chan struct{}, parallel)
-	g, gctx := errgroup.WithContext(ctx)
+	var wg sync.WaitGroup
 	for i, p := range pls {
 		i, p := i, p
-		g.Go(func() error {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
+			case <-ctx.Done():
+				return
 			}
 			defer func() { <-sem }()
-			items, err := c.PlaylistItems(gctx, accessToken, p.ID)
+			items, err := c.PlaylistItems(ctx, accessToken, p.ID)
 			if err != nil {
-				return err
+				slog.Debug("playlist items fetch failed", "playlist", p.ID, "err", err)
+				return
 			}
 			out[i] = items
-			return nil
-		})
+		}()
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
+	wg.Wait()
 	return out, nil
 }

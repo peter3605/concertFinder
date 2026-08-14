@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -199,9 +198,13 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Facets describe the set the user is choosing *within*, so they are
+	// computed before the user's own filters are applied but after the
+	// past-show floor — otherwise a pill would count cards that no longer
+	// exist in any view of this list.
+	found = concerts.Apply(found, concerts.Filters{DateFrom: startOfUTCDay(time.Now())})
 	facets := computeFacets(found)
-	filters := parseFilters(r, loc)
-	filtered := concerts.Apply(found, filters)
+	filtered := concerts.Apply(found, parseFilters(r))
 
 	// Overlay per-user saved + subscribed status. Both sets are small
 	// (bounded by the user's own picks) so an O(n) tag is fine; they were
@@ -213,15 +216,6 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if _, ok := subscribed[filtered[i].Artist.ID]; ok {
 			filtered[i].Subscribed = true
 		}
-	}
-	if r.URL.Query().Get("saved_only") == "true" {
-		kept := filtered[:0]
-		for _, c := range filtered {
-			if c.Saved {
-				kept = append(kept, c)
-			}
-		}
-		filtered = kept
 	}
 
 	// Group last, after filtering and tagging: an act carries its own saved
@@ -354,9 +348,17 @@ func writeRefreshRefusal(w http.ResponseWriter, retryAfter *time.Time, reason st
 	})
 }
 
-func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
+func parseFilters(r *http.Request) concerts.Filters {
 	q := r.URL.Query()
-	f := concerts.Filters{Genre: q.Get("genre"), Venue: q.Get("venue"), Origin: origin}
+	f := concerts.Filters{Genre: q.Get("genre"), Venue: q.Get("venue")}
+	// Absent an explicit lower bound, hide shows that have already happened.
+	// Nothing else did: snapshots are rebuilt at most every few hours and the
+	// janitor keeps past events for another 7 days, so last night's concert
+	// sat at the top of a list headed "Upcoming concerts" until the next scan.
+	// The floor is the start of the current UTC day rather than time.Now() so
+	// a matinee that started a few hours ago still shows for the rest of its
+	// day, and so the boundary doesn't depend on the server's timezone.
+	f.DateFrom = startOfUTCDay(time.Now())
 	if v := q.Get("date_from"); v != "" {
 		if t, err := time.Parse("2006-01-02", v); err == nil {
 			f.DateFrom = t
@@ -375,12 +377,12 @@ func parseFilters(r *http.Request, origin concerts.Location) concerts.Filters {
 	default:
 		f.Weekday = concerts.WeekdayAll
 	}
-	if v := q.Get("radius"); v != "" {
-		if radius, err := strconv.Atoi(v); err == nil && radius > 0 {
-			f.RadiusMiles = radius
-		}
-	}
 	return f
+}
+
+func startOfUTCDay(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // computeFacets counts *events*, not concerts. The list renders one card

@@ -51,7 +51,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
 - **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now TM=250 / Songkick=100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
-- **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less.
+- **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less. **A call site charges as many permits as it makes requests**: use `rate.AllowN` where one logical lookup is several requests. Songkick's `SearchArtistEvents` is two (resolve the artist ID, then its calendar) with no cache in between, so charging one permit made `RATE_CAP_SONGKICK_PER_USER_DAILY` mean twice its stated number. `TakeN` is all-or-nothing and hands back an over-draw on refusal, so a refused 2-permit take doesn't strand the last permit.
 - **Endpoints removed by Spotify (Feb 2026) that are NOT available:** `/recommendations`, `/audio-features`, `/audio-analysis`, `/artists/{id}/related-artists`, `/artists/{id}/top-tracks`, batch `/tracks`. Do not write code that calls these. Affinity is constructed entirely from the user's own explicit signals.
 - **`GET /playlists/{id}/items` (Feb 2026 change):** only works for playlists the user owns or collaborates on. Skip merely-followed playlists.
 - **Bandsintown has been removed** (migration 0015). Its public API returned an AWS `explicit deny in an identity-based policy` 403 on every request for the whole time it was wired up, and the partnership request went unanswered. Ticketmaster is the sole primary source. Do not re-add a BIT client without first confirming the API actually answers; the previous integration silently contributed nothing while costing a per-artist call and a quota slot.
@@ -69,7 +69,18 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   enforced**: `MusicBrainzClient` consults a 5000-entry in-process LRU
   *before* the DB, and at 200 artists a scan nothing ever evicts a negative,
   so `mbCacheEntry` carries `resolvedAt` and `GetMBURL` returns the row's
-  timestamp rather than letting a promoted negative restart its clock.
+  timestamp rather than letting a promoted negative restart its clock. The
+  janitor drops expired negatives from both tables (`PruneExpiredNegativeMBURLs`,
+  `PruneExpiredNegativeGeo`); readers already ignore them, so this is about
+  rows, not correctness — one accumulates per artist and per city we ever
+  failed to resolve. Positives are never pruned.
+- **Third-party User-Agents are a contract, not a formality.** MusicBrainz
+  403s anonymous traffic and Nominatim's stated remedy for a UA it can't act
+  on is a block — a failure that arrives as silence, not an error we raise.
+  `main.go` builds one string from `SITE_BASE_URL` + `CONTACT_EMAIL` and hands
+  it to both clients. The package-level defaults are last-resort fallbacks;
+  the previous one named a GitHub repo that does not exist, which satisfied
+  the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
@@ -79,6 +90,28 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 
 Per-artist score combines six weighted signals — followed (1.0), top artists weighted by time range (0.9 × {short=1.0, medium=0.8, long=0.6}), saved albums (0.7), saved tracks (0.5), recently played (0.4), owned playlists (0.2). Top 200 artists are submitted to concert search. These weights are starting values to be tuned during Phase 1 dogfooding — treat them as adjustable, not load-bearing.
 
+**Hydration is bounded and failure-tolerant, and both halves matter.** Every
+paginated source has a page cap (`internal/spotify/sources.go`) because they
+otherwise walk a library of any size, 50 rows at a time, sequentially, inside
+`affinity.ComputeTimeout` (60s) — 10k saved tracks is 200 round trips from one
+source. Past the timeout the profile never computed, and since
+`ScanConcertsWorker` computes affinity *before* it searches, that user's feed
+stayed empty forever while the SWR poll re-enqueued a scan that could not
+succeed. The size of someone's library silently decided whether the product
+worked for them. Caps keep the newest rows, which is what the scoring wants
+anyway.
+
+`HydrateSources` returns `(Sources, []error)`, not `(Sources, error)`: a
+failing source degrades the profile, it does not destroy it. It deliberately
+does **not** use `errgroup.WithContext` — a shared cancelling context is
+exactly the "first error kills the other five" behavior being avoided. Only a
+total wipeout (no signal at all) is fatal, because persisting an empty profile
+would cache it for the full 24h TTL. `RefreshAffinityArgs` declares
+`InsertOpts` for the same class of reason: river's defaults are 25 attempts and
+no uniqueness, so a revoked Spotify grant meant two dozen full six-endpoint
+fan-outs. `RefreshAffinityWorker.Timeout` exists because river's default job
+timeout is 60s — the *same number* as `ComputeTimeout`, so the two raced.
+
 ## SWR read pattern (Phase 3, replaces the old synchronous fan-out)
 
 The "get my concerts" request is now stale-while-revalidate against a
@@ -87,9 +120,22 @@ snapshot in `user_concert_snapshots`:
 1. Resolve user from session cookie (middleware also stashes the full user
    in ctx so `handleMe` skips a duplicate DB read).
 2. Read the snapshot for `(user_id, location_key)`.
-3. Apply filters (date, genre, venue, weekday, saved_only) over the snapshot.
-   **A facet's count must equal what clicking it returns.** Every filter is
-   matched with the same rule its facet is bucketed by:
+3. Apply filters (date, genre, venue, weekday) over the snapshot. There is no
+   `saved_only` or `radius` parameter — both were parsed server-side long
+   after the last client stopped sending them (saves moved to their own
+   endpoint; the radius the user picks is applied upstream at fetch time).
+   **Shows that have already happened are dropped first**, at a floor of the
+   start of the current UTC day. Nothing else enforces that: snapshots are
+   rebuilt every few hours and the janitor keeps past events another 7 days,
+   so last night's show used to head a list titled "Upcoming concerts". The
+   floor is a day boundary rather than `now()` so a matinee doesn't disappear
+   from its own listing mid-afternoon, and it applies to `/me/saved-concerts`
+   too — that query sorts by `event_date` ascending, so past saves landed at
+   the very top.
+   **A facet's count must equal what clicking it returns.** Facets are
+   computed after the past-show floor and before the user's own filters —
+   counting the raw snapshot would promise cards no view can produce. Every
+   filter is matched with the same rule its facet is bucketed by:
    - Genre — exact tag, case-insensitive. Not a substring: a "rock · 12"
      pill that also matched "indie rock" and "post-rock" returned forty.
    - Venue — compared under `concerts.Normalize`, the dedup normalizer, so
@@ -287,9 +333,60 @@ deduped by URL.
   input is already narrowed to subscribed artists, so a merged entry can only
   name artists the user asked about — it never leaks the rest of the lineup.
 
+## Unsubscribe and email headers
+
+**One unsubscribe link, one meaning: no more email.** `db.OptOutAllEmail`
+clears `digest_opt_in` *and* `instant_notify_opt_in`. It used to clear only the
+digest — but instant-notify mail carries the same link under the words "Stop
+these notifications", so a user who clicked it kept receiving instant mail with
+no indication of why or what else to press.
+
+**The opt-out is on POST; GET only renders a confirmation page.** Mail security
+gateways (Outlook Safe Links, scanning appliances) fetch every URL in an
+inbound message, and a state-changing GET honors that fetch — unsubscribing
+people who never clicked. POST is also what RFC 8058 one-click sends, so the
+same handler serves both. The token is read from the query string *or* the form
+body because the confirmation page posts a field while one-click repeats the
+URL.
+
+`buildMIME` emits `Date`, a unique `Message-ID` on the From domain,
+RFC 2047-encoded `Subject`, and `List-Unsubscribe` +
+`List-Unsubscribe-Post: List-Unsubscribe=One-Click`. None of this is
+cosmetic — missing Date/Message-ID is a standing SpamAssassin penalty, the
+digest subject contains a literal em dash that is malformed sent raw, and
+Gmail/Yahoo's bulk-sender rules expect one-click unsubscribe. Every
+interpolated header value goes through `sanitizeHeader`: display names and
+addresses come from Spotify, and a CRLF in one would let it inject headers.
+
+## Deployment
+
+`Caddyfile` — `header_up` is a **`reverse_proxy` subdirective**, never a
+site-level one. Written at site level it is a config-adapt error, so Caddy
+refuses to start; with `restart: unless-stopped` that is a crash loop with no
+TLS and no site while the api container beside it looks healthy. Validate with
+`caddy validate --config Caddyfile --adapter caddyfile` (`SITE_DOMAIN` set)
+before touching it — nothing in `docker-compose.yml` exercises Caddy locally.
+
+The proxy **overwrites** `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For`
+rather than passing them through. `chi/middleware.RealIP` reads them in that
+order and Caddy only appends to XFF, so without this a client could set
+`True-Client-IP` freely and land in whichever bucket it liked in the
+`/api/auth` rate limiter.
+
+`/api/healthz` pings Postgres. Every route on this server needs the database,
+so a health check that skips it reports green while everything 500s.
+
+Deploys build the image **on the instance**, but `build` and `up -d` are
+separate SSM steps: `up -d --build` tears down running containers as part of
+the same command, so a failed or OOM-killed build took the site with it. CI
+runs gofmt, vet, `go build`, `go test`, and `npm run build` — `go test` alone
+compiles only packages that have tests, and several here have none. Building
+in Actions and pushing to ECR would remove the on-instance build entirely;
+that needs an ECR repo plus instance-profile pull permissions in `/infra`.
+
 ## Required Environment Variables (Appendix A)
 
-Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`.
+Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
