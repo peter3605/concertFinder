@@ -360,12 +360,24 @@ addresses come from Spotify, and a CRLF in one would let it inject headers.
 
 ## Deployment
 
-`Caddyfile` — `header_up` is a **`reverse_proxy` subdirective**, never a
-site-level one. Written at site level it is a config-adapt error, so Caddy
-refuses to start; with `restart: unless-stopped` that is a crash loop with no
-TLS and no site while the api container beside it looks healthy. Validate with
-`caddy validate --config Caddyfile --adapter caddyfile` (`SITE_DOMAIN` set)
-before touching it — nothing in `docker-compose.yml` exercises Caddy locally.
+**Run `./scripts/check-deploy-config.sh` after touching `Caddyfile` or either
+compose file.** CI runs it too (the `deploy-config` job, which `deploy` depends
+on). These are the only files in the repo that never execute locally —
+`docker-compose.yml` has no Caddy service and `go run` reads neither — and
+three defects have shipped in them, each presenting identically: Caddy exits,
+`restart: unless-stopped` makes it a crash loop, and the api container beside
+it looks healthy throughout.
+
+Two of those are worth naming, because both are invisible to the obvious check:
+
+- `header_up` is a **`reverse_proxy` subdirective**, never a site-level one.
+  At site level it is a config-adapt error.
+- The caddy service needs `env_file`. Without it `SITE_DOMAIN` is empty inside
+  the container, `{$SITE_DOMAIN} {` collapses into a *global options block*,
+  and Caddy dies with `unrecognized global option: encode`. Running
+  `caddy validate` with the variable exported in your shell passes happily —
+  the script asserts against the compose-resolved environment instead, which
+  is what actually reaches the container.
 
 The proxy **overwrites** `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For`
 rather than passing them through. `chi/middleware.RealIP` reads them in that
