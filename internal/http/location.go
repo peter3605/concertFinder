@@ -16,8 +16,8 @@ import (
 
 // LocationHandler serves GET/PUT /me/location.
 type LocationHandler struct {
-	Pool      *pgxpool.Pool
-	Geocoder  *geocoding.Client
+	Pool             *pgxpool.Pool
+	Geocoder         *geocoding.Client
 	FallbackLocation concerts.Location // used when user has no row yet
 }
 

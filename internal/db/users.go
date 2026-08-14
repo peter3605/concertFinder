@@ -79,6 +79,26 @@ func SetDigestOptIn(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, optIn
 	return nil
 }
 
+// OptOutAllEmail clears every outbound-email flag at once. This is what the
+// unsubscribe link has to do, and it is deliberately not SetDigestOptIn:
+// instant-notify mails carry the same link under the words "Stop these
+// notifications", so turning off only the digest left a user who clicked it
+// still receiving instant mail, with no indication of why or what else to
+// press. One link, one meaning — no more email.
+func OptOutAllEmail(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) error {
+	const q = `
+UPDATE users
+SET digest_opt_in = false, instant_notify_opt_in = false, updated_at = now()
+WHERE id = $1`
+	tag, err := pool.Exec(ctx, q, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoRows
+	}
+	return nil
+}
 
 // UpdateRefreshToken persists a rotated refresh token. Spotify may rotate on refresh (design §3.4).
 func UpdateRefreshToken(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, ct, nonce []byte) error {

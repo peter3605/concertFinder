@@ -131,7 +131,13 @@ func main() {
 		// Shared Nominatim client. Used by the location handler (user picks a
 		// city) and by the fallback venue geocoder (turns "Baltimore, MD"
 		// venues into coords when JSON-LD omits geo).
-		geocoder := geocoding.NewClient("")
+		//
+		// Both Nominatim and MusicBrainz require a User-Agent that identifies
+		// the operator and offers a way to reach them; the sanction for a bad
+		// one is a block, not an error we'd see in a log. Build it from the
+		// deployment's own base URL and contact address so it stays true.
+		userAgent := fmt.Sprintf("ConcertFinder/1.0 (+%s; %s)", cfg.SiteBaseURL, cfg.ContactEmail)
+		geocoder := geocoding.NewClient(userAgent)
 
 		rateLedger := &rate.Ledger{
 			Pool: pool,
@@ -159,7 +165,7 @@ func main() {
 			// URL resolution defaults to MusicBrainz (free, no API key). If a
 			// Brave key is set, we fall back to that — kept for parity while
 			// evaluating MusicBrainz coverage on real data.
-			var resolver fallback.URLResolver = fallback.NewMusicBrainzClient("").WithPool(pool)
+			var resolver fallback.URLResolver = fallback.NewMusicBrainzClient(userAgent).WithPool(pool)
 			if cfg.BraveSearchAPIKey != "" {
 				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
 			}
@@ -345,7 +351,7 @@ func main() {
 			SnapshotCache: webhttp.NewSnapshotCache(200),
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
-		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc}
+		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc, CookieDomain: cfg.SessionCookieDomain}
 		subscribedH = &webhttp.SubscribedArtistsHandler{
 			Pool:    pool,
 			Spotify: spotifyClient,
@@ -399,8 +405,20 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
 		})
-		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		// Health means "can actually serve requests", which for every route
+		// on this server means reaching Postgres. Reporting ok without
+		// checking it is backwards: a restart loop or an alert would see a
+		// green light while every real endpoint 500s.
+		api.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
 			w.Header().Set("Content-Type", "application/json")
+			if err := pool.Ping(ctx); err != nil {
+				logger.Warn("healthz: database unreachable", "err", err)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database"})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		})
 		api.Get("/site-info", (&webhttp.SiteInfoHandler{
@@ -420,7 +438,12 @@ func main() {
 		})
 		// Unauthenticated: HMAC-signed token in the URL is proof of identity
 		// for one-click unsubscribe from a mobile mail client with no session.
+		// GET only renders a confirmation page — the opt-out itself is on
+		// POST, so link-scanning mail gateways can't unsubscribe people by
+		// prefetching. POST is also what RFC 8058 one-click sends, which is
+		// what the List-Unsubscribe-Post header on our mail advertises.
 		api.Get("/unsubscribe", unsubscribeH.Get)
+		api.Post("/unsubscribe", unsubscribeH.Post)
 		api.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
 			r.Use(auth.CSRF(signingKey))

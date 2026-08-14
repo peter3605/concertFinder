@@ -6,9 +6,13 @@ package email
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"strings"
 	"time"
@@ -47,6 +51,11 @@ type Message struct {
 	Subject string
 	Text    string
 	HTML    string
+	// UnsubscribeURL populates the List-Unsubscribe headers. Required in
+	// practice: Gmail and Yahoo's bulk-sender rules expect one-click
+	// unsubscribe on marketing/notification mail, and its absence costs
+	// inbox placement before any recipient ever sees the message.
+	UnsubscribeURL string
 }
 
 // Send delivers the message. In ModeLog it writes the assembled MIME to
@@ -99,12 +108,32 @@ func (s *Sender) Send(ctx context.Context, m Message) error {
 // buildMIME hand-rolls a multipart/alternative message with both text and
 // HTML parts. Small enough that the stdlib mime/multipart machinery is
 // overkill.
+//
+// Header hygiene here is deliverability, not pedantry:
+//   - Date and Message-ID are required by RFC 5322 and their absence is a
+//     standing SpamAssassin penalty (MISSING_DATE / MISSING_MID).
+//   - Subject goes through RFC 2047 encoding. Headers must be ASCII, and the
+//     digest subject carries a literal em dash — sent raw it is malformed and
+//     renders as mojibake in stricter clients.
+//   - List-Unsubscribe + List-Unsubscribe-Post give Gmail and Yahoo the
+//     one-click unsubscribe their bulk-sender rules expect; the POST target is
+//     the same handler the confirmation page submits to.
+//
+// Every interpolated value is stripped of CR/LF first. Display names and
+// addresses originate at Spotify, and a newline in one would otherwise let it
+// inject arbitrary headers.
 func buildMIME(from string, m Message) []byte {
 	boundary := "concertfinder-boundary-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", from)
-	fmt.Fprintf(&b, "To: %s\r\n", m.To)
-	fmt.Fprintf(&b, "Subject: %s\r\n", m.Subject)
+	fmt.Fprintf(&b, "From: %s\r\n", sanitizeHeader(from))
+	fmt.Fprintf(&b, "To: %s\r\n", sanitizeHeader(m.To))
+	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", sanitizeHeader(m.Subject)))
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(&b, "Message-ID: %s\r\n", messageID(from))
+	if u := sanitizeHeader(m.UnsubscribeURL); u != "" {
+		fmt.Fprintf(&b, "List-Unsubscribe: <%s>\r\n", u)
+		b.WriteString("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n", boundary)
 	b.WriteString("\r\n")
@@ -123,4 +152,29 @@ func buildMIME(from string, m Message) []byte {
 
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return []byte(b.String())
+}
+
+// sanitizeHeader strips CR and LF so an interpolated value cannot terminate
+// its header and start a new one.
+func sanitizeHeader(v string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(strings.TrimSpace(v))
+}
+
+// messageID builds a globally-unique Message-ID, taking the domain from the
+// From address so it matches the sending domain (mismatched domains are
+// themselves a spam signal).
+func messageID(from string) string {
+	domain := "concertfinder.local"
+	if addr, err := mail.ParseAddress(from); err == nil {
+		if i := strings.LastIndex(addr.Address, "@"); i >= 0 && i+1 < len(addr.Address) {
+			domain = addr.Address[i+1:]
+		}
+	} else if i := strings.LastIndex(from, "@"); i >= 0 && i+1 < len(from) {
+		domain = strings.Trim(from[i+1:], "<> ")
+	}
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), sanitizeHeader(domain))
+	}
+	return fmt.Sprintf("<%s.%d@%s>", hex.EncodeToString(buf[:]), time.Now().UnixNano(), sanitizeHeader(domain))
 }

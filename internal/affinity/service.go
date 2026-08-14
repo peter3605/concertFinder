@@ -7,7 +7,9 @@ package affinity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,11 +61,20 @@ func (s *Service) Compute(ctx context.Context, u User) ([]spotify.ScoredArtist, 
 	if err != nil {
 		return nil, fmt.Errorf("access token: %w", err)
 	}
-	sources, err := s.Spotify.HydrateSources(cctx, accessToken, u.SpotifyUserID)
-	if err != nil {
-		return nil, fmt.Errorf("hydrate: %w", err)
+	// Partial hydration is usable: HydrateSources only reports an error set
+	// with no data at all when *every* source failed. A profile built from
+	// five of six signals is worth persisting — the alternative is no feed.
+	sources, hydrateErrs := s.Spotify.HydrateSources(cctx, accessToken, u.SpotifyUserID)
+	if len(hydrateErrs) > 0 {
+		slog.Warn("affinity: some sources failed to hydrate",
+			"user", u.ID, "failed", len(hydrateErrs), "errs", errors.Join(hydrateErrs...))
 	}
 	artists := spotify.ScoreArtists(sources)
+	if len(artists) == 0 {
+		// No signal at all. Persisting this would cache an empty profile for
+		// the full 24h TTL and hand the scan worker nothing to search.
+		return nil, fmt.Errorf("hydrate: no affinity signal: %w", errors.Join(hydrateErrs...))
+	}
 	blob, err := json.Marshal(artists)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
