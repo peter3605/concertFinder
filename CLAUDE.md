@@ -47,7 +47,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **No long-term caching of Spotify Content.** Raw listening data (saved tracks, top artists, recently played, etc.) is held in memory only and discarded after profile construction. Only the *derived* affinity profile (artist IDs + scores) is persisted, with a 24-hour TTL. Do not add tables that store raw Spotify response data.
 - **No ML training on Spotify data.** This includes embeddings and similarity learning.
 - **Refresh tokens are AES-256-GCM encrypted at rest** with a per-token nonce. Key comes from `ENCRYPTION_KEY` env var (Phase 1) or AWS Secrets Manager (Phase 3). Never log or return tokens.
-- **Spotify redirect URI must be `https://127.0.0.1:3000/callback`** for local dev — `http://localhost` is rejected by Spotify as of Nov 2025.
+- **Spotify redirect URI is `https://127.0.0.1:3000/api/auth/callback`** for local dev (`https://<domain>/api/auth/callback` in prod) — `http://localhost` is rejected by Spotify as of Nov 2025. The path is not `/callback`: the handler is mounted under `/api/auth`, and a dashboard entry pointing at `/callback` hits the SPA catch-all instead, so login silently completes into a logged-out app.
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
 - **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now TM=250 / Songkick=100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
@@ -360,12 +360,24 @@ addresses come from Spotify, and a CRLF in one would let it inject headers.
 
 ## Deployment
 
-`Caddyfile` — `header_up` is a **`reverse_proxy` subdirective**, never a
-site-level one. Written at site level it is a config-adapt error, so Caddy
-refuses to start; with `restart: unless-stopped` that is a crash loop with no
-TLS and no site while the api container beside it looks healthy. Validate with
-`caddy validate --config Caddyfile --adapter caddyfile` (`SITE_DOMAIN` set)
-before touching it — nothing in `docker-compose.yml` exercises Caddy locally.
+**Run `./scripts/check-deploy-config.sh` after touching `Caddyfile` or either
+compose file.** CI runs it too (the `deploy-config` job, which `deploy` depends
+on). These are the only files in the repo that never execute locally —
+`docker-compose.yml` has no Caddy service and `go run` reads neither — and
+three defects have shipped in them, each presenting identically: Caddy exits,
+`restart: unless-stopped` makes it a crash loop, and the api container beside
+it looks healthy throughout.
+
+Two of those are worth naming, because both are invisible to the obvious check:
+
+- `header_up` is a **`reverse_proxy` subdirective**, never a site-level one.
+  At site level it is a config-adapt error.
+- The caddy service needs `env_file`. Without it `SITE_DOMAIN` is empty inside
+  the container, `{$SITE_DOMAIN} {` collapses into a *global options block*,
+  and Caddy dies with `unrecognized global option: encode`. Running
+  `caddy validate` with the variable exported in your shell passes happily —
+  the script asserts against the compose-resolved environment instead, which
+  is what actually reaches the container.
 
 The proxy **overwrites** `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For`
 rather than passing them through. `chi/middleware.RealIP` reads them in that
