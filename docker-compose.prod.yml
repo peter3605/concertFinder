@@ -12,6 +12,14 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    # SITE_DOMAIN comes from the same .env the api service reads. Without it
+    # the Caddyfile's {$SITE_DOMAIN} expands to nothing, the site block
+    # degenerates into a global options block, and Caddy refuses to start
+    # ("unrecognized global option: encode") — the same crash loop as a
+    # malformed directive, from a missing variable.
+    env_file:
+      - path: .env
+        required: true
     ports:
       - "80:80"
       - "443:443"

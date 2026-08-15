@@ -45,6 +45,17 @@ func main() {
 		logger.Error("config load failed", "err", err)
 		os.Exit(1)
 	}
+	// Refuse to serve on a configuration that would fail silently once real
+	// traffic arrives — see config.Validate for what each check has cost.
+	// Reported all at once so a misconfigured deploy takes one round trip to
+	// fix, not one per variable.
+	if problems := cfg.Validate(); len(problems) > 0 {
+		for _, p := range problems {
+			logger.Error("invalid configuration", "err", p)
+		}
+		logger.Error("refusing to start", "problems", len(problems))
+		os.Exit(1)
+	}
 
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	pool, err := db.Connect(dbCtx, cfg.DatabaseURL)
@@ -92,10 +103,16 @@ func main() {
 		signingKey   []byte
 	)
 
+	// Validate already rejected a bad key, so this cannot fire — but it used
+	// to be a Warn that silently skipped wiring every auth and /me route,
+	// leaving a site that served, passed health checks, and 404'd on login.
+	// If the two ever disagree, stopping is the only safe answer.
 	encKey, keyErr := auth.DecodeKey(cfg.EncryptionKey)
 	if keyErr != nil {
-		logger.Warn("auth routes disabled: ENCRYPTION_KEY missing or invalid", "err", keyErr)
-	} else {
+		logger.Error("ENCRYPTION_KEY invalid; refusing to start without authentication", "err", keyErr)
+		os.Exit(1)
+	}
+	{
 		spotifyHTTP := &http.Client{Timeout: 30 * time.Second}
 		spotifyClient := spotify.NewClient(spotifyHTTP)
 		oauthHTTP := &http.Client{Timeout: 10 * time.Second}
@@ -425,9 +442,11 @@ func main() {
 			ContactEmail:  cfg.ContactEmail,
 			EffectiveDate: "2026-07-29",
 		}).Get)
-		if authDeps == nil {
-			return
-		}
+		// No nil guard on authDeps here any more. There used to be one, and it
+		// was the mechanism by which a bad ENCRYPTION_KEY produced a site with
+		// no authentication rather than a process that refused to start.
+		// Startup now fails on that config, so these routes always mount.
+		//
 		// Rate-limit the OAuth start (/login and /callback are the state-mutating
 		// bits of the auth flow). 5 req/s with burst 20 per source IP — plenty
 		// for real users, spam-hostile.

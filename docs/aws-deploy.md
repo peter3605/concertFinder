@@ -100,7 +100,7 @@ Ticketmaster key, RDS `DATABASE_URL`, encryption key,
 DATABASE_URL=postgres://concertfinder:<rds-password>@concertfinder.xxxxx.us-east-1.rds.amazonaws.com:5432/concertfinder?sslmode=require
 ENCRYPTION_KEY=<openssl rand -hex 32>
 SPOTIFY_CLIENT_ID=<from developer.spotify.com>
-SPOTIFY_REDIRECT_URI=https://your-domain.com/callback
+SPOTIFY_REDIRECT_URI=https://your-domain.com/api/auth/callback
 TICKETMASTER_API_KEY=<from developer.ticketmaster.com>
 SESSION_COOKIE_DOMAIN=your-domain.com
 LISTEN_ADDR=:8080
@@ -108,7 +108,34 @@ SITE_DOMAIN=your-domain.com
 USER_LATITUDE=40.7128
 USER_LONGITUDE=-74.0060
 USER_RADIUS_MILES=50
+
+# Public base URL. NOT optional in production despite having a default: it is
+# what unsubscribe links in outgoing email are built from, and it is half of
+# the User-Agent sent to MusicBrainz and Nominatim. Left unset it falls back to
+# https://127.0.0.1:3000, so recipients get unsubscribe links pointing at their
+# own machine. The server refuses to start on that combination.
+SITE_BASE_URL=https://your-domain.com
+# Rendered on the public Privacy and Terms pages, and the address MusicBrainz
+# and Nominatim would use to reach you before rate-limiting. Defaults to the
+# author's personal address — set it.
+CONTACT_EMAIL=you@your-domain.com
+
+# Email. Stays in 'log' mode (messages go to slog, nothing is sent) until you
+# set this to 'smtp'. SES starts in sandbox mode — see step 6.
+EMAIL_DELIVERY_MODE=log
+SMTP_HOST=email-smtp.us-east-1.amazonaws.com
+SMTP_PORT=587
+SMTP_USERNAME=<terraform output ses_smtp_username>
+SMTP_PASSWORD=<terraform output ses_smtp_password>
+SMTP_FROM=ConcertFinder <notify@your-domain.com>
 ```
+
+The server validates all of this at startup and refuses to boot on anything
+that would fail silently later — a malformed `ENCRYPTION_KEY`, a redirect URI
+that isn't `/api/auth/callback`, a loopback `SITE_BASE_URL` behind a real
+cookie domain, `EMAIL_DELIVERY_MODE=smtp` with no relay. Every problem is
+reported at once, so a bad `.env` costs one round trip rather than one restart
+per variable. `docker compose logs api` shows them.
 
 Kick the first deploy manually to confirm it boots:
 
@@ -217,7 +244,11 @@ That's the entire set of GH secrets. No AWS keys.
   four Route 53 NS records.
 - Route 53 → Hosted zone → Create record:
   - Type A, name `@` (apex), value your EC2 Elastic IP
-- Update Spotify Developer Dashboard: redirect URI → `https://your-domain.com/callback`.
+- Update Spotify Developer Dashboard: redirect URI → `https://your-domain.com/api/auth/callback`.
+  It must be this exact path. The handler is mounted at `/api/auth/callback`
+  (chi: `/api` → `/auth` → `auth.Mount`), and a redirect to `/callback`
+  falls through to the SPA's catch-all — so the browser lands on the app
+  looking logged out, with no error anywhere to say the URI was wrong.
 
 Caddy handles the TLS cert automatically the first time a request lands on
 port 443 for your domain.
