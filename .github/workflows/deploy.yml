@@ -80,6 +80,22 @@ jobs:
       # build leaves the current containers serving and fails the SSM command
       # loudly instead.
       #
+      # `up -d --wait` blocks on the api container's healthcheck instead of
+      # returning the moment the container is started. Without it a container
+      # that exits immediately — which config.Validate does deliberately on a
+      # bad .env — still produced a zero exit, an SSM "Success" and a green
+      # workflow while `restart: unless-stopped` crash-looped it and the site
+      # stayed down. verify-deploy.sh then probes the whole chain through
+      # Caddy, which is the half `--wait` cannot see: the healthcheck runs
+      # inside the api container and proves only that the Go process answers
+      # itself, while every deploy defect this repo has shipped was a Caddy
+      # crash loop beside a healthy api container.
+      #
+      # A `--wait` failure is swallowed on purpose so verify-deploy.sh still
+      # runs: it is the authoritative verdict and it dumps `ps` + container
+      # logs on the way out, which is the output you actually need. It fails
+      # the SSM command by itself if the site is really down.
+      #
       # Building in this workflow and pushing to ECR would remove the risk
       # entirely (and free the instance from carrying a Node toolchain); it
       # needs an ECR repository plus pull permissions on the instance profile,
@@ -99,7 +115,8 @@ jobs:
               "sudo -u concertfinder git reset --hard origin/main",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml pull || true",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml build",
-              "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d",
+              "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 || echo compose-wait-failed-verify-deploy-below-is-the-verdict",
+              "sudo -u concertfinder ./scripts/verify-deploy.sh",
               "sudo -u concertfinder docker image prune -f"
             ]' \
             --query 'Command.CommandId' \

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +39,17 @@ import (
 )
 
 func main() {
+	// The api image is distroless — no shell, no curl, no wget — so a compose
+	// healthcheck has nothing to run except this binary. `-healthcheck` probes
+	// the already-running server in the same container and exits 0/1, which is
+	// what `healthcheck:` in docker-compose.prod.yml invokes.
+	healthcheck := flag.Bool("healthcheck", false,
+		"probe the running server's /api/healthz and exit 0 (healthy) or 1 (not); for the container healthcheck")
+	flag.Parse()
+	if *healthcheck {
+		os.Exit(runHealthcheck())
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -529,6 +542,63 @@ func main() {
 			logger.Error("river stop error", "err", err)
 		}
 	}
+}
+
+// runHealthcheck probes the local server's /api/healthz and returns a process
+// exit code. It exists because `docker compose up -d` returns as soon as a
+// container is *started*, not once it stays up: with config.Validate's hard
+// exit on a bad .env and `restart: unless-stopped`, one wrong variable used to
+// produce a crash-looping api container, an SSM "Success", and a green
+// workflow, with the site down the whole time and nothing saying so. A
+// healthcheck is what lets `up -d --wait` fail instead.
+//
+// It deliberately reads LISTEN_ADDR straight from the environment rather than
+// going through config.Load: the probe's job is to report on the server, and
+// re-running config parsing here would let it fail for reasons that have
+// nothing to do with whether the server is answering.
+//
+// /api/healthz pings Postgres, so this reports unhealthy when the database is
+// unreachable. That marks the container unhealthy without restarting it —
+// Docker's restart policies act on exit, not on health — so an RDS blip
+// surfaces in `docker compose ps` rather than turning into a restart loop.
+func runHealthcheck() int {
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: LISTEN_ADDR %q is not host:port: %v\n", addr, err)
+		return 1
+	}
+	// ":8080", "0.0.0.0:8080" and "[::]:8080" all mean "every interface";
+	// from inside the container the way to reach that is loopback.
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(host, port) + "/api/healthz"
+
+	// Comfortably above the handler's own 2s database-ping timeout, so a slow
+	// but working database reads as unhealthy only when it really is.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: build request: %v\n", err)
+		return 1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: GET %s: %v\n", url, err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: GET %s returned %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 func requestLogger(l *slog.Logger) func(http.Handler) http.Handler {

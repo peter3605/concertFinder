@@ -379,22 +379,78 @@ Two of those are worth naming, because both are invisible to the obvious check:
   the script asserts against the compose-resolved environment instead, which
   is what actually reaches the container.
 
+`scripts/verify-deploy.sh` is in the same category — it only ever executes on
+the instance, mid-deploy — so the preflight `bash -n`s it and asserts its
+executable bit. It is the step that decides whether a deploy succeeded, so a
+typo in it would fail an otherwise fine deploy right after the new containers
+were already up.
+
+**The preflight cannot check the deployment's own `.env`.** It writes a
+synthetic one (`SITE_DOMAIN=example.com`) precisely so it never reads a
+developer's real secrets, which means it proves the *wiring* and can say
+nothing about whether the production file sets anything. `SITE_DOMAIN` was
+missing from `.env.example` entirely for that reason — documented in
+`infra/README.md` and `docs/aws-deploy.md`, absent from the template an
+operator actually copies. Two places now cover it: it is in `.env.example`, and
+`config.Validate` rejects a missing `SITE_DOMAIN`, or one whose host disagrees
+with `SITE_BASE_URL`, whenever `SESSION_COOKIE_DOMAIN` is non-loopback. The Go
+binary never *uses* `SITE_DOMAIN` — it validates it because the api container
+is handed the same `.env` and is therefore the only thing in the system that
+can see the real file. A mismatch is equally silent: Caddy provisions a
+certificate for one name while every emailed link and the
+MusicBrainz/Nominatim User-Agent point at another.
+
 The proxy **overwrites** `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For`
 rather than passing them through. `chi/middleware.RealIP` reads them in that
 order and Caddy only appends to XFF, so without this a client could set
 `True-Client-IP` freely and land in whichever bucket it liked in the
 `/api/auth` rate limiter.
 
-`/api/healthz` pings Postgres. Every route on this server needs the database,
-so a health check that skips it reports green while everything 500s.
+Caddy sets HSTS, `X-Content-Type-Options`, `Referrer-Policy`,
+`Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options` at
+**site level**, so they cover Caddy's own error responses (a 502 when the api
+is down) and not just what the api returns. `header` is a site-level directive;
+only `header_up` is reverse_proxy-only. The CSP is deliberately *only*
+`frame-ancestors` — restricting script/style sources needs testing against the
+Vite bundle, and a wrong one breaks the SPA on first load.
+
+**A deploy must prove the site serves, not that containers started.**
+`/api/healthz` pings Postgres — every route needs the database, so a check that
+skips it reports green while everything 500s — but for a while nothing ever
+called it. That matters because `docker compose up -d` exits 0 the moment a
+container is *started*: with `config.Validate`'s hard exit on a bad `.env` and
+`restart: unless-stopped`, one wrong variable produced a crash-looping api
+container, an SSM `Success`, and a green workflow, with the site down
+throughout. Fail-fast validation made this *more* likely, not less — it turned
+silent misconfiguration into a hard exit without giving the exit anywhere to
+surface. Two mechanisms now close it, and they cover different halves:
+
+- `up -d --wait` blocks on the api container's `healthcheck`, which runs
+  **the server binary in `-healthcheck` mode** (`runHealthcheck` in
+  `cmd/server/main.go`). The image is distroless — no shell, no curl, no wget —
+  so the binary is the only thing available to probe with; use `CMD`, never
+  `CMD-SHELL`. It reads `LISTEN_ADDR` straight from the env rather than through
+  `config.Load`, so the probe can't fail for reasons unrelated to whether the
+  server answers. Reporting unhealthy does **not** restart the container
+  (Docker restart policies act on exit, not health), so an RDS blip shows up in
+  `docker compose ps` instead of becoming a restart loop.
+- `scripts/verify-deploy.sh` then fetches `/api/healthz` **through Caddy** over
+  443. This is the half `--wait` cannot see: the healthcheck runs inside the api
+  container and proves only that the Go process answers itself, while every
+  deploy defect this repo has shipped was a Caddy crash loop next to a healthy
+  api container. It dumps `ps` and container logs on failure, so it is also the
+  step that explains a bad deploy. A `--wait` failure is swallowed in the
+  workflow on purpose so this still runs and produces that output.
 
 Deploys build the image **on the instance**, but `build` and `up -d` are
 separate SSM steps: `up -d --build` tears down running containers as part of
-the same command, so a failed or OOM-killed build took the site with it. CI
-runs gofmt, vet, `go build`, `go test`, and `npm run build` — `go test` alone
-compiles only packages that have tests, and several here have none. Building
-in Actions and pushing to ECR would remove the on-instance build entirely;
-that needs an ECR repo plus instance-profile pull permissions in `/infra`.
+the same command, so a failed or OOM-killed build took the site with it. Keep
+them separate in the runbook's manual and rollback commands too — a rollback is
+by definition a moment when the site is already unhappy. CI runs gofmt, vet,
+`go build`, `go test`, and `npm run build` — `go test` alone compiles only
+packages that have tests, and several here have none. Building in Actions and
+pushing to ECR would remove the on-instance build entirely; that needs an ECR
+repo plus instance-profile pull permissions in `/infra`.
 
 ## Required Environment Variables (Appendix A)
 
@@ -402,7 +458,12 @@ Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATA
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
-Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`.
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
+
+`SITE_DOMAIN` is the odd one out: it is consumed by **Caddy**, not by the Go
+binary, via `docker-compose.prod.yml` handing the caddy container the same
+`.env`. `config.Load` reads it and `config.Validate` checks it anyway — see the
+Deployment section for why that is the only place it can be caught.
 
 All of these are read from the **process environment** — the binary has no
 dotenv dependency and never opens `.env` itself. `docker compose` is what loads

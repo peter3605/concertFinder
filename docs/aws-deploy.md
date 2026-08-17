@@ -104,6 +104,12 @@ SPOTIFY_REDIRECT_URI=https://your-domain.com/api/auth/callback
 TICKETMASTER_API_KEY=<from developer.ticketmaster.com>
 SESSION_COOKIE_DOMAIN=your-domain.com
 LISTEN_ADDR=:8080
+# Read by Caddy, not by the Go binary — docker-compose.prod.yml hands this same
+# file to the caddy container, whose site block is literally `{$SITE_DOMAIN} {`.
+# Unset, that line collapses into a global options block and Caddy exits with
+# "unrecognized global option: encode", which restart: unless-stopped turns into
+# a crash loop beside a healthy-looking api container. Bare host, no scheme, and
+# it must match the host in SITE_BASE_URL below.
 SITE_DOMAIN=your-domain.com
 USER_LATITUDE=40.7128
 USER_LONGITUDE=-74.0060
@@ -133,15 +139,37 @@ SMTP_FROM=ConcertFinder <notify@your-domain.com>
 The server validates all of this at startup and refuses to boot on anything
 that would fail silently later — a malformed `ENCRYPTION_KEY`, a redirect URI
 that isn't `/api/auth/callback`, a loopback `SITE_BASE_URL` behind a real
-cookie domain, `EMAIL_DELIVERY_MODE=smtp` with no relay. Every problem is
+cookie domain, a missing `SITE_DOMAIN` or one that disagrees with
+`SITE_BASE_URL`, `EMAIL_DELIVERY_MODE=smtp` with no relay. Every problem is
 reported at once, so a bad `.env` costs one round trip rather than one restart
 per variable. `docker compose logs api` shows them.
 
-Kick the first deploy manually to confirm it boots:
+`SITE_DOMAIN` is checked here even though this binary never uses it, because
+it is the one setting nothing else can see: CI's `scripts/check-deploy-config.sh`
+validates the Caddyfile against a synthetic `.env` it writes itself, so it
+proves the wiring but never reads this file. The api container does read it,
+so a clear message in `docker compose logs api` beats Caddy dying over a
+variable its error message doesn't mention.
+
+Kick the first deploy manually to confirm it boots. Build and bring up as
+separate commands, the same way the workflow does — `up -d --build` would tear
+down running containers as part of the same command, so a failed or OOM-killed
+build takes the site with it:
 
 ```
-sudo -u concertfinder bash -c 'cd /opt/concertfinder && docker compose -f docker-compose.prod.yml up -d --build'
+sudo -u concertfinder bash -c 'cd /opt/concertfinder \
+  && docker compose -f docker-compose.prod.yml build \
+  && docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 \
+  && ./scripts/verify-deploy.sh'
 ```
+
+`--wait` blocks on the api container's healthcheck (the binary probes its own
+`/api/healthz`, since the distroless image has no shell or curl), and
+`verify-deploy.sh` then fetches `https://<SITE_DOMAIN>/api/healthz` through
+Caddy so the whole chain is proven: TLS, the proxy hop, the api, and Postgres.
+Without both, `up -d` returns 0 the moment a container is *started* — so a
+container that exits on a bad `.env` and crash-loops under
+`restart: unless-stopped` looks exactly like a successful deploy.
 
 ## 4. IAM: OIDC identity provider for GitHub Actions
 
@@ -278,18 +306,33 @@ output when it finishes.
 
 ## Rolling back
 
-The workflow just runs `git pull && docker compose up -d --build` on the
-instance, so a bad deploy is fixed by:
+The workflow resets the instance to `origin/main`, builds, brings containers
+up with `--wait`, and then runs `scripts/verify-deploy.sh`. The normal rollback
+is therefore just:
 
 ```
 git revert <bad-commit> && git push
 ```
 
-Or manually via SSM:
+Or manually via SSM. **Keep `build` and `up` as separate commands** — `up -d
+--build` tears the running containers down as part of the same command, so a
+build that fails or runs the 2 GB box out of memory takes the site with it.
+That is the last thing you want during a rollback, which is by definition a
+moment when the site is already unhappy:
 
 ```
-sudo -u concertfinder bash -c 'cd /opt/concertfinder && git reset --hard <good-sha> && docker compose -f docker-compose.prod.yml up -d --build'
+sudo -u concertfinder bash -c 'cd /opt/concertfinder \
+  && git reset --hard <good-sha> \
+  && docker compose -f docker-compose.prod.yml build \
+  && docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 \
+  && ./scripts/verify-deploy.sh'
 ```
+
+If a deploy fails, the workflow prints the SSM output including
+`docker compose ps` and the last 80 lines of container logs — `verify-deploy.sh`
+dumps both on its way out. Config problems appear there in full:
+`config.Validate` reports every bad variable at once rather than one per
+restart.
 
 ## What's not in this setup
 
@@ -299,8 +342,12 @@ Deliberately kept out to keep the year-1 bill at ~$16:
   ALB would add $16/mo.
 - **No auto-scaling.** Single-instance; if it dies, restart it. Fine for
   personal-project scale.
-- **No CloudWatch dashboards / alarms.** Slog output goes to Docker logs;
-  `docker compose logs -f` over SSM when you need it.
+- **No CloudWatch dashboards, and no alerting on the alarms that do exist.**
+  `infra/cloudwatch.tf` defines three metric alarms (EC2 status check, RDS free
+  storage, estimated billing), but none of them is wired to an SNS topic — the
+  state is visible in the CloudWatch console and nowhere else. Nothing pages
+  you. Application logs are slog to Docker logs; `docker compose logs -f` over
+  SSM when you need them.
 - **No secrets manager.** The `.env` file on the box holds credentials. If
   the box is compromised, so are the creds. AWS Secrets Manager costs
   $0.40/mo per secret; migrate later if you care.
