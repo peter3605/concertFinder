@@ -3,6 +3,34 @@
 {$SITE_DOMAIN} {
 	encode gzip
 
+	# Response headers for every route, SPA and API alike. `header` IS a
+	# site-level directive — unlike `header_up`, which is reverse_proxy-only
+	# (see the note below). Applied here rather than in Go so they cover
+	# Caddy's own error responses too.
+	header {
+		# Without HSTS the *first* request a new visitor makes goes out in
+		# plaintext on port 80 before the redirect, and is interceptable —
+		# which for this app means a session cookie and an OAuth flow guarding
+		# encrypted Spotify refresh tokens. includeSubDomains is safe here:
+		# the only subdomain in play is mail.<domain>, which exists for SES
+		# MAIL FROM (MX and TXT records) and serves no HTTP. Deliberately no
+		# `preload` — that one is effectively irreversible.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# The API returns attacker-influenced strings (artist and venue names
+		# from third-party feeds); nosniff keeps a browser from deciding a
+		# JSON response is really HTML.
+		X-Content-Type-Options "nosniff"
+		# Don't leak the path of an authenticated page to third-party ticket
+		# links, which every concert card is full of.
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Clickjacking. frame-ancestors is the modern form; X-Frame-Options
+		# covers browsers that predate it. This is deliberately NOT a full
+		# CSP — restricting script/style sources needs testing against the
+		# Vite bundle, and a wrong one breaks the app silently on first load.
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+	}
+
 	# header_up is a reverse_proxy subdirective, NOT a site-level one. Written
 	# at site level it is a hard config-adapt error ("unrecognized directive:
 	# header_up"), so Caddy refuses to start at all — and with

@@ -21,7 +21,9 @@ single-instance EC2 + RDS + Caddy + SES + Route 53 setup described in
   plus DKIM CNAMEs, SES verification TXT, MAIL FROM MX + SPF for SES.
 - **SES** verified domain identity, DKIM, custom MAIL FROM subdomain, and a
   sandbox-verified recipient (for initial testing).
-- **CloudWatch** two alarms: EC2 status check failed, RDS free storage low.
+- **CloudWatch** three alarms: EC2 status check failed, RDS free storage low,
+  and estimated monthly billing over threshold. None is wired to an SNS topic
+  — alarm state is visible in the console only, so nothing pages you.
 
 Deliberately not included (see design §11.3 for triggers to add them):
 ALB, ECS Fargate, CloudFront/S3, Secrets Manager, SNS topics on alarms.
