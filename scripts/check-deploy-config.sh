@@ -70,4 +70,24 @@ if ! (cd "$repo" && docker compose -f docker-compose.yml config) >/dev/null 2>"$
 fi
 pass "docker-compose.yml parses"
 
+# 5. verify-deploy.sh belongs to the same category as everything above: it only
+#    ever executes on the instance, mid-deploy. A syntax error in it would
+#    surface as a failed deploy of an otherwise fine build — and, because it is
+#    the step that decides whether a deploy succeeded, it would do so right
+#    after the new containers were already up. `bash -n` is not a substitute for
+#    running it, but it catches the whole class of typo that would.
+if ! out=$(bash -n "$repo/scripts/verify-deploy.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/verify-deploy.sh has a syntax error"
+fi
+pass "verify-deploy.sh parses"
+
+# 6. It also has to be executable — the deploy invokes it as
+#    `./scripts/verify-deploy.sh`, and git tracks the bit. Losing it turns
+#    "site verified" into "permission denied" at the last step of a deploy.
+if [ ! -x "$repo/scripts/verify-deploy.sh" ]; then
+    fail "scripts/verify-deploy.sh is not executable — run: chmod +x scripts/verify-deploy.sh"
+fi
+pass "verify-deploy.sh is executable"
+
 printf '\n\033[32mDeployment config OK\033[0m\n'

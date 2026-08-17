@@ -100,6 +100,16 @@ type Config struct {
 	// (falls back to https://127.0.0.1:3000).
 	SiteBaseURL string
 
+	// SiteDomain is the bare apex this deployment serves. Nothing in this
+	// binary uses it — it belongs to Caddy, whose site block is literally
+	// `{$SITE_DOMAIN} {`. It is read here anyway because it arrives in the
+	// same .env, and both of its failure modes are silent from inside the
+	// app: empty, the site block degenerates into a global options block and
+	// Caddy crash-loops behind a healthy-looking api container; disagreeing
+	// with SiteBaseURL, the certificate is issued for a name that none of the
+	// emailed links point at. Validate checks both.
+	SiteDomain string
+
 	// ContactEmail is rendered on Privacy/Terms pages and used as the SES
 	// operator contact. Defaults to peter.ho433@gmail.com for local dev.
 	ContactEmail string
@@ -188,6 +198,7 @@ func Load() (*Config, error) {
 	if c.SiteBaseURL == "" {
 		c.SiteBaseURL = "https://127.0.0.1:3000"
 	}
+	c.SiteDomain = strings.TrimSpace(os.Getenv("SITE_DOMAIN"))
 	c.ContactEmail = os.Getenv("CONTACT_EMAIL")
 	if c.ContactEmail == "" {
 		c.ContactEmail = "peter.ho433@gmail.com"
@@ -266,6 +277,29 @@ func (c Config) Validate() []error {
 			c.SiteBaseURL, c.SessionCookieDomain))
 	}
 
+	// SITE_DOMAIN is Caddy's variable, not this binary's, and it is the one
+	// piece of the deployment config that nothing else can check. The CI
+	// preflight (scripts/check-deploy-config.sh) validates the Caddyfile
+	// against a *synthetic* .env it writes itself, so it proves the wiring and
+	// can never see whether the deployment's own .env actually sets this. The
+	// api container reads the same file, so it can — and an error here is a
+	// legible message in `docker compose logs api` instead of Caddy's
+	// "unrecognized global option: encode" from a variable that isn't
+	// mentioned anywhere in the message.
+	//
+	// Gated on a real cookie domain: local dev runs no Caddy at all.
+	if !isLoopbackHost(c.SessionCookieDomain) {
+		switch base := hostOf(c.SiteBaseURL); {
+		case c.SiteDomain == "":
+			errs = append(errs, errors.New(
+				"SITE_DOMAIN is required in production — the Caddyfile's site block is {$SITE_DOMAIN}, and an empty one collapses into a global options block that refuses to start"))
+		case base != "" && !strings.EqualFold(base, c.SiteDomain):
+			errs = append(errs, fmt.Errorf(
+				"SITE_DOMAIN (%q) and the host in SITE_BASE_URL (%q) disagree — Caddy would serve a certificate for one name while every emailed link and the MusicBrainz/Nominatim User-Agent point at the other",
+				c.SiteDomain, base))
+		}
+	}
+
 	if c.EmailDeliveryMode == "smtp" {
 		if c.SMTPHost == "" {
 			errs = append(errs, errors.New("SMTP_HOST is required when EMAIL_DELIVERY_MODE=smtp"))
@@ -277,21 +311,30 @@ func (c Config) Validate() []error {
 	return errs
 }
 
-// isLoopbackHost reports whether a domain or URL refers to the local machine.
-func isLoopbackHost(s string) bool {
+// hostOf extracts the hostname from either a bare domain or a full URL,
+// dropping scheme, path and port. Returns "" for the empty string.
+func hostOf(s string) string {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
-		return false
+		return ""
 	}
 	if i := strings.Index(s, "://"); i >= 0 {
 		s = s[i+3:]
 	}
 	s, _, _ = strings.Cut(s, "/")
-	host, _, err := net.SplitHostPort(s)
-	if err != nil {
-		host = s
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host
 	}
-	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+	return s
+}
+
+// isLoopbackHost reports whether a domain or URL refers to the local machine.
+func isLoopbackHost(s string) bool {
+	switch hostOf(s) {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	return false
 }
 
 func intEnv(key string, def int) int {

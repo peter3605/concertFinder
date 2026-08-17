@@ -14,6 +14,7 @@ func prodConfig() Config {
 		SessionCookieDomain: "concerts.example.com",
 		EncryptionKey:       strings.Repeat("ab", 32), // 32 bytes hex
 		SiteBaseURL:         "https://concerts.example.com",
+		SiteDomain:          "concerts.example.com",
 		EmailDeliveryMode:   "log",
 	}
 }
@@ -92,6 +93,51 @@ func TestFullyLocalConfigIsAllowed(t *testing.T) {
 	c.SiteBaseURL = "https://127.0.0.1:3000"
 	if errs := c.Validate(); len(errs) != 0 {
 		t.Errorf("local dev config must validate, got %v", errs)
+	}
+}
+
+// SITE_DOMAIN is Caddy's, not the binary's, but nothing else can check it:
+// scripts/check-deploy-config.sh validates the Caddyfile against a synthetic
+// .env it writes itself, so it proves the wiring and never sees the real file.
+// Empty, `{$SITE_DOMAIN} {` collapses into a global options block and Caddy
+// dies with "unrecognized global option: encode" — a crash loop next to a
+// perfectly healthy api container.
+func TestSiteDomainRequiredInProduction(t *testing.T) {
+	c := prodConfig()
+	c.SiteDomain = ""
+	if !problemsContaining(t, c, "SITE_DOMAIN is required") {
+		t.Errorf("a production config without SITE_DOMAIN must be rejected, got %v", c.Validate())
+	}
+}
+
+// A cert for one name and emailed links pointing at another is silent in both
+// directions: Caddy serves happily, and the mail goes out looking fine.
+func TestSiteDomainMustAgreeWithSiteBaseURL(t *testing.T) {
+	c := prodConfig()
+	c.SiteDomain = "concerts.example.com"
+	c.SiteBaseURL = "https://www.example.org"
+	if !problemsContaining(t, c, "disagree") {
+		t.Errorf("mismatched SITE_DOMAIN and SITE_BASE_URL must be rejected, got %v", c.Validate())
+	}
+
+	// Case and a trailing port are not disagreements.
+	c.SiteBaseURL = "https://Concerts.Example.com"
+	for _, e := range c.Validate() {
+		if strings.Contains(e.Error(), "disagree") {
+			t.Errorf("host comparison must be case-insensitive, got %v", e)
+		}
+	}
+}
+
+// Local dev runs no Caddy at all, so it must not be asked for SITE_DOMAIN.
+func TestSiteDomainNotRequiredLocally(t *testing.T) {
+	c := prodConfig()
+	c.SessionCookieDomain = "127.0.0.1"
+	c.SpotifyRedirectURI = "https://127.0.0.1:3000/api/auth/callback"
+	c.SiteBaseURL = "https://127.0.0.1:3000"
+	c.SiteDomain = ""
+	if errs := c.Validate(); len(errs) != 0 {
+		t.Errorf("local dev config must validate without SITE_DOMAIN, got %v", errs)
 	}
 }
 
