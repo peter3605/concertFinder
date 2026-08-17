@@ -9,6 +9,26 @@ services:
     expose:
       - "8080"
     restart: unless-stopped
+    # `docker compose up -d` exits 0 once containers are *started*, not once
+    # they stay up. With config.Validate's hard exit on a bad .env and
+    # `restart: unless-stopped`, one wrong variable produced a crash-looping
+    # api container, an SSM "Success" and a green workflow — site down, every
+    # signal green. This healthcheck is what gives `up -d --wait` something to
+    # fail on.
+    #
+    # The image is distroless: no shell, no curl, no wget. The only executable
+    # in it is the server itself, so the probe is the binary in -healthcheck
+    # mode (see runHealthcheck in cmd/server/main.go). CMD, not CMD-SHELL —
+    # there is no shell to interpret a string form.
+    #
+    # start_period covers app + river migrations against a cold RDS; failures
+    # during it don't count toward retries.
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   caddy:
     image: caddy:2-alpine
