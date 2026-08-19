@@ -1,12 +1,20 @@
 name: Deploy
 
+# `pull_request` runs the two checking jobs on the PR itself. Without it they
+# only ran on push to main — i.e. after merge, as part of the deploy — so a red
+# `test` was a fix-forward on main rather than a PR that simply won't merge.
+# The `deploy` job is guarded below so this stays a check, not a deploy.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+# Least privilege by default. `id-token: write` is granted to the deploy job
+# alone rather than workflow-wide, so the AWS-federation token can't be minted
+# from a pull_request run of the checking jobs.
 permissions:
-  id-token: write # required for OIDC federation to AWS
   contents: read
 
 env:
@@ -16,9 +24,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - name: Go formatting
@@ -36,7 +44,7 @@ jobs:
       - name: Go test
         run: go test ./...
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -60,15 +68,22 @@ jobs:
   deploy-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate Caddyfile and compose files
         run: ./scripts/check-deploy-config.sh
 
   deploy:
     needs: [test, deploy-config]
+    # Never from a pull_request run — those exist to check the branch, not to
+    # ship it. Phrased as != 'pull_request' rather than == 'push' so
+    # workflow_dispatch still deploys.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC federation to AWS; scoped to this job only
+      contents: read
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
