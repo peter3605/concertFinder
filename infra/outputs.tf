@@ -8,9 +8,60 @@ output "ec2_public_ip" {
   value       = aws_eip.app.public_ip
 }
 
-output "route53_name_servers" {
-  description = "Set these NS records at your domain registrar to delegate the zone to Route 53."
-  value       = aws_route53_zone.main.name_servers
+# Every DNS record this deployment needs, ready to publish in Cloudflare.
+# Rendered rather than managed: DNS lives with the registrar, not in this
+# state. `terraform output -json dns_records` if you want to script it.
+#
+# The proxy column is not advisory. Cloudflare's proxy answers CNAME lookups
+# with its own addresses, which makes DKIM verification fail and MX delivery
+# impossible — SES would report the domain unverified with nothing explaining
+# why. Only the apex A record is a candidate for proxying, and even that should
+# stay "DNS only" until the origin is taught to read CF-Connecting-IP (see
+# infra/README.md), because behind the proxy every client shares a handful of
+# Cloudflare edge IPs and the /api/auth rate limiter buckets them together.
+output "dns_records" {
+  description = "DNS records to create in Cloudflare. All must be 'DNS only' (grey cloud)."
+  value = concat(
+    [
+      {
+        type    = "A"
+        name    = var.domain
+        value   = aws_eip.app.public_ip
+        proxy   = "DNS only"
+        purpose = "apex -> EC2 instance"
+      },
+      {
+        type    = "TXT"
+        name    = "_amazonses.${var.domain}"
+        value   = aws_ses_domain_identity.main.verification_token
+        proxy   = "n/a"
+        purpose = "SES domain verification"
+      },
+    ],
+    [for token in aws_ses_domain_dkim.main.dkim_tokens : {
+      type    = "CNAME"
+      name    = "${token}._domainkey.${var.domain}"
+      value   = "${token}.dkim.amazonses.com"
+      proxy   = "DNS only"
+      purpose = "SES DKIM"
+    }],
+    [
+      {
+        type    = "MX"
+        name    = aws_ses_domain_mail_from.main.mail_from_domain
+        value   = "feedback-smtp.${var.region}.amazonses.com (priority 10)"
+        proxy   = "n/a"
+        purpose = "SES MAIL FROM bounce handling"
+      },
+      {
+        type    = "TXT"
+        name    = aws_ses_domain_mail_from.main.mail_from_domain
+        value   = "v=spf1 include:amazonses.com ~all"
+        proxy   = "n/a"
+        purpose = "SPF for the MAIL FROM subdomain"
+      },
+    ]
+  )
 }
 
 output "rds_host" {
