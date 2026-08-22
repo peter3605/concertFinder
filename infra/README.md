@@ -125,8 +125,19 @@ The first apply takes 10–15 minutes because RDS creation is slow.
    the compose stack manually over SSM:
 
    ```
-   sudo -u concertfinder bash -c 'cd /opt/concertfinder && docker compose -f docker-compose.prod.yml up -d --build'
+   sudo -u concertfinder bash -c 'cd /opt/concertfinder \
+     && docker compose -f docker-compose.prod.yml build \
+     && docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 \
+     && ./scripts/verify-deploy.sh'
    ```
+
+   Keep `build` and `up` as separate commands: `up -d --build` tears running
+   containers down as part of the same command, so a build that fails or runs
+   the 2 GB box out of memory takes the site with it. `--wait` blocks on the
+   api container's healthcheck, and `verify-deploy.sh` then fetches
+   `/api/healthz` through Caddy — without both, `up -d` returns 0 the moment a
+   container is *started*, so a container that exits on a bad `.env` and
+   crash-loops looks exactly like a successful deploy.
 
 ## State management
 

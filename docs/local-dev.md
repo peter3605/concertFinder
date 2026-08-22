@@ -2,8 +2,10 @@
 
 ## Prerequisites
 
-- Go 1.22+
-- Node 20+
+- Go 1.25+ (matches `go.mod`, the Dockerfile build stage, and CI — older
+  minor versions will not build)
+- Node 24+ (active LTS; Node 20 went end-of-life 2026-04-30 and no longer
+  matches the Dockerfile or CI)
 - Docker (for Postgres)
 - `mkcert` — install with `brew install mkcert` on macOS, or see https://github.com/FiloSottile/mkcert
 
@@ -63,13 +65,10 @@ environment and has no dotenv dependency; under `docker compose` it is compose
 that loads the file. Run `go run ./cmd/server` in a shell that hasn't sourced
 it and the config comes up empty, failing on `DATABASE_URL`.
 
-Check that `DATABASE_URL`'s port matches what compose actually publishes —
-`.env.example` says 5432, and if `docker-compose.yml` maps the container to a
-different host port you'll need to override it:
-
-```
-export DATABASE_URL='postgres://concertfinder:concertfinder@127.0.0.1:5433/concertfinder?sslmode=disable'
-```
+`.env.example` already points `DATABASE_URL` at **port 5433**, which is where
+`docker-compose.yml` publishes the db container (5432 inside, 5433 on the host,
+so it can't collide with a local Postgres). If you changed that mapping, change
+this to match.
 
 Then open https://127.0.0.1:3000 and click "Log in with Spotify". The first
 `/api/me/concerts` request returns an empty list with `refreshing: true` while
@@ -77,6 +76,26 @@ a background scan runs — the frontend polls every 10s and fills in when the
 snapshot lands. That first scan is the slow one (cold affinity, cold
 Ticketmaster and MusicBrainz caches); afterwards the affinity profile is
 cached 24h and upstream responses `CONCERT_CACHE_TTL_HOURS` (12h).
+
+## Before you push
+
+```
+go build ./... && go vet ./... && go test ./...
+npm --prefix web run lint && npm --prefix web run build
+```
+
+If you touched `Caddyfile`, `docker-compose.prod.yml`, `docker-compose.yml`, or
+`scripts/verify-deploy.sh`, also run:
+
+```
+./scripts/check-deploy-config.sh          # requires docker
+```
+
+Those files are the only ones in the repo that never execute during local
+development — `docker-compose.yml` has no Caddy service and `go run` reads none
+of them — so nothing else catches a defect in them until it is already in
+production, where the symptom is a Caddy crash loop with a healthy-looking api
+container beside it. CI runs the same script in the `deploy-config` job.
 
 ## Resetting the local database
 
