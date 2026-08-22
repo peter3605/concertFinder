@@ -90,4 +90,19 @@ if [ ! -x "$repo/scripts/verify-deploy.sh" ]; then
 fi
 pass "verify-deploy.sh is executable"
 
+# 7. backup-db.sh is in that same never-runs-locally category, and worse: it
+#    runs from a systemd timer at 03:00 with nobody watching, so a syntax error
+#    in it is silent until the night someone needs a dump that was never taken.
+#    Check both halves the same way.
+if ! out=$(bash -n "$repo/scripts/backup-db.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/backup-db.sh has a syntax error"
+fi
+pass "backup-db.sh parses"
+
+if [ ! -x "$repo/scripts/backup-db.sh" ]; then
+    fail "scripts/backup-db.sh is not executable — run: chmod +x scripts/backup-db.sh"
+fi
+pass "backup-db.sh is executable"
+
 printf '\n\033[32mDeployment config OK\033[0m\n'

@@ -1,6 +1,9 @@
 # Minimum-viable alarms per design §10.3 / §11. Not wired to a topic — the
 # alarm state is visible in the CloudWatch console; add SNS + email
 # subscription later if this gets noisier than "check once a week".
+#
+# Two alarms, both about AWS-side resources. The database is not one of them:
+# see the note below the EC2 alarm.
 
 resource "aws_cloudwatch_metric_alarm" "ec2_status_check" {
   alarm_name          = "concertfinder-ec2-status-check-failed"
@@ -19,22 +22,11 @@ resource "aws_cloudwatch_metric_alarm" "ec2_status_check" {
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "rds_free_storage_low" {
-  alarm_name          = "concertfinder-rds-free-storage-low"
-  alarm_description   = "RDS free storage has dropped below the configured threshold."
-  namespace           = "AWS/RDS"
-  metric_name         = "FreeStorageSpace"
-  statistic           = "Average"
-  period              = 300
-  evaluation_periods  = 3
-  threshold           = var.rds_storage_alarm_threshold_gb * 1024 * 1024 * 1024
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    DBInstanceIdentifier = aws_db_instance.main.identifier
-  }
-}
+# There is deliberately no database alarm here any more. Postgres is Neon,
+# which publishes nothing to CloudWatch — storage and compute-hour headroom are
+# visible only in the Neon console, and the compute-hour budget is the line
+# that actually binds (see docs/aws-deploy.md). Set the usage alerts there;
+# nothing in this file can see them.
 
 # Billing alarm. Year-2 free-tier expiry can quietly balloon costs; this
 # fires if total estimated monthly charges cross var.billing_alarm_threshold_usd.
