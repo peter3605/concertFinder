@@ -1,8 +1,13 @@
 // Package fallback implements the Phase 2 small-artist coverage escalation
-// chain described in docs/design.md §5.4. It is only invoked when both
-// Ticketmaster and Bandsintown return zero events for a high-affinity artist,
-// and it is gated behind PHASE2_FALLBACKS_ENABLED so Phase 1 deployments do
-// not scrape by default.
+// chain described in docs/design.md §5.4. It is invoked when Ticketmaster
+// returns zero events for a high-affinity artist, and it is gated behind
+// PHASE2_FALLBACKS_ENABLED so Phase 1 deployments do not scrape by default.
+//
+// Since Bandsintown was removed (migration 0015) Ticketmaster is the sole
+// primary source, so this chain no longer covers only the artists that two
+// primaries both missed — it carries every artist TM does not know about.
+// That makes PHASE2_MIN_SCORE and the budget below load-bearing for coverage
+// rather than a long tail.
 //
 // Tier A checks known structured sources (Spotify external_urls cached in
 // artist_resolutions, Songkick). Tier B resolves an official URL via

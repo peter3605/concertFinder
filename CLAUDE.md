@@ -21,7 +21,7 @@ A web app that builds a personalized concert feed from a user's Spotify listenin
 
 ## Planned Architecture
 
-Three-tier: React+TS+Vite SPA → Go 1.22+ API (chi router) → PostgreSQL 16. The Go backend mediates **all** third-party API access; the frontend never contacts Spotify or ticketing APIs directly. Reasons this is non-negotiable: API keys can't live in browser code, Spotify refresh tokens must be encrypted at rest, and concert search is a server-side fan-out with shared caching and rate-limit pooling.
+Three-tier: React+TS+Vite SPA → Go 1.25 API (chi router) → PostgreSQL 16. The Go backend mediates **all** third-party API access; the frontend never contacts Spotify or ticketing APIs directly. Reasons this is non-negotiable: API keys can't live in browser code, Spotify refresh tokens must be encrypted at rest, and concert search is a server-side fan-out with shared caching and rate-limit pooling.
 
 Planned Go layout (see design §2.3):
 
