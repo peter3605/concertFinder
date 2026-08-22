@@ -128,8 +128,13 @@ type Reservation struct {
 	source    Source
 	unlimited bool
 	granted   int64
-	used      atomic.Int64
-	denied    atomic.Int64
+	// wanted is what Reserve was asked for, kept only for diagnostics.
+	// granted < wanted means the day's cap was already partly spent before
+	// this scan began; it does not by itself mean any call was refused.
+	// Distinguishing those two is the whole point of reporting it.
+	wanted int64
+	used   atomic.Int64
+	denied atomic.Int64
 }
 
 // Take consumes one permit. Returns false once the block is exhausted,
@@ -231,7 +236,7 @@ func (l *Ledger) Reserve(ctx context.Context, userID uuid.UUID, source Source, w
 	if granted > want {
 		granted = want
 	}
-	r := &Reservation{ledger: l, userID: userID, source: source, granted: int64(granted)}
+	r := &Reservation{ledger: l, userID: userID, source: source, granted: int64(granted), wanted: int64(want)}
 	if over := want - granted; over > 0 {
 		_ = l.refund(ctx, userID, source, over)
 	}
@@ -292,6 +297,52 @@ func (r *Reservations) AnyExhausted() bool {
 		}
 	}
 	return false
+}
+
+// Stat is one source's accounting for a single scan.
+type Stat struct {
+	Source  Source
+	Granted int64
+	Used    int64
+	Denied  int64
+	// Wanted is what the scan asked for. Granted < Wanted means the daily
+	// cap was already partly spent when this scan started — which is not the
+	// same thing as a call being refused, and the two were indistinguishable
+	// before this existed.
+	Wanted    int64
+	Unlimited bool
+}
+
+// Stats reports per-source accounting for the scan.
+//
+// This exists because "rate_capped: true" is unactionable on its own. It names
+// no source, no numbers, and no reason, and a capped scan writes
+// complete = false, which the SWR handler reads as permanently stale. Working
+// out *why* a scan capped meant reading the ledger table after the fact and
+// reconstructing arithmetic across concurrent scans and refunds — by which
+// point the reservation, which holds the only copy of `denied`, is gone.
+//
+// Call before Release: Release zeroes granted and used.
+func (r *Reservations) Stats() []Stat {
+	if r == nil {
+		return nil
+	}
+	out := make([]Stat, 0, len(AllSources))
+	for _, s := range AllSources {
+		b := r.blocks[s]
+		if b == nil {
+			continue
+		}
+		out = append(out, Stat{
+			Source:    s,
+			Granted:   b.granted,
+			Used:      b.used.Load(),
+			Denied:    b.denied.Load(),
+			Wanted:    b.wanted,
+			Unlimited: b.unlimited,
+		})
+	}
+	return out
 }
 
 // Release returns every block's unused quota. Call once, via defer.
