@@ -1,10 +1,40 @@
-# AWS deploy (EC2 + RDS, free tier)
+# AWS deploy (EC2 + RDS)
 
 One-time setup for pushing to `main` → automatic deploy on an EC2 t4g.small +
-RDS db.t4g.micro in us-east-1. Everything below is free tier for the first
-12 months of the AWS account, then ~$18/mo (EC2 $5 + RDS $13) starting
-year 2. The single ongoing cost that's not free is Route 53 (~$0.50/mo) and
-the domain itself (~$10/yr at Cloudflare or Porkbun).
+RDS db.t4g.micro in us-east-1.
+
+## What this actually costs
+
+**AWS replaced the 12-month free tier on 2025-07-15.** Accounts created after
+that date get $100 in credits (up to $200 with onboarding tasks) on a *Free
+plan* that lasts 6 months or until the credits run out — and when it ends, AWS
+**closes the account and deletes the resources** after a 90-day grace period.
+That is not a hosting plan. Run this on the **Paid (pay-as-you-go) plan**;
+credits still apply against the bill, they just stop being a cliff.
+
+Accounts created *before* 2025-07-15 keep the legacy 12-month free tier, under
+which RDS db.t4g.micro and 750 hrs of public IPv4 are genuinely free. Check
+which you have in Billing → Free tier before assuming either.
+
+Steady-state monthly cost in us-east-1, excluding credits:
+
+| Item | Now | From 2027-01-01 |
+|---|---|---|
+| EC2 t4g.small | $0 — [free trial, 750 hrs/mo, ends 2026-12-31](https://aws.amazon.com/ec2/instance-types/t4/) | ~$12.26 |
+| RDS db.t4g.micro + 20 GiB | ~$14 (free on legacy accounts) | ~$14 |
+| Public IPv4 (Elastic IP) | ~$3.65 (free on legacy accounts) | ~$3.65 |
+| EBS 20 GiB gp3 | ~$1.60 | ~$1.60 |
+| Route 53 hosted zone | $0.50 | $0.50 |
+| SES, SSM, CloudWatch alarms, 100 GB egress | $0 at this scale | $0 |
+
+Plus the domain itself (~$10–15/yr). The t4g.small trial expiring on
+2026-12-31 is the one dated cliff worth a calendar reminder — it is not tied to
+account age, so it ends on that date no matter when you signed up.
+
+To cut the two largest lines: running Postgres as a container on the EC2 box
+instead of RDS removes ~$14/mo, at the cost of managed backups and putting the
+database in the same 2 GiB as everything else. IPv6-only would remove the
+$3.65, but Spotify's redirect and Let's Encrypt both need reliable v4 reach.
 
 Do the setup steps once, in order. After that, `git push origin main`
 deploys automatically via the workflow in `.github/workflows/deploy.yml`.
@@ -133,7 +163,11 @@ SMTP_HOST=email-smtp.us-east-1.amazonaws.com
 SMTP_PORT=587
 SMTP_USERNAME=<terraform output ses_smtp_username>
 SMTP_PASSWORD=<terraform output ses_smtp_password>
-SMTP_FROM=ConcertFinder <notify@your-domain.com>
+# The address must be exactly `terraform output ses_from_address`
+# (notifications@ by default). The SES IAM policy conditions on
+# ses:FromAddress, so a different local part is denied at send time — SMTP
+# accepts the session and the message bounces, which nothing here validates.
+SMTP_FROM=ConcertFinder <notifications@your-domain.com>
 ```
 
 The server validates all of this at startup and refuses to boot on anything

@@ -92,24 +92,43 @@ The first apply takes 10–15 minutes because RDS creation is slow.
    DATABASE_URL=postgres://concertfinder:<paste rds_password>@<paste rds host>:5432/concertfinder?sslmode=require
    ENCRYPTION_KEY=<openssl rand -hex 32>
    SPOTIFY_CLIENT_ID=<from developer.spotify.com>
-   SPOTIFY_REDIRECT_URI=https://your-domain.com/callback
+   # Must end in /api/auth/callback — that is where the handler is mounted.
+   # Any other path lands on the SPA catch-all and login completes into a
+   # logged-out page; config.Validate rejects it outright.
+   SPOTIFY_REDIRECT_URI=https://your-domain.com/api/auth/callback
    TICKETMASTER_API_KEY=<from developer.ticketmaster.com>
-   BANDSINTOWN_APP_ID=concertfinder-prod
    SESSION_COOKIE_DOMAIN=your-domain.com
    LISTEN_ADDR=:8080
+   # Read by Caddy, not by the Go binary. Bare host, no scheme. Must match the
+   # host in SITE_BASE_URL below.
    SITE_DOMAIN=your-domain.com
+   # NOT optional in production despite having a default: unsubscribe links in
+   # outgoing mail and the MusicBrainz/Nominatim User-Agent are built from it.
+   # Left unset it falls back to https://127.0.0.1:3000 and the server refuses
+   # to start behind a real SESSION_COOKIE_DOMAIN.
+   SITE_BASE_URL=https://your-domain.com
+   CONTACT_EMAIL=you@your-domain.com
    USER_LATITUDE=40.7128
    USER_LONGITUDE=-74.0060
    USER_RADIUS_MILES=50
+   # Stays in 'log' mode (nothing is sent) until SES is out of sandbox.
+   EMAIL_DELIVERY_MODE=log
    SMTP_HOST=<paste ses_smtp_endpoint>
    SMTP_PORT=587
    SMTP_USERNAME=<paste ses_smtp_username>
    SMTP_PASSWORD=<paste ses_smtp_password>
+   # Must be exactly `terraform output ses_from_address`. The SES IAM policy
+   # conditions on ses:FromAddress, so any other local part is denied at send
+   # time rather than rejected here.
    SMTP_FROM=<paste ses_from_address>
    ENV
    sudo chmod 600 /opt/concertfinder/.env
    sudo chown concertfinder:concertfinder /opt/concertfinder/.env
    ```
+
+   The server validates all of this at startup and reports every problem at
+   once, so a bad `.env` costs one round trip rather than one restart per
+   variable. `docker compose logs api` shows them.
 
    Retrieve sensitive outputs with:
    `terraform output -raw rds_password`,
