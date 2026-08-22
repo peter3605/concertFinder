@@ -887,7 +887,7 @@ Target: feature-complete on the local machine, ready to consider hosting.
 
 Target: shareable public URL; small group of users beyond the developer.
 
-**Deployment approach.** Rather than the ECS Fargate architecture originally sketched in earlier drafts of §11, Phase 3 uses a single EC2 t4g.small + RDS db.t4g.micro, both free-tier eligible for year 1. Caddy on the instance handles TLS termination via Let's Encrypt. The React SPA is embedded into the Go binary at build time (`go:embed`), so there is no separate S3/CloudFront asset pipeline. GitHub Actions deploys via SSM `docker compose up -d --build`. This trades zero-downtime deploys and auto-scaling for ~$18/mo steady-state vs. ~$30–50/mo on Fargate — acceptable for the intended scale of a small user group. See §11 for the current reference architecture, §11.3 for the deferred scale-up options, and `docs/aws-deploy.md` for the operator runbook.
+**Deployment approach.** Rather than the ECS Fargate architecture originally sketched in earlier drafts of §11, Phase 3 uses a single EC2 t4g.small + RDS db.t4g.micro, both free-tier eligible for year 1. Caddy on the instance handles TLS termination via Let's Encrypt. The React SPA is embedded into the Go binary at build time (`go:embed`), so there is no separate S3/CloudFront asset pipeline. GitHub Actions deploys over SSM, running `build` and `up -d --wait` as separate commands followed by an end-to-end smoke test (see §11). This trades zero-downtime deploys and auto-scaling for ~$18/mo steady-state vs. ~$30–50/mo on Fargate — acceptable for the intended scale of a small user group. See §11 for the current reference architecture, §11.3 for the deferred scale-up options, and `docs/aws-deploy.md` for the operator runbook.
 
 **In Scope**
 
@@ -959,11 +959,14 @@ Phase 3 deploys on AWS. The application remains portable: no AWS SDK imports in 
 | Frontend assets | Embedded in the Go binary (`go:embed`) | Served by the Go API at `/`. Backend endpoints live under `/api/*`. |
 | Secrets | `.env` file on the EC2 instance, mode 600 | Migrate to Secrets Manager if compromise risk changes. |
 | TLS certificates | Caddy + Let's Encrypt | Auto-provisioned on first HTTPS request. |
+| Response security headers | Caddy, site level | HSTS (`includeSubDomains`, no `preload`), `nosniff`, `Referrer-Policy`, `frame-ancestors 'none'` + `X-Frame-Options`. Site level so they cover Caddy's own error responses, not just proxied ones. Deliberately not a full CSP — restricting script/style sources needs testing against the Vite bundle. |
 | DNS | Route 53 hosted zone | Apex A record → Elastic IP attached to EC2. |
 | Static public IP | Elastic IP | Free while attached to a running instance. |
-| Deploy | GitHub Actions → SSM `RunShellScript` | OIDC federation; no long-lived AWS keys in GitHub. |
+| Deploy | GitHub Actions → SSM `RunShellScript` | OIDC federation; no long-lived AWS keys in GitHub. `build` and `up -d` are separate commands — `up -d --build` tears running containers down as part of the same command, so a failed or OOM-killed build takes the site with it. |
+| Deploy verification | Container healthcheck + end-to-end smoke test | `up -d --wait` blocks on the api container's healthcheck, which runs the server binary as `/server -healthcheck` (the image is distroless — no shell, no curl — so the binary is the only available probe). `scripts/verify-deploy.sh` then fetches `/api/healthz` *through Caddy* on 443, covering the half `--wait` cannot see. Without both, `docker compose up -d` exits 0 the moment a container is started, so a container that exits on bad config and crash-loops under `restart: unless-stopped` is indistinguishable from a successful deploy. |
+| Health endpoint | `GET /api/healthz` | Pings Postgres. Every route on this server needs the database, so a check that skips it reports green while everything 500s. Reporting unhealthy does not restart the container — Docker restart policies act on exit, not health — so an RDS blip surfaces in `docker compose ps` instead of becoming a restart loop. |
 | Logs | Docker logs on the box | `docker compose logs -f` over SSM when needed. |
-| Alerting | Two CloudWatch alarms | EC2 status check failure + RDS free storage low. |
+| Alerting | Three CloudWatch alarms | EC2 status check failure, RDS free storage low, estimated monthly billing over threshold. None is wired to an SNS topic — alarm state is visible in the console only, so nothing pages you. |
 | Scheduled jobs | River workers folded into the API binary | No EventBridge dependency. |
 | Email (Phase 3) | Amazon SES via SMTP | SMTP-only integration preserves portability across providers. |
 | IaC | Terraform in `/infra` | Reproduces the setup end-to-end; `docs/aws-deploy.md` is the manual fallback. |
@@ -1071,6 +1074,8 @@ environments.
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-GCM key for refresh token encryption |
 | `SESSION_COOKIE_DOMAIN` | Cookie domain (`127.0.0.1` for dev) |
 | `LISTEN_ADDR` | Bind address for the API server |
+| `SIGNING_KEY` | Optional 32-byte hex HMAC key for CSRF and unsubscribe tokens. Derived from `ENCRYPTION_KEY` when unset; set it explicitly only to rotate signing without invalidating stored refresh-token ciphertexts. |
+| `SITE_DOMAIN` | Bare apex the deployment serves. Consumed by **Caddy**, not by the Go binary — `docker-compose.prod.yml` hands the caddy container the same `.env`, and the Caddyfile's site block is `{$SITE_DOMAIN} {`. Unset in production it expands to nothing, that line collapses into a global options block, and Caddy exits with `unrecognized global option: encode`. Validated at startup anyway (see below), because the api container is the only thing in the system that can see the real file. |
 | `USER_LATITUDE` / `USER_LONGITUDE` / `USER_RADIUS_MILES` | Fallback location for users who never set one; the Phase 1 hardcoded location |
 
 **Phase 2 — fallback chain (§5.4)**
@@ -1101,11 +1106,32 @@ environments.
 | `SITE_BASE_URL` | `https://127.0.0.1:3000` | Base for unsubscribe links in email |
 | `CONTACT_EMAIL` | — | Operator contact shown on `/privacy` and `/terms` |
 
-Out-of-range or unparseable values fall back to the defaults above rather than
-failing startup. `internal/config` additionally validates the relationships
-between these settings — the cache/staleness/prune ordering and the
-scan→digest gap — and warns at startup rather than silently running a
-configuration that cannot work.
+Configuration problems are handled in three tiers, by how bad the failure is:
+
+1. **Fall back to the default.** Out-of-range or unparseable *tuning* values —
+   hours, caps, TTLs — use the defaults above rather than failing startup. An
+   hour of `25` would otherwise be normalized by `time.Date` into the next day,
+   silently moving a job.
+2. **Warn and run.** Relationships between settings that are suspicious but
+   survivable: the cache/staleness/prune ordering (§7.3), the scan→digest gap
+   (§10.3.1), a per-user rate cap below the 200-artist scan (§8.3). These are
+   logged loudly at startup; the process serves.
+3. **Refuse to start.** `Config.Validate` returns errors and `main` exits
+   non-zero. This tier exists because every one of its members fails *silently*
+   at runtime otherwise — the site serves, health checks are green, and the
+   broken thing simply never happens:
+
+   | Rejected | What it looked like before |
+   |---|---|
+   | Missing/malformed `ENCRYPTION_KEY` | One warning, then every auth and `/me` route skipped wiring. The SPA loaded and login 404'd. |
+   | `SPOTIFY_REDIRECT_URI` not ending in `/api/auth/callback` | Lands on the SPA catch-all, so OAuth "succeeds" onto a logged-out page. |
+   | Loopback `SITE_BASE_URL` behind a real `SESSION_COOKIE_DOMAIN` | Unsubscribe links in real mail pointing at the recipient's own machine; `127.0.0.1` in the MusicBrainz/Nominatim User-Agent. |
+   | Missing `SITE_DOMAIN`, or one disagreeing with `SITE_BASE_URL` | Caddy crash loop, or a certificate for a name none of the emailed links use. |
+   | `EMAIL_DELIVERY_MODE=smtp` with no `SMTP_HOST`/`SMTP_FROM` | Digest jobs run and deliver nothing. |
+   | Missing `SPOTIFY_CLIENT_ID`, `TICKETMASTER_API_KEY`, `SESSION_COOKIE_DOMAIN` | Empty results or a broken login, attributed to anything but config. |
+
+   Every problem is reported in one pass, so a bad `.env` costs one round trip
+   to fix rather than one restart per variable.
 
 ---
 
@@ -1115,7 +1141,7 @@ configuration that cannot work.
 2. Confirm developer account holds a Spotify Premium subscription (required for Development Mode as of Feb 2026).
 3. Sign up for Ticketmaster Discovery API at `developer.ticketmaster.com`. Confirm API key.
 4. Install `mkcert` and generate a local CA for `https://127.0.0.1`.
-5. Install Go 1.25+, Node 20+, Docker Desktop.
+5. Install Go 1.25+, Node 24+ (active LTS; Node 20 went end-of-life 2026-04-30), Docker Desktop.
 6. Clone the repository, copy `.env.example` to `.env` and fill it in, then bring up the stack (`docs/local-dev.md`).
 
 Nothing else requires an account. MusicBrainz and Nominatim are open (they
