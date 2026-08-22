@@ -19,28 +19,10 @@ resource "aws_security_group" "ec2" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_security_group" "rds" {
-  name        = "concertfinder-rds-sg"
-  description = "Postgres reachable only from the app EC2 SG."
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description     = "Postgres from app SG"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ec2.id]
-  }
-
+  # Postgres is no longer in this VPC — it is Neon, reached over the public
+  # internet on 5432 with TLS. That traffic leaves through this rule, along
+  # with Spotify/Ticketmaster/MusicBrainz/Nominatim, SES, and the nightly
+  # backup upload to S3. There is no longer an `rds-sg` to pair with.
   egress {
     description = "All outbound"
     from_port   = 0

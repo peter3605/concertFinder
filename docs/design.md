@@ -75,7 +75,7 @@ ConcertFinder is a three-tier application: a React single-page frontend, a Go ba
 | Background jobs | river (Postgres-backed) | No Redis dependency until volume justifies it. |
 | Local dev | Docker Compose | One command to bring up the full stack. |
 | Logging | log/slog (stdlib) | Structured JSON logging, stdlib since Go 1.21. |
-| Hosting (Phase 3) | AWS EC2 t4g.small + RDS db.t4g.micro | Free-tier anchored single instance; see §10.3 and §11. ECS Fargate was the original sketch and is deferred (§11.3). |
+| Hosting (Phase 3) | AWS EC2 t4g.small + Neon Postgres | Single instance; see §10.3 and §11. RDS db.t4g.micro was the original database and became the largest line on the bill at ~$14/mo. ECS Fargate was the original compute sketch and is deferred (§11.3). |
 
 ### 2.2 Why a Backend (and not browser-only)
 
@@ -118,9 +118,11 @@ Two departures from the original sketch, both from Phase 3:
 
 - **There is no `/cmd/worker`.** River workers are registered in the same
   process as the API server. A separate worker binary would double the
-  deploy surface and the RDS connection count for a workload that idles
+  deploy surface and the database connection count for a workload that idles
   most of the day; splitting it later is a `main.go` change, since the
-  workers already take their dependencies as struct fields.
+  workers already take their dependencies as struct fields. On Neon that
+  second process would also double the LISTEN/NOTIFY connections against a
+  0.25 CU compute.
 - **`/internal/bandsintown` was deleted** (see §5.3).
 
 ---
@@ -887,11 +889,13 @@ Target: feature-complete on the local machine, ready to consider hosting.
 
 Target: shareable public URL; small group of users beyond the developer.
 
-**Deployment approach.** Rather than the ECS Fargate architecture originally sketched in earlier drafts of §11, Phase 3 uses a single EC2 t4g.small + RDS db.t4g.micro, both free-tier eligible for year 1. Caddy on the instance handles TLS termination via Let's Encrypt. The React SPA is embedded into the Go binary at build time (`go:embed`), so there is no separate S3/CloudFront asset pipeline. GitHub Actions deploys over SSM, running `build` and `up -d --wait` as separate commands followed by an end-to-end smoke test (see §11). This trades zero-downtime deploys and auto-scaling for ~$18/mo steady-state vs. ~$30–50/mo on Fargate — acceptable for the intended scale of a small user group. See §11 for the current reference architecture, §11.3 for the deferred scale-up options, and `docs/aws-deploy.md` for the operator runbook.
+**Deployment approach.** Rather than the ECS Fargate architecture originally sketched in earlier drafts of §11, Phase 3 uses a single EC2 t4g.small with Postgres hosted on Neon. Caddy on the instance handles TLS termination via Let's Encrypt. The React SPA is embedded into the Go binary at build time (`go:embed`), so there is no separate S3/CloudFront asset pipeline. GitHub Actions deploys over SSM, running `build` and `up -d --wait` as separate commands followed by an end-to-end smoke test (see §11). This trades zero-downtime deploys and auto-scaling for ~$5/mo steady-state vs. ~$30–50/mo on Fargate — acceptable for the intended scale of a small user group.
+
+The database was RDS db.t4g.micro through the first Terraform drafts. At ~$14/mo it was the largest line on the bill, and the two ways to remove it are not equivalent: running Postgres as a container on the app instance saves the same amount but puts the database in the same 2 GiB as a box that builds its own Docker image on every deploy — a bad build could then take the database with it. Neon moves the database off that box entirely for the same saving, which is the actual argument; the cost is a shorter backup history (covered by nightly `pg_dump` to S3), traffic crossing the public internet under TLS rather than staying in a security group, and single-digit-millisecond round trips instead of sub-millisecond ones. The last of those is absorbed by the SWR read path and the bounded scan fan-out. Note that the app **never scales to zero** despite that being Neon's headline feature — River polls every second — so the free plan is a compute-hour budget, not a storage one; see `docs/aws-deploy.md`. See §11 for the current reference architecture, §11.3 for the deferred scale-up options, and `docs/aws-deploy.md` for the operator runbook.
 
 **In Scope**
 
-- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
+- AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
 - Per-user rate-limit accounting against shared API quotas (§8.3).
 - Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
@@ -899,8 +903,9 @@ Target: shareable public URL; small group of users beyond the developer.
 - Manual refresh endpoint, throttled independently of river's job uniqueness.
 - Event grouping for multi-artist bills (§6.2), in both the web list and the email renderers.
 - Account deletion.
-- Observability: minimum-viable CloudWatch alarms on EC2 status check + RDS free storage. Application logs stay in Docker (`docker compose logs`).
-- Terraform definitions checked into `/infra` covering RDS, EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Elastic IP, and the three CloudWatch alarms above. DNS is deliberately out of scope — the registrar is authoritative, so Terraform emits the records to publish (`dns_records`) rather than managing a zone.
+- Nightly `pg_dump` to a write-only S3 bucket (`scripts/backup-db.sh`), replacing the RDS backup retention given up in the move to Neon.
+- Observability: minimum-viable CloudWatch alarms on EC2 status check + estimated billing. There is deliberately no database alarm — Neon publishes no CloudWatch metrics, so its storage and compute-hour headroom can only be alerted on from the Neon console. Application logs stay in Docker (`docker compose logs`).
+- Terraform definitions checked into `/infra` covering EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Elastic IP, the backup bucket, and the two CloudWatch alarms above. The database is deliberately out of scope — it is one Neon console object, and keeping it out of state also keeps the plaintext database password out of `terraform.tfstate`. DNS is out of scope for the same shape of reason — the registrar is authoritative, so Terraform emits the records to publish (`dns_records`) rather than managing a zone.
 
 **Deferred until scale demands it** (see §11.3)
 
@@ -950,7 +955,7 @@ Target: production-quality public app. Speculative.
 
 ## 11. AWS Architecture (Phase 3 Reference)
 
-Phase 3 deploys on AWS. The application remains portable: no AWS SDK imports in `/internal`, all AWS-specific configuration is environment-driven, and Postgres usage avoids RDS-specific features. The architecture below is the free-tier-anchored target; §11.3 lists what was deliberately deferred.
+Phase 3 deploys on AWS, with the database on Neon rather than an AWS service. The application remains portable: no AWS SDK imports in `/internal`, all AWS-specific configuration is environment-driven, and Postgres usage avoids provider-specific features — which is what let the database move off RDS without touching a line of Go. The architecture below is the free-tier-anchored target; §11.3 lists what was deliberately deferred.
 
 | Component | AWS Service | Notes |
 |---|---|---|

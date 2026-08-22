@@ -1,9 +1,17 @@
 # Infrastructure (Terraform)
 
 Terraform config for the ConcertFinder Phase 3 AWS deployment. Produces the
-single-instance EC2 + RDS + Caddy + SES setup described in
-`docs/design.md` §11. This replaces the manual walkthrough in
-`docs/aws-deploy.md`, which is kept only as a fallback / reference.
+single-instance EC2 + Caddy + SES setup described in `docs/design.md` §11. This
+replaces the manual walkthrough in `docs/aws-deploy.md`, which is kept only as a
+fallback / reference.
+
+**Postgres is not managed here.** It is a Neon project created once in the Neon
+console, and its connection string is pasted into `/opt/concertfinder/.env` like
+every other secret — see `docs/aws-deploy.md` §1, which also covers why the
+free plan's compute-hour budget (not its storage cap) is the constraint that
+binds. Keeping it out of state has a side benefit: the plaintext database
+password is no longer sitting in `terraform.tfstate`. What this Terraform *does*
+own for the database is the S3 bucket its nightly `pg_dump` lands in.
 
 **DNS is not managed here.** The domain is registered at Cloudflare, which is
 therefore already authoritative for it, so there is no Route 53 hosted zone and
@@ -12,22 +20,28 @@ the Cloudflare dashboard. See "DNS records" below.
 
 ## What this creates
 
-- **RDS** PostgreSQL 16 on `db.t4g.micro`, private, encrypted, `force_ssl=1`.
 - **EC2** t4g.small (Amazon Linux 2023 ARM64) with Docker + Docker Compose
   bootstrapped via user_data. Elastic IP attached.
-- **Security groups** — `ec2-sg` open on 80/443 to the internet; `rds-sg`
-  open on 5432 only from `ec2-sg`. Port 22 is deliberately closed on the
-  EC2 SG — access is via SSM.
+- **Security groups** — `ec2-sg` open on 80/443 to the internet, all outbound.
+  There is no `rds-sg`: the database is Neon, reached outbound over the public
+  internet on 5432 with TLS. Port 22 is deliberately closed — access is via SSM.
+- **S3** a private, versioned backup bucket for the nightly `pg_dump`
+  (`scripts/backup-db.sh`), with a lifecycle rule expiring dumps after
+  `backup_retention_days`. The instance role gets `s3:PutObject` and nothing
+  else — no read, no delete, so a compromised box can neither exfiltrate old
+  dumps of the encrypted Spotify refresh tokens nor erase the history.
 - **IAM** — GitHub OIDC provider + deploy role scoped to
   `peter3605/concertFinder:refs/heads/main`; EC2 instance profile with
-  `AmazonSSMManagedInstanceCore`; SES SMTP IAM user restricted to sending
-  from your verified from-address.
+  `AmazonSSMManagedInstanceCore` plus the backup-bucket write policy; SES SMTP
+  IAM user restricted to sending from your verified from-address.
 - **SES** verified domain identity, DKIM, custom MAIL FROM subdomain, and a
   sandbox-verified recipient (for initial testing). The DNS records these
   need are emitted as the `dns_records` output, not created.
-- **CloudWatch** three alarms: EC2 status check failed, RDS free storage low,
-  and estimated monthly billing over threshold. None is wired to an SNS topic
-  — alarm state is visible in the console only, so nothing pages you.
+- **CloudWatch** two alarms: EC2 status check failed, and estimated monthly
+  billing over threshold. Neither is wired to an SNS topic — alarm state is
+  visible in the console only, so nothing pages you. There is deliberately no
+  database alarm: Neon publishes no CloudWatch metrics, so its storage and
+  compute-hour headroom can only be alerted on from the Neon console.
 
 Deliberately not included (see design §11.3 for triggers to add them):
 ALB, ECS Fargate, CloudFront/S3, Secrets Manager, SNS topics on alarms.
@@ -80,7 +94,7 @@ terraform apply  plan.tfplan
 terraform output dns_records
 ```
 
-This takes 10–15 minutes; RDS creation is the slow part.
+This takes 2–3 minutes now that there is no RDS instance to wait on.
 
 **Pass 2 — publish DNS, then prove it.**
 
@@ -141,7 +155,11 @@ change, after the deploy works.
 
    ```
    sudo -u concertfinder tee /opt/concertfinder/.env <<'ENV'
-   DATABASE_URL=postgres://concertfinder:<paste rds_password>@<paste rds host>:5432/concertfinder?sslmode=require
+   # From the Neon console — the DIRECT endpoint, not the pooled one. River
+   # picks jobs up via LISTEN/NOTIFY and Neon's pooled endpoint is PgBouncer in
+   # transaction mode, which does not support it and does not say so.
+   DATABASE_URL=postgres://neondb_owner:<pw>@ep-xxxx.us-east-1.aws.neon.tech/neondb?sslmode=require
+   BACKUP_S3_BUCKET=<terraform output backup_bucket>
    ENCRYPTION_KEY=<openssl rand -hex 32>
    SPOTIFY_CLIENT_ID=<from developer.spotify.com>
    # Must end in /api/auth/callback — that is where the handler is mounted.
@@ -183,9 +201,9 @@ change, after the deploy works.
    variable. `docker compose logs api` shows them.
 
    Retrieve sensitive outputs with:
-   `terraform output -raw rds_password`,
    `terraform output -raw ses_smtp_username`,
    `terraform output -raw ses_smtp_password`.
+   The database password is not among them — it comes from the Neon console.
 5. **Clone the repo on the box.**
 
    ```
@@ -213,9 +231,11 @@ change, after the deploy works.
 ## State management
 
 State is **local**, in `infra/terraform.tfstate` (gitignored). Contains
-plaintext RDS password and SES SMTP creds, so back it up somewhere secure
-(1Password vault, encrypted external drive). If this ever grows to multiple
-contributors, migrate to an S3 backend + DynamoDB lock table.
+plaintext SES SMTP creds and the break-glass private key, so back it up
+somewhere secure (1Password vault, encrypted external drive). It no longer
+contains a database password — that moved to the Neon console when RDS went
+away. If this ever grows to multiple contributors, migrate to an S3 backend +
+DynamoDB lock table.
 
 ## Break-glass SSH
 
@@ -226,13 +246,13 @@ need to fix it before it can be replaced.
 
 ## Common operations
 
-**Rotate the RDS password:**
-```bash
-terraform taint random_password.rds
-terraform apply
-# Then update DATABASE_URL in /opt/concertfinder/.env and restart the api
-# container: docker compose -f docker-compose.prod.yml up -d api
-```
+**Rotate the database password:** not a Terraform operation any more. Reset the
+role's password in the Neon console, then update `DATABASE_URL` in
+`/opt/concertfinder/.env` and restart the api container:
+`docker compose -f docker-compose.prod.yml up -d api`.
+
+**Restore from a backup:** see `docs/aws-deploy.md` §7. The instance can only
+write to the bucket, so restores run from your laptop with admin credentials.
 
 **Add more SES-verified recipients (while in sandbox):**
 Edit `ses.tf`, add another `aws_ses_email_identity` resource. Re-apply.
@@ -240,12 +260,15 @@ Or exit sandbox with an AWS support ticket and skip this.
 
 **Tear it all down:**
 ```bash
-# RDS has deletion_protection = true; disable first.
-terraform apply -var-file=terraform.tfvars \
-  -replace=aws_db_instance.main # then edit the resource to set deletion_protection=false
+# The backup bucket is versioned and destroy will not remove a non-empty
+# bucket. Empty it first — and read the next paragraph before you do.
+aws s3 rm "s3://$(terraform output -raw backup_bucket)" --recursive
 terraform destroy
 ```
 
-`destroy` does not touch DNS — those records live in Cloudflare, outside this
-state. Delete them by hand, or the apex `A` record will point at an Elastic IP
+`destroy` does not touch the database. Neon is outside this state entirely, so
+the project and its data survive — delete it in the Neon console separately, and
+note that emptying the backup bucket above throws away the only copy of the data
+this Terraform ever had. `destroy` does not touch DNS either — those records
+live in Cloudflare, outside this state. Delete them by hand, or the apex `A` record will point at an Elastic IP
 that AWS has since reassigned to somebody else.
