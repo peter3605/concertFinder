@@ -7,6 +7,7 @@ import { LocationBar } from '@/components/location-bar';
 import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
 import { formatRetry, mutatingFetch } from '@/lib/api';
+import { detectAndSaveLocation } from '@/lib/geolocate';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import { EMPTY_FILTERS, type FiltersState, type Location } from '@/lib/types';
 
@@ -53,16 +54,62 @@ export default function ConcertsPage() {
 
   // Location is fetched independently so the LocationBar can render even
   // if concerts are still loading.
+  //
+  // When the server reports is_default, the user has no saved location and is
+  // being shown this deployment's USER_LATITUDE/LONGITUDE fallback — a real
+  // city that is very unlikely to be theirs. Ask the browser once. Everything
+  // about this is best-effort: declining, an unsupported browser, or a failed
+  // fix all leave the fallback in place and the location bar working exactly as
+  // before, so nothing is surfaced to the user.
   useEffect(() => {
-    fetch('/api/me/location', { credentials: 'same-origin' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((l: Location | null) => setLocation(l))
-      .catch(() => setLocation(null));
+    let cancelled = false;
+
+    (async () => {
+      let loc: Location | null = null;
+      try {
+        const r = await fetch('/api/me/location', { credentials: 'same-origin' });
+        loc = r.ok ? ((await r.json()) as Location) : null;
+      } catch {
+        loc = null;
+      }
+      if (cancelled) return;
+      setLocation(loc);
+
+      if (!loc?.is_default) return;
+
+      const outcome = await detectAndSaveLocation(saveLocation);
+      if (cancelled || outcome.kind !== 'saved') return;
+      setLocation(outcome.location);
+      // A scan already ran at the fallback location. Re-fetch so the list
+      // reflects the detected one — the response carries refreshing:true and
+      // the hook's bounded poll loop picks up the new snapshot.
+      setReloadVersion((v) => v + 1);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function onLocationSaved(loc: Location) {
     setLocation(loc);
     setReloadVersion((v) => v + 1);
+  }
+
+  // Shared by the location bar and the first-login browser detection above, so
+  // both write a location the same way.
+  async function saveLocation(body: {
+    latitude: number;
+    longitude: number;
+    radius_miles: number;
+  }): Promise<Location> {
+    const r = await mutatingFetch('/api/me/location', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return (await r.json()) as Location;
   }
 
   return (
