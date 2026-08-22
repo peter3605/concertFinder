@@ -26,6 +26,18 @@ type locationDTO struct {
 	Longitude   float64 `json:"longitude"`
 	RadiusMiles int     `json:"radius_miles"`
 	DisplayName string  `json:"display_name,omitempty"`
+	// IsDefault marks a response the user never chose: the process-wide
+	// USER_LATITUDE/USER_LONGITUDE fallback, served because they have no
+	// user_locations row yet. Without this the client cannot distinguish
+	// "somewhere I picked" from "wherever this deployment happens to be
+	// configured for", so it silently presented one operator's default as the
+	// user's own location and scanned there — the fallback is a real city, so
+	// nothing about the response looked wrong.
+	//
+	// The frontend uses it to decide whether to ask the browser for real
+	// coordinates on first login. It is deliberately absent (omitempty) on a
+	// stored location, so a user who has chosen a location is never re-prompted.
+	IsDefault bool `json:"is_default,omitempty"`
 }
 
 func (h *LocationHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +56,7 @@ func (h *LocationHandler) Get(w http.ResponseWriter, r *http.Request) {
 			Latitude:    h.FallbackLocation.Latitude,
 			Longitude:   h.FallbackLocation.Longitude,
 			RadiusMiles: h.FallbackLocation.RadiusMiles,
+			IsDefault:   true,
 		})
 		return
 	}

@@ -57,6 +57,9 @@ export type Location = {
   longitude: number;
   radius_miles: number;
   display_name?: string;
+  // True when the server served the deployment-wide USER_LATITUDE/LONGITUDE
+  // fallback because the user has no saved location. Absent once they have one.
+  is_default?: boolean;
 };
 
 export type Facet = { value: string; count: number };
