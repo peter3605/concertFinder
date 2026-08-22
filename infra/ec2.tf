@@ -86,6 +86,35 @@ resource "aws_instance" "app" {
       -o $DOCKER_CONFIG/cli-plugins/docker-compose
     chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
 
+    # buildx has to come from the same place as compose, and this is not
+    # optional: `docker compose build` is a thin wrapper over buildx, and
+    # compose v5 refuses to run against buildx older than 0.17.0
+    # ("compose build requires buildx 0.17.0 or later"). AL2023's docker
+    # package ships 0.12.1 in /usr/libexec/docker/cli-plugins, so installing
+    # compose from `latest` while leaving buildx to the distro pairs a 2025
+    # compose with a 2024 builder. That combination fails at the *build* step
+    # of a deploy -- after `git reset --hard` has already moved the checkout,
+    # and with an error that names buildx while nothing in this file mentions
+    # it.
+    #
+    # /usr/local/lib/docker/cli-plugins takes precedence over /usr/libexec,
+    # so this shadows the distro copy rather than fighting the package manager.
+    #
+    # buildx release assets embed the version in the filename, so unlike
+    # compose there is no version-less `latest/download/` URL to grab; the tag
+    # has to be resolved first.
+    #
+    # The API response is captured into a variable rather than piped straight
+    # into grep. `grep -m1` exits at the first match and closes the pipe, curl
+    # then dies writing to it ("curl: (23) Failure writing output"), and under
+    # `set -o pipefail` that fails the whole bootstrap -- for a command that
+    # actually succeeded.
+    BUILDX_JSON=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest)
+    BUILDX_VER=$(printf '%s' "$BUILDX_JSON" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    curl -fsSL "https://github.com/docker/buildx/releases/download/$BUILDX_VER/buildx-$BUILDX_VER.linux-arm64" \
+      -o $DOCKER_CONFIG/cli-plugins/docker-buildx
+    chmod +x $DOCKER_CONFIG/cli-plugins/docker-buildx
+
     id -u concertfinder &>/dev/null || useradd -m -s /bin/bash concertfinder
     usermod -aG docker concertfinder
     mkdir -p /opt/concertfinder
