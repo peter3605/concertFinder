@@ -3,6 +3,7 @@ package spotify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,6 +131,13 @@ func hexDigit(n byte) byte {
 	return 'A' + n - 10
 }
 
+// ErrUserNotRegistered means Spotify accepted the login but refused the API
+// call because this app is in Development Mode and the account is not on its
+// User Management list. It is a deployment/configuration state, not a user
+// error and not a transient failure, so retrying can never clear it — someone
+// has to add the account in the Spotify developer dashboard.
+var ErrUserNotRegistered = errors.New("spotify: user is not registered for this application")
+
 // GetMe returns the current user's Spotify ID and display name.
 func (c *Client) GetMe(ctx context.Context, accessToken string) (*Me, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, APIBase+"/me", nil)
@@ -145,6 +153,19 @@ func (c *Client) GetMe(ctx context.Context, accessToken string) (*Me, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		// An app in Spotify's Development Mode only admits accounts listed
+		// under User Management in the developer dashboard (25 max). Everyone
+		// else authorizes successfully — Spotify shows them the normal consent
+		// screen and hands back a valid token — and is then refused on the
+		// very first API call with it.
+		//
+		// Distinguished here because it is not a fault the user can act on and
+		// not a bug the operator can find in a log: the whole fix is adding
+		// their Spotify account email to a dashboard list. Left as a generic
+		// non-2xx it reached the browser as a bare 502.
+		return nil, fmt.Errorf("%w: %s", ErrUserNotRegistered, string(body))
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("spotify /me: %s: %s", resp.Status, string(body))

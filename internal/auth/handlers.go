@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -129,6 +130,25 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	me, err := d.SpotifyClient.GetMe(r.Context(), tok.AccessToken)
 	if err != nil {
+		// Development Mode rejection is a configuration state, not a fault of
+		// the person logging in and not something a retry can clear. Say so.
+		// Previously this fell through to the generic branch and reached the
+		// browser as a bare 502 "spotify /me failed" — which reads as "the
+		// site is broken", when the actual fix is one entry in the Spotify
+		// dashboard. The operator's own login works, so nobody sees this until
+		// a second person tries.
+		//
+		// 403 rather than 502: the request was understood and refused, and
+		// nothing upstream is unhealthy.
+		if errors.Is(err, spotify.ErrUserNotRegistered) {
+			slog.Warn("login refused: account not on the Spotify app allowlist (Development Mode)",
+				"remedy", "add the account under User Management at https://developer.spotify.com/dashboard")
+			http.Error(w,
+				"This app is still in Spotify's development mode, so only accounts the operator "+
+					"has added can sign in. Ask them to add your Spotify account email, then try again.",
+				http.StatusForbidden)
+			return
+		}
 		slog.Error("spotify /me failed", "err", err)
 		http.Error(w, "spotify /me failed", http.StatusBadGateway)
 		return
