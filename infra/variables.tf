@@ -22,19 +22,19 @@ variable "github_branch" {
 }
 
 variable "ec2_instance_type" {
-  description = "EC2 instance type. t4g.small is free-tier eligible for 12 months."
+  description = "EC2 instance type. t4g.small is free under a standalone AWS trial (750 hrs/mo) that ends 2026-12-31 — not tied to account age, and separate from the free tier. After that it is ~$12/mo."
   type        = string
   default     = "t4g.small"
 }
 
 variable "rds_instance_class" {
-  description = "RDS instance class. db.t4g.micro is free-tier eligible for 12 months."
+  description = "RDS instance class. db.t4g.micro is free for 12 months ONLY on accounts created before 2025-07-15; newer accounts get credits instead and this bills at ~$12/mo plus storage."
   type        = string
   default     = "db.t4g.micro"
 }
 
 variable "rds_allocated_storage_gb" {
-  description = "RDS storage in GiB. Free tier includes 20 GiB."
+  description = "RDS storage in GiB. The legacy free tier included 20 GiB; on a post-2025-07-15 account this bills at the gp3 rate."
   type        = number
   default     = 20
 }

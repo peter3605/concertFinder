@@ -90,6 +90,21 @@ resource "aws_instance" "app" {
     usermod -aG docker concertfinder
     mkdir -p /opt/concertfinder
     chown concertfinder:concertfinder /opt/concertfinder
+
+    # Swap. The deploy builds the image on this box, and the web stage runs
+    # `npm ci` + a Vite production build inside a 2 GiB instance alongside a
+    # running Postgres-less but non-trivial api + Caddy. A build OOM here is
+    # not a clean failure: the OOM killer takes whatever it likes, and the
+    # workflow's split build/up steps only protect against the build exiting
+    # non-zero, not against it dragging the box down. 2 GiB of swap makes the
+    # build slow instead of fatal.
+    if [ ! -f /swapfile ]; then
+      dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
   EOT
 
   tags = {
