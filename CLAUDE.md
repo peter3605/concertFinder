@@ -84,7 +84,8 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
-- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids RDS-specific features. Email delivery uses SMTP against SES so the app is not coupled to AWS.
+- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
+- **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 
 ## Affinity Scoring (design §4.3)
 
@@ -432,8 +433,10 @@ surface. Two mechanisms now close it, and they cover different halves:
   `CMD-SHELL`. It reads `LISTEN_ADDR` straight from the env rather than through
   `config.Load`, so the probe can't fail for reasons unrelated to whether the
   server answers. Reporting unhealthy does **not** restart the container
-  (Docker restart policies act on exit, not health), so an RDS blip shows up in
-  `docker compose ps` instead of becoming a restart loop.
+  (Docker restart policies act on exit, not health), so a database blip shows up
+  in `docker compose ps` instead of becoming a restart loop. That matters more
+  with Neon than it did with RDS: the database is now across the public internet
+  rather than inside the VPC, so transient connection failures are likelier.
 - `scripts/verify-deploy.sh` then fetches `/api/healthz` **through Caddy** over
   443. This is the half `--wait` cannot see: the healthcheck runs inside the api
   container and proves only that the Go process answers itself, while every
@@ -478,6 +481,6 @@ When proposing or implementing work, check which phase it belongs to before expa
 
 - **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM only (BIT was in scope at the time and has since been removed), semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
 - **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. Begin Extended Quota Mode application.
-- **Phase 3:** AWS single-instance deployment (EC2 t4g.small + RDS db.t4g.micro, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
+- **Phase 3:** AWS single-instance deployment (EC2 t4g.small + Neon Postgres, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. The database was RDS db.t4g.micro until it became the largest line on the bill (~$14/mo); Neon's free plan replaced it, with nightly `pg_dump` to S3 (`scripts/backup-db.sh`) standing in for the 7-day RDS retention that was given up. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 
 If a request would pull Phase 2/3 work into Phase 1, flag it rather than silently expanding.

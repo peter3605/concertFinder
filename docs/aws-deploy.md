@@ -1,7 +1,7 @@
-# AWS deploy (EC2 + RDS)
+# AWS deploy (EC2 + Neon Postgres)
 
-One-time setup for pushing to `main` → automatic deploy on an EC2 t4g.small +
-RDS db.t4g.micro in us-east-1.
+One-time setup for pushing to `main` → automatic deploy on an EC2 t4g.small in
+us-east-1, with Postgres hosted on [Neon](https://neon.tech) rather than RDS.
 
 ## What this actually costs
 
@@ -13,17 +13,18 @@ That is not a hosting plan. Run this on the **Paid (pay-as-you-go) plan**;
 credits still apply against the bill, they just stop being a cliff.
 
 Accounts created *before* 2025-07-15 keep the legacy 12-month free tier, under
-which RDS db.t4g.micro and 750 hrs of public IPv4 are genuinely free. Check
-which you have in Billing → Free tier before assuming either.
+which 750 hrs of public IPv4 are genuinely free. Check which you have in
+Billing → Free tier before assuming either.
 
 Steady-state monthly cost in us-east-1, excluding credits:
 
 | Item | Now | From 2027-01-01 |
 |---|---|---|
 | EC2 t4g.small | $0 — [free trial, 750 hrs/mo, ends 2026-12-31](https://aws.amazon.com/ec2/instance-types/t4/) | ~$12.26 |
-| RDS db.t4g.micro + 20 GiB | ~$14 (free on legacy accounts) | ~$14 |
+| Postgres (Neon free plan) | $0 — see the compute-hour note below | $0 |
 | Public IPv4 (Elastic IP) | ~$3.65 (free on legacy accounts) | ~$3.65 |
 | EBS 20 GiB gp3 | ~$1.60 | ~$1.60 |
+| S3 nightly dumps | <$0.10 at this size | <$0.10 |
 | DNS | $0 — Cloudflare, no Route 53 zone | $0 |
 | SES, SSM, CloudWatch alarms, 100 GB egress | $0 at this scale | $0 |
 
@@ -31,10 +32,63 @@ Plus the domain itself (~$10–15/yr). The t4g.small trial expiring on
 2026-12-31 is the one dated cliff worth a calendar reminder — it is not tied to
 account age, so it ends on that date no matter when you signed up.
 
-To cut the two largest lines: running Postgres as a container on the EC2 box
-instead of RDS removes ~$14/mo, at the cost of managed backups and putting the
-database in the same 2 GiB as everything else. IPv6-only would remove the
-$3.65, but Spotify's redirect and Let's Encrypt both need reliable v4 reach.
+IPv6-only would remove the $3.65, but Spotify's redirect and Let's Encrypt both
+need reliable v4 reach.
+
+### Why Neon and not RDS, and not a container on the box
+
+RDS db.t4g.micro + 20 GiB was ~$14/mo, the largest line on the bill once the
+EC2 trial is accounted for. Two ways to remove it; they are not equivalent.
+
+Running Postgres as a container on the EC2 box saves the same $14 but puts the
+database in the same 2 GiB as everything else — and that box builds the Docker
+image during every deploy. The bootstrap script in `infra/ec2.tf` allocates 2
+GiB of swap specifically because the `npm ci` + Vite build has OOM headroom
+problems there, and the workflow splits `build` from `up -d` because a failed
+build used to take the site down with it. Adding Postgres to that box means a
+bad deploy can take the *database* down too. It also puts you back in the
+business of running your own backups on a host with one EBS volume.
+
+Neon moves the database off that box entirely, which is the actual argument.
+The cost saving is the same; the blast radius is smaller.
+
+### The compute-hour budget is what binds
+
+Neon markets scale-to-zero. **This app never scales to zero**, so ignore that
+part of the pitch and do the arithmetic instead.
+
+River polls. `FetchPollInterval` defaults to 1 second and runs as a fallback
+*even when* LISTEN/NOTIFY is working, on top of leader-election maintenance. The
+database therefore gets a query every second forever, and Neon's autosuspend
+never fires.
+
+So the free plan is a compute-hour question, not a storage one:
+
+- Free plan is ~192 compute-hours (CU-hours)/month and 0.5 GB storage. **Verify
+  the current numbers** — Neon has changed them before and this is the whole
+  margin.
+- A 24/7 compute at the 0.25 CU floor is ~730 h × 0.25 = **~183 CU-hours**. It
+  fits, with roughly 5% headroom.
+- **Pin the compute to min 0.25 CU *and* max 0.25 CU.** Leave autoscaling on and
+  a single nightly `ScanConcerts` fanout spike puts you over. Nothing about
+  going over is loud: Neon suspends the compute, and every request 500s.
+
+If that is too tight, Neon's paid entry tier (~$5/mo at time of writing) is
+still well under the $14 it replaces. Set a usage alert in the Neon console —
+`infra/cloudwatch.tf` cannot see any of this, because Neon publishes nothing to
+CloudWatch.
+
+### What this gives up
+
+- **Backup retention.** RDS had `backup_retention_period = 7` plus a final
+  snapshot; Neon's free plan restore history is much shorter. §7 installs a
+  nightly `pg_dump` to S3 to cover it.
+- **In-VPC isolation.** Database traffic now crosses the public internet with
+  TLS instead of staying inside the security group. `?sslmode=require` on the
+  connection string is what replaces the `rds.force_ssl=1` parameter group.
+- **Sub-millisecond latency.** Same-region round trips go to single-digit ms.
+  Not a threat here: the scan fan-out is already bounded by a semaphore of 10
+  inside a 5-minute `ScanBudget`, and the SWR read path serves from a snapshot.
 
 Do the setup steps once, in order. After that, `git push origin main`
 deploys automatically via the workflow in `.github/workflows/deploy.yml`.
@@ -47,24 +101,58 @@ deploys automatically via the workflow in `.github/workflows/deploy.yml`.
 - AWS CLI installed and logged in as an admin locally (only for setup).
 - GitHub repo pushed (`git@github.com:peter3605/concertFinder.git`).
 
-## 1. RDS: managed Postgres
+## 1. Neon: managed Postgres
 
-AWS Console → RDS → Create database.
+Not Terraform. There is no Neon provider configured in `/infra` on purpose —
+the database is one console object created once, and keeping it out of state
+means the plaintext database password is no longer sitting in
+`terraform.tfstate`.
 
-- Engine: **PostgreSQL 16**
-- Templates: **Free tier**
-- Instance identifier: `concertfinder`
-- Master username: `concertfinder`
-- Master password: generate one and stash in a password manager
-- Instance class: `db.t4g.micro` (free tier eligible)
-- Storage: 20 GiB gp3
-- Public access: **No**
-- VPC security group: create new, name it `concertfinder-rds-sg`
-- Initial database name: `concertfinder`
-- Backup retention: 7 days (free tier limit)
+[console.neon.tech](https://console.neon.tech) → Create project.
 
-Note the endpoint hostname after creation:
-`concertfinder.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com`.
+- Postgres version: whatever Neon's current default is. **Match `PG_IMAGE` in
+  `scripts/backup-db.sh` to it** (see §7) — `pg_dump` refuses to run against a
+  server newer than itself. The live project reports 18.6, so the script pins
+  `postgres:18-alpine`; `SHOW server_version` is the check.
+- Region: **AWS us-east-1**, the same region as the EC2 box. Cross-region here
+  would add tens of milliseconds to every one of the scan worker's round trips.
+- Database name: `concertfinder`
+- Compute: **min 0.25 CU, max 0.25 CU.** Set both. This is the free plan's
+  compute-hour budget, not a performance preference — see "The compute-hour
+  budget is what binds" above.
+- Autosuspend: leave it at the default. It will never fire (River polls every
+  second), and turning it off changes nothing except removing your safety net if
+  the app is ever stopped.
+
+Then copy the connection string from Connection Details:
+
+- Choose the **direct** connection, **not** "Pooled connection". River uses
+  LISTEN/NOTIFY and Neon's pooled endpoint is PgBouncer in transaction mode,
+  which does not support it and does not report that it does not. Job pickup
+  degrades to the 1s poll fallback and leader resignations take ~5s, silently.
+- Keep `?sslmode=require` on the end.
+
+It should look like:
+
+```
+postgres://neondb_owner:<pw>@ep-xxxx-xxxx.us-east-1.aws.neon.tech/neondb?sslmode=require
+```
+
+`neondb_owner` and `neondb` are Neon's defaults. Nothing in the code cares what
+either is called, so there is no reason to rename them to match the old RDS
+`concertfinder`/`concertfinder`: the migrations create tables inside whatever
+database the URL points at, and no migration contains `CREATE DATABASE` or
+`CREATE SCHEMA`.
+
+Run the migrations against it before the first deploy — nothing in the deploy
+path does this for you. They are idempotent and applied by the server at
+startup, so the simplest route is to point a local `go run ./cmd/server` at the
+Neon URL once; it applies the 15 app migrations plus River's 6 and then serves.
+
+Set a usage alert in the Neon console while you are here. Storage and
+compute-hour headroom are visible nowhere else; `infra/cloudwatch.tf`
+deliberately has no database alarm because Neon publishes no CloudWatch
+metrics.
 
 ## 2. EC2: application host
 
@@ -86,9 +174,11 @@ AWS Console → EC2 → Launch instance.
   (create the role first, then edit this instance to attach it if you got
   here first).
 
-After the instance is running, edit `concertfinder-rds-sg` (from step 1):
-add an inbound rule allowing `TCP 5432` from `concertfinder-ec2-sg`. This
-makes RDS reachable from the EC2 box only.
+There is no database security group to pair this with any more. Neon is reached
+outbound over the public internet on 5432, which the `ec2-sg` all-outbound
+egress rule already permits; nothing extra needs opening. Restricting egress to
+Neon's addresses is not practical — they are not stable, and the same rule
+carries Spotify, Ticketmaster, MusicBrainz, Nominatim, SES, and S3.
 
 Give the EC2 instance a static Elastic IP (EC2 → Elastic IPs → Allocate,
 then Associate). Free while attached to a running instance.
@@ -122,12 +212,15 @@ sudo -u concertfinder git clone https://github.com/peter3605/concertFinder.git /
 ```
 
 Create `/opt/concertfinder/.env` with production values (Spotify creds,
-Ticketmaster key, RDS `DATABASE_URL`, encryption key,
-`SITE_DOMAIN` for Caddy). Use `/etc/environment`-style syntax; owner
+Ticketmaster key, the Neon `DATABASE_URL` from §1, encryption key,
+`SITE_DOMAIN` for Caddy, `BACKUP_S3_BUCKET` from
+`terraform output backup_bucket`). Use `/etc/environment`-style syntax; owner
 `concertfinder`, mode `600`. Example:
 
 ```
-DATABASE_URL=postgres://concertfinder:<rds-password>@concertfinder.xxxxx.us-east-1.rds.amazonaws.com:5432/concertfinder?sslmode=require
+# Neon, direct (unpooled) endpoint — the pooled one breaks River's LISTEN/NOTIFY.
+DATABASE_URL=postgres://neondb_owner:<pw>@ep-xxxx-xxxx.us-east-1.aws.neon.tech/neondb?sslmode=require
+BACKUP_S3_BUCKET=concertfinder-backups-<account-id>
 ENCRYPTION_KEY=<openssl rand -hex 32>
 SPOTIFY_CLIENT_ID=<from developer.spotify.com>
 SPOTIFY_REDIRECT_URI=https://your-domain.com/api/auth/callback
@@ -322,7 +415,92 @@ That's the entire set of GH secrets. No AWS keys.
 Caddy handles the TLS cert automatically the first time a request lands on
 port 443 for your domain.
 
-## 7. First automated deploy
+## 7. Nightly database backups
+
+Moving off RDS gave up `backup_retention_period = 7` and the final snapshot.
+Neon's free plan keeps a much shorter restore history, so this replaces it.
+
+Most of the schema does not need protecting — `concerts`, the three caches, and
+`user_concert_snapshots` all rebuild on the next scan. What does not rebuild is
+`users` (the AES-GCM-encrypted Spotify refresh tokens and email preferences),
+`user_saved_concerts`, `user_subscribed_artists`, and `user_locations`. Losing
+those means every user re-authorizes with Spotify and loses their stars and
+bells.
+
+`terraform apply` creates the bucket (`aws_s3_bucket.backups`) and grants the
+instance role `s3:PutObject` on it — and nothing else. No `GetObject`, no
+`DeleteObject`: restoring is a rare manual operation you do from your laptop
+with admin credentials, and write-only means a compromised box cannot read back
+every previous night's encrypted refresh tokens or delete the history on its way
+out.
+
+Put `BACKUP_S3_BUCKET` in `/opt/concertfinder/.env` (from
+`terraform output backup_bucket`), then install the timer on the instance over
+SSM:
+
+```
+sudo tee /etc/systemd/system/concertfinder-backup.service >/dev/null <<'EOF'
+[Unit]
+Description=Nightly pg_dump of the ConcertFinder database to S3
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=concertfinder
+ExecStart=/opt/concertfinder/scripts/backup-db.sh
+EOF
+
+sudo tee /etc/systemd/system/concertfinder-backup.timer >/dev/null <<'EOF'
+[Unit]
+Description=Run the ConcertFinder database backup nightly
+
+[Timer]
+# 03:00 UTC — clear of every DAILY_*_HOUR_UTC job (affinity 06, scan 07,
+# digest 09, janitor 10), so the dump is not competing with a scan for the
+# 0.25 CU Neon compute.
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now concertfinder-backup.timer
+```
+
+Verify it end to end now rather than discovering it at 03:00:
+
+```
+sudo systemctl start concertfinder-backup.service
+journalctl -u concertfinder-backup.service -n 20 --no-pager
+aws s3 ls s3://$(grep '^BACKUP_S3_BUCKET=' /opt/concertfinder/.env | cut -d= -f2)/pg/
+```
+
+The script dumps to a temp file, checks it is non-empty, and runs
+`pg_restore --list` over it before uploading — a dump that dies partway still
+produces bytes, and streaming those straight to S3 would leave a truncated
+object under today's key that looks exactly like a backup.
+
+**`PG_IMAGE` in the script pins `postgres:18-alpine`**, matching the 18.6 the
+Neon project reports. `pg_dump` aborts outright against a server newer than
+itself, so when Neon bumps the project's major version, bump this too. It is
+pinned rather than `:latest` so that mismatch fails loudly on an ordinary night
+rather than on the one where you need the dump.
+
+To restore, from your laptop with admin credentials:
+
+```
+aws s3 cp s3://<bucket>/pg/concertfinder-<date>.dump .
+pg_restore --dbname="$DATABASE_URL" --clean --if-exists concertfinder-<date>.dump
+# or just the irreplaceable tables:
+pg_restore --dbname="$DATABASE_URL" --data-only \
+  -t users -t user_saved_concerts -t user_subscribed_artists -t user_locations \
+  concertfinder-<date>.dump
+```
+
+## 8. First automated deploy
 
 ```
 git commit --allow-empty -m "chore: trigger first CI deploy"
@@ -372,11 +550,18 @@ Deliberately kept out to keep the year-1 bill at ~$16:
 - **No auto-scaling.** Single-instance; if it dies, restart it. Fine for
   personal-project scale.
 - **No CloudWatch dashboards, and no alerting on the alarms that do exist.**
-  `infra/cloudwatch.tf` defines three metric alarms (EC2 status check, RDS free
-  storage, estimated billing), but none of them is wired to an SNS topic — the
-  state is visible in the CloudWatch console and nowhere else. Nothing pages
-  you. Application logs are slog to Docker logs; `docker compose logs -f` over
-  SSM when you need them.
+  `infra/cloudwatch.tf` defines two metric alarms (EC2 status check, estimated
+  billing), but neither is wired to an SNS topic — the state is visible in the
+  CloudWatch console and nowhere else. Nothing pages you. Application logs are
+  slog to Docker logs; `docker compose logs -f` over SSM when you need them.
+- **Nothing on the AWS side can see the database.** Neon publishes no
+  CloudWatch metrics, so storage and the compute-hour budget — the line that
+  actually binds on the free plan — are visible only in the Neon console. Set
+  usage alerts there; there is no way to fold them in here.
+- **Nothing checks that the nightly backup ran.** The timer logs to
+  `journalctl` on the box and that is all. A failed dump is silent until you
+  need it. `systemctl list-timers concertfinder-backup` and an occasional
+  `aws s3 ls` are the current answer.
 - **No secrets manager.** The `.env` file on the box holds credentials. If
   the box is compromised, so are the creds. AWS Secrets Manager costs
   $0.40/mo per secret; migrate later if you care.
