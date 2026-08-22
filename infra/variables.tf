@@ -5,8 +5,14 @@ variable "region" {
 }
 
 variable "domain" {
-  description = "Apex domain (e.g. concertfinder.app). Route 53 hosted zone is created for this; SES verifies this domain; Caddy issues certs for it."
+  description = "Apex domain (e.g. concertfinder.app). SES verifies this domain and Caddy issues certificates for it. DNS is NOT managed here — the records to publish come out of `terraform output dns_records`."
   type        = string
+}
+
+variable "ses_dns_records_created" {
+  description = "Set true only after the records from `terraform output dns_records` exist in DNS. While false, Terraform skips the SES verification wait — necessary because the verification token does not exist until after the first apply, so an ungated wait would block the very apply that produces the record it is waiting for."
+  type        = bool
+  default     = false
 }
 
 variable "github_repo" {

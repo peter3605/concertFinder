@@ -41,8 +41,8 @@ resource "aws_db_instance" "main" {
   parameter_group_name   = aws_db_parameter_group.postgres16.name
   publicly_accessible    = false
 
-  backup_retention_period = var.rds_backup_retention_days
-  skip_final_snapshot     = false
+  backup_retention_period   = var.rds_backup_retention_days
+  skip_final_snapshot       = false
   final_snapshot_identifier = "concertfinder-final-snapshot"
 
   auto_minor_version_upgrade = true
