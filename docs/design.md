@@ -891,7 +891,7 @@ Target: shareable public URL; small group of users beyond the developer.
 
 **In Scope**
 
-- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Route 53, Elastic IP. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
+- AWS deployment: EC2 t4g.small + RDS PostgreSQL (db.t4g.micro), Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
 - Per-user rate-limit accounting against shared API quotas (§8.3).
 - Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
@@ -900,7 +900,7 @@ Target: shareable public URL; small group of users beyond the developer.
 - Event grouping for multi-artist bills (§6.2), in both the web list and the email renderers.
 - Account deletion.
 - Observability: minimum-viable CloudWatch alarms on EC2 status check + RDS free storage. Application logs stay in Docker (`docker compose logs`).
-- Terraform definitions checked into `/infra` covering RDS, EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Route 53, Elastic IP, and the two CloudWatch alarms above.
+- Terraform definitions checked into `/infra` covering RDS, EC2, security groups, IAM (EC2 role + GitHub OIDC deploy role), Elastic IP, and the three CloudWatch alarms above. DNS is deliberately out of scope — the registrar is authoritative, so Terraform emits the records to publish (`dns_records`) rather than managing a zone.
 
 **Deferred until scale demands it** (see §11.3)
 
@@ -960,7 +960,7 @@ Phase 3 deploys on AWS. The application remains portable: no AWS SDK imports in 
 | Secrets | `.env` file on the EC2 instance, mode 600 | Migrate to Secrets Manager if compromise risk changes. |
 | TLS certificates | Caddy + Let's Encrypt | Auto-provisioned on first HTTPS request. |
 | Response security headers | Caddy, site level | HSTS (`includeSubDomains`, no `preload`), `nosniff`, `Referrer-Policy`, `frame-ancestors 'none'` + `X-Frame-Options`. Site level so they cover Caddy's own error responses, not just proxied ones. Deliberately not a full CSP — restricting script/style sources needs testing against the Vite bundle. |
-| DNS | Route 53 hosted zone | Apex A record → Elastic IP attached to EC2. |
+| DNS | Cloudflare (registrar is authoritative) | Apex A record → Elastic IP. No Route 53 zone: the registrar already answers for the domain, so records go live in seconds with nothing to delegate. All records stay unproxied — a proxied CNAME breaks SES DKIM, and proxying the apex collapses every client into a Cloudflare edge IP, defeating the `/api/auth` rate limiter. |
 | Static public IP | Elastic IP | Free while attached to a running instance. |
 | Deploy | GitHub Actions → SSM `RunShellScript` | OIDC federation; no long-lived AWS keys in GitHub. `build` and `up -d` are separate commands — `up -d --build` tears running containers down as part of the same command, so a failed or OOM-killed build takes the site with it. |
 | Deploy verification | Container healthcheck + end-to-end smoke test | `up -d --wait` blocks on the api container's healthcheck, which runs the server binary as `/server -healthcheck` (the image is distroless — no shell, no curl — so the binary is the only available probe). `scripts/verify-deploy.sh` then fetches `/api/healthz` *through Caddy* on 443, covering the half `--wait` cannot see. Without both, `docker compose up -d` exits 0 the moment a container is started, so a container that exits on bad config and crash-loops under `restart: unless-stopped` is indistinguishable from a successful deploy. |
@@ -975,16 +975,24 @@ Phase 3 deploys on AWS. The application remains portable: no AWS SDK imports in 
 
 At single-digit users:
 
-| Item | Year 1 (AWS free tier) | Year 2+ |
+AWS replaced the 12-month free tier on 2025-07-15; accounts created since get
+credits on a 6-month plan that closes the account when it lapses, not free
+service-hours. `docs/aws-deploy.md` carries the authoritative breakdown and the
+reasoning. Summary, us-east-1, excluding credits:
+
+| Item | Now | From 2027-01-01 |
 |---|---|---|
-| EC2 t4g.small | $0 (750 hrs/mo free) | ~$5/mo |
-| RDS db.t4g.micro | $0 (750 hrs/mo free) | ~$13/mo |
-| RDS storage (20 GiB gp3) | $0 | ~$3/mo |
-| Route 53 hosted zone | ~$0.50/mo | ~$0.50/mo |
-| SES (< 62k emails/mo) | ~$0 | ~$0 |
-| Data transfer | $0 (100 GB out free/mo) | free at low usage |
-| Domain registration | ~$10/yr | ~$10/yr |
-| **Total** | **~$16 total (domain + Route 53 for year 1)** | **~$22/mo** |
+| EC2 t4g.small | $0 — standalone trial, ends 2026-12-31 | ~$12.26/mo |
+| RDS db.t4g.micro + 20 GiB | ~$14/mo | ~$14/mo |
+| Public IPv4 (Elastic IP) | ~$3.65/mo | ~$3.65/mo |
+| EBS 20 GiB gp3 | ~$1.60/mo | ~$1.60/mo |
+| DNS (Cloudflare) | $0 | $0 |
+| SES, SSM, CloudWatch, 100 GB egress | ~$0 at this scale | ~$0 |
+| **Total** | **~$20/mo** | **~$32/mo** |
+
+Plus ~$10–15/yr for the domain. The largest single lever is RDS: running
+Postgres as a container on the instance removes ~$14/mo, trading away managed
+backups. The t4g.small trial ending 2026-12-31 is the one dated cliff.
 
 ### 11.2 Portability Constraints
 

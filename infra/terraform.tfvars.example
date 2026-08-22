@@ -4,6 +4,14 @@
 domain                  = "your-domain.example"        # apex you registered
 ses_verified_recipient  = "peter.ho433@gmail.com"     # gets the SES sandbox verification email
 
+# Leave false for the first apply. The SES verification token does not exist
+# until that apply creates the identity, so the record proving the domain
+# cannot be published beforehand — true here on pass 1 would make Terraform
+# wait for a record that cannot yet exist. Flip to true (or pass
+# `-var ses_dns_records_created=true`) once the records from
+# `terraform output dns_records` are live. See infra/README.md.
+ses_dns_records_created = false
+
 # Everything else has sensible defaults; override only if needed:
 # region                       = "us-east-1"
 # github_repo                  = "peter3605/concertFinder"
