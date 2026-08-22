@@ -24,7 +24,7 @@ Steady-state monthly cost in us-east-1, excluding credits:
 | RDS db.t4g.micro + 20 GiB | ~$14 (free on legacy accounts) | ~$14 |
 | Public IPv4 (Elastic IP) | ~$3.65 (free on legacy accounts) | ~$3.65 |
 | EBS 20 GiB gp3 | ~$1.60 | ~$1.60 |
-| Route 53 hosted zone | $0.50 | $0.50 |
+| DNS | $0 — Cloudflare, no Route 53 zone | $0 |
 | SES, SSM, CloudWatch alarms, 100 GB egress | $0 at this scale | $0 |
 
 Plus the domain itself (~$10–15/yr). The t4g.small trial expiring on
@@ -301,11 +301,18 @@ That's the entire set of GH secrets. No AWS keys.
 ## 6. Domain + DNS
 
 - Register a domain (Cloudflare Registrar or Porkbun are cheapest — ~$10/yr).
-- Route 53 → Create hosted zone for your domain. Cost: $0.50/mo.
-- In the domain registrar's control panel, change the nameservers to the
-  four Route 53 NS records.
-- Route 53 → Hosted zone → Create record:
-  - Type A, name `@` (apex), value your EC2 Elastic IP
+- Leave DNS with the registrar. Registering at Cloudflare means it is already
+  the authoritative nameserver, so there is no hosted zone to create, nothing
+  to delegate, and no propagation wait — records are live in seconds. This is
+  why `/infra` has no Route 53 resources.
+- Create the records from `terraform output dns_records`: the apex `A` → your
+  Elastic IP, plus the SES verification TXT, three DKIM CNAMEs, and the MAIL
+  FROM MX + SPF pair.
+- **Set every record to "DNS only" (grey cloud).** Cloudflare's proxy answers
+  CNAME lookups with its own addresses, which makes DKIM verification fail
+  silently and MX delivery impossible. The apex `A` should stay unproxied too
+  until the origin reads `CF-Connecting-IP` — see `infra/README.md`, "DNS
+  records", for why proxying breaks the `/api/auth` rate limiter.
 - Update Spotify Developer Dashboard: redirect URI → `https://your-domain.com/api/auth/callback`.
   It must be this exact path. The handler is mounted at `/api/auth/callback`
   (chi: `/api` → `/auth` → `auth.Mount`), and a redirect to `/callback`
@@ -325,18 +332,6 @@ git push origin main
 Watch the Actions tab. The `test` job runs, then `deploy` fires off an SSM
 command against your instance; you'll see stdout printed in the workflow
 output when it finishes.
-
-## Ongoing cost
-
-| Item | Year 1 (free tier) | Year 2+ |
-|---|---|---|
-| EC2 t4g.small | $0 (750 hrs/mo free) | ~$5/mo |
-| RDS db.t4g.micro | $0 (750 hrs/mo free) | ~$13/mo |
-| RDS storage 20 GiB | $0 (20 GiB free) | ~$3/mo |
-| Route 53 hosted zone | ~$0.50/mo | ~$0.50/mo |
-| Data transfer | $0 (100 GB out free/mo) | free at low usage |
-| Domain | ~$10/yr | ~$10/yr |
-| **Total** | **~$16 (domain + Route 53)** | **~$22/mo** |
 
 ## Rolling back
 
