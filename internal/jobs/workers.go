@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -144,13 +145,35 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	switch {
 	case searchErr == nil:
 	case errors.As(searchErr, &incomplete):
-		slog.Warn("scan_concerts incomplete",
+		// Per-source quota accounting goes in this line, not just the
+		// rate_capped boolean. An incomplete scan writes complete = false,
+		// which the SWR handler treats as permanently stale, so this is the
+		// log someone reads when a feed will not fill — and on its own
+		// "rate_capped: true" names no source, no numbers, and no reason.
+		// Diagnosing it otherwise means reading the ledger table afterwards
+		// and reconstructing arithmetic across concurrent scans and refunds,
+		// against a reservation that has already been released.
+		//
+		// Read before Release (which runs in the deferred func above and
+		// zeroes the counters), so these are the values as spent.
+		attrs := []any{
 			"user", user.ID,
 			"skipped_artists", incomplete.SkippedArtists,
 			"total_artists", incomplete.TotalArtists,
 			"rate_capped", incomplete.RateCapped,
 			"found", len(found),
-		)
+		}
+		for _, s := range reservations.Stats() {
+			// granted < wanted means the day's cap was already partly spent
+			// when this scan started. denied > 0 means a call was actually
+			// turned away. They are different failures with different fixes —
+			// raise the cap versus stop scanning so often — and the old line
+			// could not tell them apart.
+			attrs = append(attrs, string(s.Source), fmt.Sprintf(
+				"granted=%d/%d used=%d denied=%d", s.Granted, s.Wanted, s.Used, s.Denied,
+			))
+		}
+		slog.Warn("scan_concerts incomplete", attrs...)
 	default:
 		return searchErr
 	}
