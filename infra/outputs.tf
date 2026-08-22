@@ -64,20 +64,20 @@ output "dns_records" {
   )
 }
 
-output "rds_host" {
-  description = "Postgres host for DATABASE_URL. Port is 5432."
-  value       = aws_db_instance.main.address
-}
+# No database outputs. Postgres is Neon and its connection string comes from
+# the Neon console, not from this state — which is a small win on its own: the
+# plaintext database password is no longer sitting in terraform.tfstate.
+#
+# Copy the **direct** (unpooled) connection string, not the pooled one. River
+# uses LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction
+# mode, which silently does not support it: job pickup degrades to the 1s
+# FetchPollInterval fallback and a leader resignation takes ~5s to notice, with
+# no error anywhere. Keep `?sslmode=require` on the end — it is what replaces
+# the `rds.force_ssl` parameter group this deployment used to carry.
 
-output "rds_password" {
-  description = "Generated Postgres password. Paste into DATABASE_URL in /opt/concertfinder/.env on the box."
-  value       = random_password.rds.result
-  sensitive   = true
-}
-
-output "database_url_template" {
-  description = "Complete DATABASE_URL to paste into /opt/concertfinder/.env. Password not shown — retrieve with 'terraform output -raw rds_password'."
-  value       = "postgres://concertfinder:<password>@${aws_db_instance.main.address}:${aws_db_instance.main.port}/concertfinder?sslmode=require"
+output "backup_bucket" {
+  description = "S3 bucket the nightly pg_dump lands in. Paste into BACKUP_S3_BUCKET in /opt/concertfinder/.env."
+  value       = aws_s3_bucket.backups.id
 }
 
 output "github_deploy_role_arn" {

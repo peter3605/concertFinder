@@ -33,22 +33,18 @@ variable "ec2_instance_type" {
   default     = "t4g.small"
 }
 
-variable "rds_instance_class" {
-  description = "RDS instance class. db.t4g.micro is free for 12 months ONLY on accounts created before 2025-07-15; newer accounts get credits instead and this bills at ~$12/mo plus storage."
-  type        = string
-  default     = "db.t4g.micro"
-}
+# Postgres is Neon, not RDS, and is not managed by this Terraform at all —
+# there is no Neon provider configured here on purpose. The database is created
+# once in the Neon console and its connection string is pasted into
+# /opt/concertfinder/.env like every other secret. See docs/aws-deploy.md §1.
+# What this Terraform *does* own for the database is the backup bucket below,
+# because Neon's free-plan restore window is far shorter than the 7-day RDS
+# retention it replaces.
 
-variable "rds_allocated_storage_gb" {
-  description = "RDS storage in GiB. The legacy free tier included 20 GiB; on a post-2025-07-15 account this bills at the gp3 rate."
+variable "backup_retention_days" {
+  description = "How long nightly pg_dump artifacts live in S3 before the lifecycle rule expires them. Covers the gap left by Neon's short free-plan restore history."
   type        = number
-  default     = 20
-}
-
-variable "rds_backup_retention_days" {
-  description = "RDS backup retention window."
-  type        = number
-  default     = 7
+  default     = 30
 }
 
 variable "ses_notification_local_part" {
@@ -62,14 +58,8 @@ variable "ses_verified_recipient" {
   type        = string
 }
 
-variable "rds_storage_alarm_threshold_gb" {
-  description = "CloudWatch alarm fires when RDS free storage drops below this many GiB."
-  type        = number
-  default     = 5
-}
-
 variable "billing_alarm_threshold_usd" {
-  description = "Estimated monthly AWS charges above which the billing alarm fires. Free-tier headroom is generous in year 1; bump this to something like 40 for year 2."
+  description = "Estimated monthly AWS charges above which the billing alarm fires. Dropping RDS takes ~$14/mo off the bill, so this is lower than it was; bump it when the t4g.small trial ends on 2026-12-31."
   type        = number
-  default     = 25
+  default     = 15
 }

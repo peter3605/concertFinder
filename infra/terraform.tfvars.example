@@ -12,13 +12,15 @@ ses_verified_recipient  = "peter.ho433@gmail.com"     # gets the SES sandbox ver
 # `terraform output dns_records` are live. See infra/README.md.
 ses_dns_records_created = false
 
+# The database is NOT here. Postgres is Neon, created once in its console and
+# pasted into /opt/concertfinder/.env as DATABASE_URL — see docs/aws-deploy.md
+# §1. This Terraform owns only the S3 bucket its nightly dump lands in.
+
 # Everything else has sensible defaults; override only if needed:
 # region                       = "us-east-1"
 # github_repo                  = "peter3605/concertFinder"
 # github_branch                = "main"
 # ec2_instance_type            = "t4g.small"
-# rds_instance_class           = "db.t4g.micro"
-# rds_allocated_storage_gb     = 20
-# rds_backup_retention_days    = 7
 # ses_notification_local_part  = "notifications"
-# rds_storage_alarm_threshold_gb = 5
+# backup_retention_days        = 30
+# billing_alarm_threshold_usd  = 15
