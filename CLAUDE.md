@@ -23,6 +23,8 @@ xcodebuild test -project ConcertFinder.xcodeproj -scheme ConcertFinder \
 
 Two consequences of having two clients, both of which are cheap now and expensive later: `/api/me/*` responses are **additive-only** — a field rename is a breaking change for builds already on someone's phone — and `/api/site-info` carries `min_ios_build` as the escape hatch when that rule has to be broken.
 
+**`docs/ios-app-plan.md` §0 is the current status of the iOS work and what is left.** Read it before acting on anything else in that document: the body below §0 is the plan as originally written, its tense is aspirational, and most of it is already built. What remains is gated on Spotify and Apple accounts, not on code. One trap it records: do not `terraform apply` until the APNs key is in hand, or `APNS_P8_KEY`'s `REPLACE_ME` placeholder fails the next deploy (`docs/aws-deploy.md` §7a).
+
 `docs/design.md` remains the authoritative source of truth for architecture decisions, API choices, schema, and phased scope — read it before implementing anything non-trivial. Where this file and the design doc disagree about what the code does *today*, this file wins; the design doc describes intent.
 
 ## What ConcertFinder Is
