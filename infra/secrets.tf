@@ -154,6 +154,21 @@ data "aws_iam_policy_document" "read_parameters" {
       "ssm:GetParametersByPath",
     ]
     resources = [
+      # Both ARNs are required, and the first one is easy to leave out.
+      #
+      # GetParameter/GetParameters authorize against the individual parameter
+      # (.../parameter/concertfinder/DATABASE_URL), which the wildcard covers.
+      # GetParametersByPath authorizes against *the path being listed*
+      # (.../parameter/concertfinder), which it does not: a trailing /* matches
+      # the children, never the node itself. With only the wildcard the call
+      # fails with
+      #
+      #   not authorized to perform: ssm:GetParametersByPath on resource:
+      #   arn:aws:ssm:...:parameter/concertfinder
+      #
+      # naming an ARN that looks like it should already be covered. Shipped
+      # exactly that way once, and it failed the deploy at render-env.sh.
+      "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter/concertfinder",
       "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter/concertfinder/*",
     ]
   }
