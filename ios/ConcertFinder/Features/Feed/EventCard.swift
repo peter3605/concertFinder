@@ -44,6 +44,11 @@ struct EventCard: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Three separate labels read as three swipes for one heading.
+        // Combined, VoiceOver announces the card once, the way a sighted
+        // user reads it.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -64,25 +69,34 @@ struct ActRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
 
+            // Both controls carry the artist's name, because on a festival
+            // card there are six identical bell icons and "Get alerts" alone
+            // would not say which act it acts on. The label states the action
+            // and the toggle state carries the current value, so VoiceOver
+            // does not read a stale "on/off" alongside a changing verb.
             Button(action: onToggleSubscribe) {
                 Image(systemName: act.isSubscribed ? "bell.fill" : "bell")
             }
             .buttonStyle(.plain)
             .foregroundStyle(act.isSubscribed ? Color.accentColor : Color.secondary)
-            .accessibilityLabel(act.isSubscribed
-                                ? "Stop alerts for \(act.artist.name)"
-                                : "Get alerts for \(act.artist.name)")
+            .accessibilityLabel("Alerts for \(act.artist.name)")
+            .accessibilityValue(act.isSubscribed ? "On" : "Off")
+            .accessibilityAddTraits(act.isSubscribed ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint(act.isSubscribed
+                               ? "Double tap to stop alerts when this artist announces a show"
+                               : "Double tap to get alerts when this artist announces a show")
 
             Button(action: onToggleSave) {
                 Image(systemName: act.isSaved ? "bookmark.fill" : "bookmark")
             }
             .buttonStyle(.plain)
             .foregroundStyle(act.isSaved ? Color.accentColor : Color.secondary)
-            .accessibilityLabel(act.isSaved
-                                ? "Remove \(act.artist.name) from saved"
-                                : "Save \(act.artist.name)")
+            .accessibilityLabel("Save \(act.artist.name)")
+            .accessibilityValue(act.isSaved ? "Saved" : "Not saved")
+            .accessibilityAddTraits(act.isSaved ? [.isButton, .isSelected] : .isButton)
         }
         // Without this the two icon buttons swallow taps meant for the row's
         // navigation link.

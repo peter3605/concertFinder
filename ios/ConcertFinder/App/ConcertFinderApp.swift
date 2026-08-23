@@ -64,6 +64,7 @@ final class AppContainer {
     }
 
     func start() async {
+        await seedUITestSessionIfRequested()
         // One place decides what a 401 means, so no screen has to.
         let auth = self.auth
         await api.setInvalidationHandler(SessionInvalidationBridge { @MainActor in
@@ -92,9 +93,38 @@ final class AppContainer {
         pendingEventKey = link.eventKey
     }
 
+    /// Seeds a session handed in by the UI tests.
+    ///
+    /// The OAuth handshake runs in ASWebAuthenticationSession against
+    /// Spotify's own login page, so it cannot be driven from a UI test
+    /// without automating a third party's web UI and storing their
+    /// credentials. Injecting an already-obtained session is the honest way
+    /// to test everything *after* login.
+    ///
+    /// `#if DEBUG` is load-bearing: this must not exist in a Release binary,
+    /// where an environment variable that installs a session would be a real
+    /// vulnerability rather than a test affordance. App Store builds are
+    /// Release, so the compiler removes it entirely.
+    private func seedUITestSessionIfRequested() async {
+        #if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        guard let token = environment["CF_UI_TEST_SESSION_TOKEN"], !token.isEmpty else { return }
+        await tokens.store(token)
+        #endif
+    }
+
     /// The API origin comes from build configuration, so a debug build can
     /// point at a local server without a code change.
     private static func resolveBaseURL() -> URL {
+        // Same DEBUG-only reasoning as the session seed above: a Release
+        // binary must not let an environment variable redirect every request
+        // to another host.
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["CF_UI_TEST_API_BASE_URL"],
+           !override.isEmpty, let url = URL(string: override) {
+            return url
+        }
+        #endif
         if let configured = Bundle.main.object(forInfoDictionaryKey: "CFAPIBaseURL") as? String,
            !configured.isEmpty,
            let url = URL(string: configured) {

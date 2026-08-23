@@ -32,26 +32,43 @@ struct MainTabView: View {
 
     @Environment(FeedModel.self) private var feed
     @Environment(AppContainer.self) private var container
+    // Regular width is iPad, and an iPhone in landscape on the larger
+    // devices. Reviewers do open the iPad build, and a stretched four-tab
+    // phone layout across 1024 points reads as an unported app.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var selection = Tab.feed
 
-    enum Tab: Hashable {
+    enum Tab: Hashable, CaseIterable, Identifiable {
         case feed, saved, artists, settings
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .feed: "Concerts"
+            case .saved: "Saved"
+            case .artists: "Artists"
+            case .settings: "Settings"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .feed: "music.note.list"
+            case .saved: "bookmark"
+            case .artists: "person.2"
+            case .settings: "gearshape"
+            }
+        }
     }
 
     var body: some View {
-        TabView(selection: $selection) {
-            FeedView()
-                .tabItem { Label("Concerts", systemImage: "music.note.list") }
-                .tag(Tab.feed)
-            SavedView()
-                .tabItem { Label("Saved", systemImage: "bookmark") }
-                .tag(Tab.saved)
-            ArtistsView()
-                .tabItem { Label("Artists", systemImage: "person.2") }
-                .tag(Tab.artists)
-            SettingsView(api: api, baseURL: baseURL)
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(Tab.settings)
+        Group {
+            if sizeClass == .regular {
+                splitLayout
+            } else {
+                tabLayout
+            }
         }
         // A tapped notification names an event. Switching to the feed is the
         // honest minimum — the event may not be in the current filtered view,
@@ -60,6 +77,48 @@ struct MainTabView: View {
         .onChange(of: container.pendingEventKey) { _, key in
             guard key != nil else { return }
             selection = .feed
+        }
+    }
+
+    private var tabLayout: some View {
+        TabView(selection: $selection) {
+            ForEach(Tab.allCases) { tab in
+                destination(for: tab)
+                    .tabItem { Label(tab.title, systemImage: tab.icon) }
+                    .tag(tab)
+            }
+        }
+    }
+
+    /// iPad and regular-width layout: a persistent sidebar rather than a
+    /// bottom tab bar, which is the platform convention and stops the feed
+    /// from stretching a phone-width card list across the full display.
+    private var splitLayout: some View {
+        NavigationSplitView {
+            // List selection on iOS is an optional binding. The sidebar can
+            // never actually be deselected here, so nil folds back to the
+            // current tab rather than to an empty detail pane.
+            List(Tab.allCases, selection: Binding(
+                get: { Optional(selection) },
+                set: { selection = $0 ?? selection }
+            )) { tab in
+                Label(tab.title, systemImage: tab.icon)
+                    .tag(tab)
+            }
+            .navigationTitle("ConcertFinder")
+            .listStyle(.sidebar)
+        } detail: {
+            destination(for: selection)
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for tab: Tab) -> some View {
+        switch tab {
+        case .feed: FeedView()
+        case .saved: SavedView()
+        case .artists: ArtistsView()
+        case .settings: SettingsView(api: api, baseURL: baseURL)
         }
     }
 }
@@ -92,8 +151,14 @@ struct LoginView: View {
 
             VStack(spacing: Metrics.tight) {
                 Image(systemName: "music.mic")
-                    .font(.system(size: 56))
+                    // A relative style rather than .system(size: 56): a fixed
+                    // point size ignores Dynamic Type, so at the largest
+                    // accessibility sizes the icon stays tiny while the text
+                    // around it triples.
+                    .font(.system(.largeTitle, design: .default))
+                    .imageScale(.large)
                     .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true) // decorative; the title says it
                 Text("ConcertFinder")
                     .font(.largeTitle.weight(.bold))
                 Text("Shows near you, from the artists you already listen to.")

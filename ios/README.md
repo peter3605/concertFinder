@@ -21,11 +21,16 @@ Regenerate after adding or moving files. CI does the same thing, so a spec
 that does not generate is a red build rather than a surprise later.
 
 ```sh
-# What CI runs
+# What CI runs (it picks an available simulator rather than naming one —
+# device line-ups change between Xcode releases)
 xcodegen generate
 xcodebuild test -project ConcertFinder.xcodeproj -scheme ConcertFinder \
-  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
+  -destination "id=$(xcrun simctl list devices available | \
+    grep -m1 -o '[0-9A-F-]\{36\}')" CODE_SIGNING_ALLOWED=NO
 ```
+
+**Regenerate after adding a file, or it is not in the target.** A test file
+that is not in the project does not fail — it silently does not run.
 
 ## Pointing at a backend
 
@@ -106,15 +111,39 @@ These are the non-obvious constraints, all of which fail quietly:
 
 ## Testing
 
-Unit tests decode **captured** responses from `ConcertFinderTests/Fixtures`
-rather than hand-written literals — a literal encodes what we think the server
-sends, a fixture encodes what it sent. The set covers a six-act festival, an
-empty feed, an incomplete scan with `retry_after`, and a throttled refresh.
+**The fixtures in `ConcertFinderTests/Fixtures` are generated, not written.**
+`TestGoldenFixtures` in `internal/http` marshals the real Go response structs
+into them; the Swift tests decode them. That is the contract check, and both
+halves bite: rename a `json` tag in Go and the Go test fails, regenerate
+without updating the Swift models and the Swift tests fail.
 
-UI tests are scoped to what holds with no backend reachable, so they stay
-green in CI without secrets. The signed-in flows in plan §8 (feed load, save,
-filter) need a Spotify account on the Development Mode allowlist and a build
-signed against the real App ID — add them once those exist.
+```sh
+go test ./internal/http -run TestGoldenFixtures -update   # after a Go shape change
+```
+
+Do not hand-edit them. The first run of the generator caught a fabricated
+`is_default` field that the server never sends — and a Swift test asserting
+it, passing against the fabrication.
+
+UI tests come in two sets. `LaunchUITests` needs no backend and runs in CI.
+`SignedInUITests` covers the flows plan §8 names — feed load, save, filter,
+event detail — and skips unless a session is injected:
+
+```sh
+CF_UI_TEST_SESSION_TOKEN=<session id> \
+CF_UI_TEST_API_BASE_URL=https://concertfinder.app \
+  xcodebuild test -only-testing:ConcertFinderUITests/SignedInUITests ...
+```
+
+The handshake runs in `ASWebAuthenticationSession` against Spotify's own login
+page, so it cannot be automated without driving a third party's web UI and
+storing their credentials. Injecting an already-obtained session tests
+everything after login instead. The injection is `#if DEBUG` only — in a
+Release binary an environment variable that installs a session would be a
+vulnerability, not a convenience.
+
+The Go side has its own database-backed tests for the notification ledger;
+see the repo root README.
 
 ## Not done here
 

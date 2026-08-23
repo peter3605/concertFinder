@@ -10,7 +10,11 @@ struct FeedView: View {
 
         NavigationStack {
             Group {
-                if model.isLoading && model.events.isEmpty {
+                // A genuine cold start is minutes of work, not a spinner's
+                // worth. See FirstRunView and plan §5.5.
+                if model.isFirstRun {
+                    FirstRunView()
+                } else if model.isLoading && model.events.isEmpty {
                     ProgressView("Finding concerts near you…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if model.isEmpty {

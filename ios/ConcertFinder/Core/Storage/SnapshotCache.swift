@@ -132,3 +132,27 @@ enum FilterStore {
         UserDefaults.standard.set(data, forKey: key)
     }
 }
+
+/// Whether this account has ever been through a completed first scan.
+///
+/// Persisted in UserDefaults rather than inferred from the cache, because the
+/// two answer different questions: the cache can be evicted by the system at
+/// any time, and losing it must not put an established user back into the
+/// "setting up" screen. Cleared on sign-out along with everything else, so a
+/// different account on the same device gets its own first run.
+enum FirstRunTracker {
+    private static let key = "cf.firstRunCompleted"
+
+    static var hasCompleted: Bool {
+        UserDefaults.standard.bool(forKey: key)
+    }
+
+    static func markCompleted() {
+        guard !hasCompleted else { return }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    static func reset() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
