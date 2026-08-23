@@ -14,6 +14,12 @@ type SiteInfoHandler struct {
 	// build/run time rather than hardcoded in the React source so the pages
 	// stay honest as content evolves.
 	EffectiveDate string
+	// MinIOSBuild is the oldest iOS build this server still supports. The
+	// app compares it on launch and can show a blocking "update required"
+	// screen. This is the escape hatch that makes a breaking server change
+	// survivable once builds are in people's pockets for months — it is
+	// cheap to add now and impossible to add retroactively.
+	MinIOSBuild int
 }
 
 func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
@@ -21,8 +27,9 @@ func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
 	if effective == "" {
 		effective = time.Now().UTC().Format("2006-01-02")
 	}
-	writeJSON(w, map[string]string{
+	writeJSON(w, map[string]any{
 		"contact_email":  h.ContactEmail,
 		"effective_date": effective,
+		"min_ios_build":  h.MinIOSBuild,
 	})
 }
