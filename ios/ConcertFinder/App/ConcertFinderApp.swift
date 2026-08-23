@@ -1,0 +1,183 @@
+import SwiftUI
+import UIKit
+
+@main
+struct ConcertFinderApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var container = AppContainer()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(container.auth)
+                .environment(container.feed)
+                .environment(container.saved)
+                .environment(container.artists)
+                .environment(container.location)
+                .environment(container.push)
+                .environment(container)
+                .task {
+                    appDelegate.container = container
+                    await container.start()
+                }
+                // Universal links. The OAuth return is handled inside
+                // ASWebAuthenticationSession, so anything arriving here is a
+                // link opened from outside the app.
+                .onOpenURL { url in container.handle(url: url) }
+        }
+    }
+}
+
+/// Wires the object graph once and holds it for the app's lifetime.
+///
+/// Constructed by hand rather than through a DI framework: there are six
+/// objects and one wiring point, and a container that can be read top to
+/// bottom is worth more here than indirection.
+@MainActor
+@Observable
+final class AppContainer {
+    let api: APIClient
+    let baseURL: URL
+    let auth: AuthController
+    let feed: FeedModel
+    let saved: SavedModel
+    let artists: ArtistsModel
+    let location: LocationModel
+    let push: PushRegistrar
+
+    /// Set when a notification or universal link asks for a specific event.
+    var pendingEventKey: String?
+
+    private let tokens = KeychainTokenStore()
+
+    init() {
+        let baseURL = Self.resolveBaseURL()
+        let api = APIClient(baseURL: baseURL, tokens: tokens)
+        self.api = api
+        self.baseURL = baseURL
+        self.auth = AuthController(api: api, tokens: tokens, baseURL: baseURL)
+        self.feed = FeedModel(api: api)
+        self.saved = SavedModel(api: api)
+        self.artists = ArtistsModel(api: api)
+        self.location = LocationModel(api: api)
+        self.push = PushRegistrar(api: api)
+    }
+
+    func start() async {
+        // One place decides what a 401 means, so no screen has to.
+        let auth = self.auth
+        await api.setInvalidationHandler(SessionInvalidationBridge { @MainActor in
+            auth.handleSessionExpiry()
+        })
+        self.auth.onSignIn = { [weak self] _ in
+            Task { await self?.push.refreshRegistrationIfAuthorized() }
+        }
+        await self.auth.restore()
+        if case .signedIn = self.auth.state {
+            // APNs rotates tokens, so re-register on every launch rather
+            // than only after the first grant.
+            await push.refreshRegistrationIfAuthorized()
+        }
+    }
+
+    func handle(url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        if let eventKey = components.queryItems?.first(where: { $0.name == "event_key" })?.value {
+            pendingEventKey = eventKey
+        }
+    }
+
+    func handle(notification userInfo: [AnyHashable: Any]) {
+        guard let link = PushDeepLink(userInfo: userInfo) else { return }
+        pendingEventKey = link.eventKey
+    }
+
+    /// The API origin comes from build configuration, so a debug build can
+    /// point at a local server without a code change.
+    private static func resolveBaseURL() -> URL {
+        if let configured = Bundle.main.object(forInfoDictionaryKey: "CFAPIBaseURL") as? String,
+           !configured.isEmpty,
+           let url = URL(string: configured) {
+            return url
+        }
+        // A build with no configured origin is a packaging mistake, but
+        // crashing on launch is a worse way to find out than a login that
+        // fails with a legible error.
+        return URL(string: "https://127.0.0.1:3000")!
+    }
+}
+
+/// Bridges APIClient's `SessionInvalidationHandler` to a closure, so the
+/// networking layer does not have to know about AuthController.
+private final class SessionInvalidationBridge: SessionInvalidationHandler, @unchecked Sendable {
+    private let onExpiry: @MainActor () -> Void
+
+    init(_ onExpiry: @escaping @MainActor () -> Void) {
+        self.onExpiry = onExpiry
+    }
+
+    func sessionDidExpire() async {
+        await MainActor.run { onExpiry() }
+    }
+}
+
+/// Only exists for the two APNs callbacks, which have no SwiftUI equivalent.
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    @MainActor var container: AppContainer?
+
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        Task { @MainActor in
+            await container?.push.didRegister(tokenData: deviceToken)
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        // Nothing to do and nothing to tell the user: the toggle stays on,
+        // the next launch retries, and the only cost is notifications until
+        // then.
+    }
+
+    /// A tapped notification deep-links into the event it names.
+    ///
+    /// nonisolated because UIApplicationDelegate conformance makes this class
+    /// main-actor isolated, and UNNotificationResponse is not Sendable — so
+    /// the parameter cannot cross the boundary. The userInfo dictionary is
+    /// extracted here and only that hops to the main actor.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let userInfo = response.notification.request.content.userInfo
+        let keys = PushDeepLink(userInfo: userInfo)
+        await MainActor.run { [weak self] in
+            guard let keys else { return }
+            self?.container?.pendingEventKey = keys.eventKey
+        }
+    }
+
+    /// Show banners while the app is foregrounded. A new-concert alert is
+    /// worth seeing without leaving the app.
+    ///
+    /// nonisolated for the same reason as above: UNNotification is not
+    /// Sendable, and nothing here needs the main actor.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+}

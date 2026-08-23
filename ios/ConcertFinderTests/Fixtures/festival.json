@@ -1,0 +1,73 @@
+{
+  "location": {
+    "latitude": 38.8951,
+    "longitude": -77.0364,
+    "radius_miles": 50,
+    "display_name": "Washington, DC"
+  },
+  "count": 1,
+  "events": [
+    {
+      "event_key": "9f2c1a4b8e7d6c5a4b3f2e1d0c9b8a77",
+      "date": "2026-07-04T18:00:00Z",
+      "venue": "Merriweather Post Pavilion",
+      "city": "Columbia",
+      "state": "MD",
+      "country": "US",
+      "acts": [
+        {
+          "artist": { "id": "3fMbdgg4jU18AjLCKBhRSm", "name": "Turnstile", "genres": ["hardcore punk", "alternative rock"] },
+          "dedup_key": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "saved": true,
+          "subscribed": false
+        },
+        {
+          "artist": { "id": "4LG4Bs1Gadht7TCrMytQUO", "name": "Snail Mail", "genres": ["indie rock"] },
+          "dedup_key": "b2c3d4e5f60718293a4b5c6d7e8f9001",
+          "saved": false,
+          "subscribed": true
+        },
+        {
+          "artist": { "id": "56ZTgzPBDge0OvCGgMO3OY", "name": "Beach House", "genres": ["dream pop"] },
+          "dedup_key": "c3d4e5f60718293a4b5c6d7e8f900112",
+          "saved": false,
+          "subscribed": false
+        },
+        {
+          "artist": { "id": "1Bl6wpkWCQ4KVgnASpvzzA", "name": "Wednesday", "genres": ["indie rock"] },
+          "dedup_key": "d4e5f60718293a4b5c6d7e8f90011223",
+          "saved": false,
+          "subscribed": false
+        },
+        {
+          "artist": { "id": "6l3HvQ5sa6mXTsMTB19rO5", "name": "J. Cole", "genres": ["hip hop"] },
+          "dedup_key": "e5f60718293a4b5c6d7e8f9001122334",
+          "saved": false,
+          "subscribed": false
+        },
+        {
+          "artist": { "id": "7jy3rLJdDQY21OgRLCZ9sD", "name": "Foo Fighters", "genres": ["alternative rock"] },
+          "dedup_key": "f60718293a4b5c6d7e8f900112233445",
+          "saved": false,
+          "subscribed": false
+        }
+      ],
+      "links": [
+        { "source": "ticketmaster", "url": "https://www.ticketmaster.com/event/example" },
+        { "source": "official", "url": "https://example.com/tour" }
+      ]
+    }
+  ],
+  "facets": {
+    "genres": [
+      { "value": "indie rock", "count": 1 },
+      { "value": "alternative rock", "count": 1 }
+    ],
+    "venues": [
+      { "value": "Merriweather Post Pavilion", "count": 1 }
+    ]
+  },
+  "computed_at": "2026-08-23T09:14:22.418Z",
+  "refreshing": false,
+  "complete": true
+}
