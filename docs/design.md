@@ -885,7 +885,7 @@ Target: feature-complete on the local machine, ready to consider hosting.
 - Result streaming: frontend polls for late-arriving results after initial response. Superseded by SWR polling against the snapshot (§6.0).
 - Begin Spotify Extended Quota Mode application.
 
-### 10.3 Phase 3: Hosted Multi-User on AWS — *application complete; deployment not*
+### 10.3 Phase 3: Hosted Multi-User on AWS — *complete and deployed*
 
 Target: shareable public URL; small group of users beyond the developer.
 
@@ -895,7 +895,7 @@ The database was RDS db.t4g.micro through the first Terraform drafts. At ~$14/mo
 
 **In Scope**
 
-- AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
+- AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Done** — applied and serving at `https://concertfinder.app`; `GET /api/healthz` returns ok. Config and secrets are rendered from SSM Parameter Store at deploy time rather than being pushed through the SSM command, whose parameters are retained for ~30 days and readable by anyone with SSM access.
 - Per-user rate-limit accounting against shared API quotas (§8.3).
 - Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
