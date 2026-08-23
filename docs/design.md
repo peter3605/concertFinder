@@ -151,10 +151,17 @@ The application must be registered at `https://developer.spotify.com/dashboard` 
 
 | Item | Value |
 |---|---|
-| Spotify Client ID | `[TODO: pending registration]` |
+| Spotify Client ID | Registered; the value lives in SSM as `/concertfinder/SPOTIFY_CLIENT_ID`, never in this repo |
 | Redirect URI (dev) | `https://127.0.0.1:3000/api/auth/callback` |
-| Redirect URI (prod) | `https://[TODO: production domain]/callback` |
+| Redirect URI (prod) | `https://concertfinder.app/api/auth/callback` |
 | Allowed scopes | See section 3.6 |
+
+**The path is `/api/auth/callback`, not `/callback`.** This table said
+`/callback` for the production entry until 2026-08-23, which is the exact
+misconfiguration `config.Validate` refuses to start on: the handler is mounted
+under `/api/auth`, so a dashboard entry pointing at `/callback` lands on the
+SPA's catch-all instead and the browser finishes the OAuth dance on a
+logged-out page, with no error anywhere.
 
 Note: `http://localhost` redirect URIs are explicitly prohibited by Spotify as of the November 2025 OAuth migration. Only `http://127.0.0.1` (with the literal IP) is accepted for local development.
 

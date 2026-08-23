@@ -500,6 +500,61 @@ pg_restore --dbname="$DATABASE_URL" --data-only \
   concertfinder-<date>.dump
 ```
 
+## 7a. iOS client configuration (optional)
+
+Skip this entirely if you are not shipping the iOS app — with one caveat at
+the end, which will otherwise fail your next deploy.
+
+Everything here is optional in the sense that unset means the web app behaves
+exactly as before: `/api/auth/login?client=ios` returns 501, the
+`apple-app-site-association` file 404s, and the push worker no-ops. What is
+*not* allowed is a partial APNs set. `config.Validate` refuses to start on
+one, because a half-configured push path wires up successfully and then drops
+every notification silently — indistinguishable from nobody having opted in.
+
+Terraform derives most of it from `var.domain` and `var.ios_bundle_id`
+(`infra/variables.tf`), so the values you supply are:
+
+```hcl
+ios_bundle_id    = "com.example.concertfinder"  # must match the real App ID
+ios_team_id      = "ABCDE12345"                 # Apple Developer team
+apns_key_id      = "XYZ9876543"                 # the .p8's key ID
+apns_environment = "production"                 # or "sandbox" for TestFlight/debug builds
+min_ios_build    = 0                            # oldest client build the server accepts
+```
+
+`MOBILE_CALLBACK_URL` and `IOS_APP_ID` are derived from those, so they cannot
+drift from the domain the certificate is issued for — which matters because
+iOS fetches the association file from the universal link's *own* host, and a
+mismatch ends every mobile login in Safari with the app still waiting.
+
+The `.p8` private key is an operator secret, not a Terraform value:
+
+```bash
+./scripts/set-secrets.sh     # offers APNS_P8_KEY; choose [f] and give the path
+```
+
+**The caveat, and it applies even if you never ship the app.** `APNS_P8_KEY`
+is in `operator_secrets`, so `terraform apply` creates the parameter holding
+the `REPLACE_ME` sentinel — and `render-env.sh` refuses to write the env file
+while any parameter still holds it, which fails the deploy by design. On a
+deployment with no Apple account, mark it unused once:
+
+```bash
+./scripts/set-secrets.sh     # choose [-] at the APNS_P8_KEY prompt
+```
+
+That writes a single space, which the Go side reads as "this integration is
+off" — the same convention `SONGKICK_API_KEY` and `BRAVE_SEARCH_API_KEY` use.
+
+Finally, on the client side: `ios/project.yml` carries the API origin per
+configuration and `ios/ConcertFinder/Resources/ConcertFinder.entitlements`
+carries `applinks:`. Both are already set to this deployment's domain; the
+bundle identifier is the one value that still has to match your real App ID.
+See `ios/README.md`.
+
+---
+
 ## 8. First automated deploy
 
 ```
