@@ -105,4 +105,19 @@ if [ ! -x "$repo/scripts/backup-db.sh" ]; then
 fi
 pass "backup-db.sh is executable"
 
+# 8. render-env.sh is the newest member of the never-runs-locally family, and
+#    the most load-bearing: it writes the .env every other container reads, and
+#    it runs between `git reset --hard` and `docker compose up`. A syntax error
+#    there fails a deploy with the checkout already moved to the new commit.
+if ! out=$(bash -n "$repo/scripts/render-env.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/render-env.sh has a syntax error"
+fi
+pass "render-env.sh parses"
+
+if [ ! -x "$repo/scripts/render-env.sh" ]; then
+    fail "scripts/render-env.sh is not executable — run: chmod +x scripts/render-env.sh"
+fi
+pass "render-env.sh is executable"
+
 printf '\n\033[32mDeployment config OK\033[0m\n'
