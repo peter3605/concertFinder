@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,6 +64,35 @@ func (h *LocationHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, locationDTO{Latitude: l.Latitude, Longitude: l.Longitude, RadiusMiles: l.RadiusMiles})
 }
 
+// coordPrecision is the number of decimal places a saved coordinate keeps.
+// Two places is ~1.1km, which is far finer than any radius this app offers can
+// distinguish — the minimum is 1 mile — and coarse enough that repeated saves
+// from one place land on one value.
+const coordPrecision = 2
+
+// roundCoord quantises a coordinate before it is stored.
+//
+// jobs.LocationKey formats coordinates to 4 decimal places (~11m) and that key
+// is the identity of a snapshot. Browser geolocation returns a slightly
+// different fix every time — wifi and IP positioning drift by tens or hundreds
+// of metres between calls — so two saves from the same desk produced
+// 38.8335,-77.2102 and 38.8333,-77.2103: two keys, two snapshots, and two
+// full cold scans about 10 metres apart.
+//
+// That is expensive rather than merely untidy. A cold scan reserves ~2
+// Ticketmaster calls per artist across 200 artists, so each spurious key costs
+// ~400 of a 500/day per-user cap; two of them exhausts the day and every
+// subsequent scan reports itself incomplete.
+//
+// Rounding happens here, at the point of save, rather than inside
+// LocationKey: the stored coordinate is what the scan actually searches, so
+// quantising only the key would leave the snapshot filed under one location
+// while the search ran at another.
+func roundCoord(v float64) float64 {
+	p := math.Pow(10, coordPrecision)
+	return math.Round(v*p) / p
+}
+
 type putLocationRequest struct {
 	Query       string   `json:"query,omitempty"`
 	Latitude    *float64 `json:"latitude,omitempty"`
@@ -110,6 +140,7 @@ func (h *LocationHandler) Put(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "supply query OR (latitude, longitude)", http.StatusBadRequest)
 		return
 	}
+	lat, lng = roundCoord(lat), roundCoord(lng)
 	if err := db.UpsertUserLocation(r.Context(), h.Pool, db.UserLocation{
 		UserID:      u.ID,
 		Latitude:    lat,
