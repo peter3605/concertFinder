@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Must match APNS_ENVIRONMENT on the server: a token minted against one
+	     host is rejected by the other as BadDeviceToken. Xcode rewrites this
+	     to "production" for App Store and TestFlight builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
+
+	<!-- The universal link the OAuth callback returns to. The domain must
+	     serve /.well-known/apple-app-site-association over valid TLS with no
+	     redirect, which internal/http/aasa.go does. Replace with the real
+	     domain before the first device build — iOS caches the association,
+	     and a wrong one teaches the device the domain is not ours. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:REPLACE_WITH_YOUR_DOMAIN</string>
+	</array>
+</dict>
+</plist>

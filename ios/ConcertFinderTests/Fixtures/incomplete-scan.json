@@ -1,0 +1,34 @@
+{
+  "location": {
+    "latitude": 38.8951,
+    "longitude": -77.0364,
+    "radius_miles": 50,
+    "display_name": "Washington, DC"
+  },
+  "count": 1,
+  "events": [
+    {
+      "event_key": "11223344556677889900112233445566",
+      "date": "2026-09-12T20:00:00Z",
+      "venue": "9:30 Club",
+      "city": "Washington",
+      "state": "DC",
+      "country": "US",
+      "acts": [
+        {
+          "artist": { "id": "3fMbdgg4jU18AjLCKBhRSm", "name": "Turnstile", "genres": ["hardcore punk"] },
+          "dedup_key": "aabbccddeeff00112233445566778899"
+        }
+      ],
+      "links": [{ "source": "ticketmaster", "url": "https://www.ticketmaster.com/event/other" }]
+    }
+  ],
+  "facets": {
+    "genres": [{ "value": "hardcore punk", "count": 1 }],
+    "venues": [{ "value": "9:30 Club", "count": 1 }]
+  },
+  "computed_at": "2026-08-23T06:02:11Z",
+  "refreshing": true,
+  "complete": false,
+  "retry_after": "2026-08-24T00:00:00Z"
+}
