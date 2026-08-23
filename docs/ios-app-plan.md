@@ -15,7 +15,7 @@ that file explains what breaks without them.
 
 ## Table of Contents
 
-1. [Summary](#1-summary)
+1. [Summary](#1-summary) · [One backend, two clients](#11-one-backend-two-clients)
 2. [What the app is building on](#2-what-the-app-is-building-on)
 3. [The three things that gate this project](#3-the-three-things-that-gate-this-project)
 4. [Backend work required before any Swift is written](#4-backend-work-required-before-any-swift-is-written)
@@ -66,6 +66,65 @@ task; both have long lead times; start them in week one.
 **Rough size:** 9–13 weeks of focused part-time work to TestFlight, plus an
 indeterminate wait on Spotify Extended Quota Mode before the App Store is
 reachable. Milestone-level estimates are in [§7](#7-milestones).
+
+### 1.1 One backend, two clients
+
+This is a foundational assumption of the whole plan, so it is worth stating
+flatly: **the iOS app talks to the same Go binary, on the same box, against
+the same database, through the same `/api/me/*` handlers as the web SPA.**
+There is no mobile BFF, no second service, no forked handler, and no separate
+deployment. The app is a second client of the API that already exists.
+
+That is the right call here for reasons specific to this codebase. The
+handlers already return clean JSON with no HTML coupling. The expensive work
+— affinity hydration, the Ticketmaster fan-out, the fallback chain — lives in
+river workers writing to `user_concert_snapshots`, so both clients read the
+same precomputed snapshot and neither triggers a fan-out on the read path.
+Quota accounting is per *user*, not per client, so a user who reads their feed
+on both their phone and their laptop spends one allowance either way — which
+is only true because there is one ledger behind one API. And every ToS
+constraint in `CLAUDE.md` (no raw Spotify persistence, encrypted refresh
+tokens, no direct client access to third-party APIs) is enforced in exactly
+one place. A second backend would mean enforcing all of it twice.
+
+Concretely, the work in [§4](#4-backend-work-required-before-any-swift-is-written)
+splits three ways:
+
+**Shared unchanged — the app calls these as-is.** Every endpoint in
+[§2.1](#21-the-api-as-it-stands): the concerts feed, refresh, location, saved
+concerts, subscribed artists, artist search, email prefs, account deletion,
+affinity, site info, the auth handlers. Same JSON, same filters, same facets,
+same `Event`/`Act` shapes. The Swift models are transliterations of
+`web/src/lib/types.ts` precisely because there is nothing to translate.
+
+**Additive — new routes on the same server that the web client simply never
+calls.** `POST /api/auth/mobile/exchange`, `POST`/`DELETE /api/me/devices`,
+`/.well-known/apple-app-site-association`, and a `?client=ios` branch inside
+the existing `/api/auth/login` handler.
+
+**Modified in place — small changes to shared code, with the web path
+untouched.** `RequireUser` gains an `Authorization: Bearer` fallback *before*
+the existing cookie lookup; `CSRF` becomes a pass-through only when
+authentication came from that header, so cookie-authenticated mutations are
+still guarded exactly as today; `oauth_handshakes` gains a nullable column;
+`users` gains `push_opt_in`; `/api/site-info` gains `min_ios_build`. Nothing
+here changes an existing response shape.
+
+**The cost of sharing, stated honestly.** One API with two clients means a
+field rename that is a one-commit operation today becomes a breaking change
+for builds already on people's phones. That is the entire reason
+[§4.3](#43-api-surface-adjustments) exists — versioning, an
+`X-CF-Client` header, and a minimum-build check are the price of this
+decision, and they are cheap to pay before M2 and expensive after M8. The
+alternative (a separate mobile service) costs far more and buys nothing this
+app needs.
+
+The one scenario that would break the shared model is the App Store fallback
+architecture in [§10.1](#101-guideline-511v-and-server-side-spotify-tokens) —
+if Apple insists the app hold the Spotify token itself, affinity hydration
+moves onto the device and the two clients stop computing profiles the same
+way. That is a reason to resolve §10.1 early, not a reason to build two
+backends now.
 
 ---
 
