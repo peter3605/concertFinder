@@ -10,10 +10,19 @@ instance behind Caddy.
 
 ## Status
 
-Phases 1–3 are implemented and the application is feature-complete. **It is not
-yet deployed** — the AWS infrastructure has not been provisioned, so the
-`deploy` job in CI fails at credential federation by design. See
-`docs/aws-deploy.md` for what standing it up requires.
+Phases 1–3 are implemented and deployed, running at
+<https://concertfinder.app> — EC2 `t4g.small` behind an Elastic IP, Neon
+Postgres, Caddy terminating TLS, secrets rendered from SSM Parameter Store at
+deploy time. `docs/aws-deploy.md` is the operator runbook.
+
+Sign-in is limited to accounts on the Spotify allowlist: the app is in
+Development Mode, and Extended Quota Mode has not been granted. Anyone else
+gets a 403 explaining why rather than a generic failure.
+
+A native iOS client lives in `ios/` (see `docs/ios-app-plan.md`). Its
+server-side half — bearer auth, the mobile code exchange, APNs — is
+implemented; the Apple Developer configuration in Appendix A of that plan is
+not yet filled in, so mobile sign-in and push are inactive until it is.
 
 ## Quickstart
 
