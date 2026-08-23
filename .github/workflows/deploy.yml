@@ -30,6 +30,29 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Most tests here are pure unit tests and need nothing. The exceptions are
+    # in internal/db: the already-sent ledger's channel separation is a
+    # property of a primary key and two queries, and its failure mode is a
+    # notification that silently never arrives. It cannot be tested without a
+    # database, and it skips rather than fails when TEST_DATABASE_URL is
+    # unset — so without this service the suite would stay green while that
+    # guard quietly never ran.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://test:test@127.0.0.1:5432/test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
@@ -50,6 +73,18 @@ jobs:
         run: go build ./...
       - name: Go test
         run: go test ./...
+
+      # The database-backed tests skip silently without TEST_DATABASE_URL, so
+      # assert they actually ran rather than trusting a green suite.
+      - name: Assert the database-backed tests were not skipped
+        run: |
+          set -euo pipefail
+          out=$(go test ./internal/db/ -run TestBothChannelsDeliverTheSameShow -v)
+          echo "$out"
+          if echo "$out" | grep -q -- "--- SKIP"; then
+            echo "::error::internal/db tests skipped — TEST_DATABASE_URL is not reaching the job, so the ledger channel guard did not run"
+            exit 1
+          fi
 
       - uses: actions/setup-node@v7
         with:
