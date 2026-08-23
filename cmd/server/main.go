@@ -33,6 +33,7 @@ import (
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/http/spa"
 	"github.com/peterho/concertfinder/internal/jobs"
+	"github.com/peterho/concertfinder/internal/push"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
@@ -112,6 +113,7 @@ func main() {
 		subscribedH  *webhttp.SubscribedArtistsHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
 		unsubscribeH *webhttp.UnsubscribeHandler
+		devicesH     *webhttp.DevicesHandler
 		riverClient  *river.Client[pgx.Tx]
 		signingKey   []byte
 	)
@@ -145,6 +147,10 @@ func main() {
 			SpotifyClient: spotifyClient,
 			HTTPClient:    oauthHTTP,
 			PostLoginURL:  "/",
+			// Empty on a deployment with no iOS configuration, which makes
+			// /login?client=ios refuse rather than complete into a session
+			// only a browser could use.
+			MobileCallbackURL: cfg.MobileCallbackURL,
 		}
 
 		affinitySvc := &affinity.Service{
@@ -310,6 +316,29 @@ func main() {
 			UnsubscribeBase:  cfg.SiteBaseURL,
 			UnsubscribeToken: unsubscribeH.Token,
 		})
+		// APNs client. Absent configuration is not an error — a deployment
+		// without an Apple developer account still runs everything else —
+		// but a *partial* one is, and config.Validate has already rejected
+		// that, so reaching here with some fields set means all are.
+		var apnsClient *push.Client
+		if cfg.APNSKeyID != "" {
+			apnsClient, err = push.New(push.Config{
+				KeyID:       cfg.APNSKeyID,
+				TeamID:      cfg.APNSTeamID,
+				BundleID:    cfg.APNSBundleID,
+				P8Key:       cfg.APNSP8Key,
+				Environment: cfg.APNSEnvironment,
+			})
+			if err != nil {
+				// The key is malformed. Refusing to start beats running with
+				// push silently disabled, which is indistinguishable from
+				// nobody having opted in.
+				logger.Error("APNs client init failed", "err", err)
+				os.Exit(1)
+			}
+			logger.Info("push enabled", "environment", cfg.APNSEnvironment, "bundle", cfg.APNSBundleID)
+		}
+		river.AddWorker(workers, &jobs.SendPushWorker{Pool: pool, APNs: apnsClient})
 		river.AddWorker(workers, &jobs.JanitorWorker{Pool: pool})
 		fanoutAff := &jobs.FanoutAffinityRefreshWorker{Pool: pool}
 		fanoutScan := &jobs.FanoutScanConcertsWorker{Pool: pool, Fallback: jobs.FallbackLocation{
@@ -381,6 +410,7 @@ func main() {
 			SnapshotCache: webhttp.NewSnapshotCache(200),
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
+		devicesH = &webhttp.DevicesHandler{Pool: pool}
 		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc, CookieDomain: cfg.SessionCookieDomain}
 		subscribedH = &webhttp.SubscribedArtistsHandler{
 			Pool:    pool,
@@ -454,6 +484,7 @@ func main() {
 		api.Get("/site-info", (&webhttp.SiteInfoHandler{
 			ContactEmail:  cfg.ContactEmail,
 			EffectiveDate: "2026-07-29",
+			MinIOSBuild:   cfg.MinIOSBuild,
 		}).Get)
 		// No nil guard on authDeps here any more. There used to be one, and it
 		// was the mechanism by which a bad ENCRYPTION_KEY produced a site with
@@ -491,10 +522,18 @@ func main() {
 			r.Post("/subscribed-artists/{artistID}", subscribedH.Post)
 			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
 			r.Get("/artists/search", subscribedH.SearchArtists)
+			r.Post("/devices", devicesH.Post)
+			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)
 			r.Delete("/account", accountH.Delete)
 		})
 	})
+
+	// Universal-link association. Outside /api and registered before the SPA
+	// catch-all, because Apple requires this exact path with no redirect and
+	// no extension — falling through to the SPA would serve HTML with a 200
+	// and iOS would simply decline to associate the domain, silently.
+	r.Get("/.well-known/apple-app-site-association", (&webhttp.AASAHandler{AppID: cfg.IOSAppID}).Get)
 
 	spaHandler := spa.Handler()
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) { spaHandler.ServeHTTP(w, r) })
@@ -607,14 +646,28 @@ func requestLogger(l *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
-			l.Info("http",
+			// X-CF-Client identifies the calling client, e.g.
+			// "ios/1.0.0 (build 42)". Logged from day one on purpose: when
+			// something breaks for app users only, this is the field that
+			// separates them from browser traffic, and it cannot be added
+			// retroactively to logs already written.
+			attrs := []any{
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
 				"dur_ms", time.Since(start).Milliseconds(),
 				"req_id", middleware.GetReqID(r.Context()),
-			)
+			}
+			if c := r.Header.Get("X-CF-Client"); c != "" {
+				// Bounded: this is attacker-controlled input on its way into
+				// a log line.
+				if len(c) > 64 {
+					c = c[:64]
+				}
+				attrs = append(attrs, "client", c)
+			}
+			l.Info("http", attrs...)
 		})
 	}
 }

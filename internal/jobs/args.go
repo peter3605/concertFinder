@@ -135,3 +135,25 @@ type SendInstantNotifyArgs struct {
 }
 
 func (SendInstantNotifyArgs) Kind() string { return "send_instant_notify" }
+
+// SendPushArgs delivers APNs notifications for a specific set of
+// newly-discovered concerts belonging to subscribed artists. Enqueued by the
+// ScanConcerts worker from the same point as SendInstantNotifyArgs.
+//
+// Separate from SendInstantNotifyArgs rather than a channel field on it: the
+// two have independent opt-ins, independent ledger channels, and independent
+// failure modes (SMTP vs APNs). One job that did both would retry the
+// delivered half whenever the other failed.
+type SendPushArgs struct {
+	UserID    uuid.UUID `json:"user_id"`
+	DedupKeys []string  `json:"dedup_keys"`
+}
+
+func (SendPushArgs) Kind() string { return "send_push" }
+
+// InsertOpts bounds retries. River's default of 25 would keep re-pushing at a
+// device that is gone; the worker retires permanently-dead tokens on its own,
+// so the remaining retryable failures are transient and a handful is enough.
+func (SendPushArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: PushMaxAttempts}
+}

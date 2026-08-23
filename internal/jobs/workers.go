@@ -225,11 +225,15 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		"retry_after", retryAfter,
 	)
 
-	// Instant-notify hook. Only fires when the user opted in AND is
-	// subscribed to at least one artist that had a net-new concert. Errors
-	// are logged but don't fail the scan.
-	if w.River != nil && user.InstantNotifyOptIn && user.Email != "" {
-		w.enqueueInstantNotify(ctx, user, found)
+	// Notification hooks. Both fire only when the user opted into that
+	// channel AND is subscribed to at least one artist that had a net-new
+	// concert. Errors are logged but don't fail the scan.
+	//
+	// The two are independent on purpose: opting into push does not imply
+	// email, the ledger channels are separate (migration 0016), and a user
+	// opted into both must receive both.
+	if w.River != nil {
+		w.enqueueNotifications(ctx, user, found)
 	}
 
 	// Surface incompleteness to river so the job retries (bounded by
@@ -270,11 +274,22 @@ func scanQuotaFor(artists int) int {
 	return artists * 2
 }
 
-// enqueueInstantNotify picks the subset of just-computed concerts that
-// (a) are future-dated, (b) belong to a subscribed artist, and (c) have
-// never been in a previous digest/instant email. If any survive, enqueue
-// a SendInstantNotify job with just those dedup_keys.
-func (w *ScanConcertsWorker) enqueueInstantNotify(ctx context.Context, user db.User, found []concerts.Concert) {
+// enqueueNotifications picks the subset of just-computed concerts that
+// (a) are future-dated and (b) belong to a subscribed artist, then enqueues
+// one job per opted-in channel carrying whatever that channel has not
+// already sent.
+//
+// The candidate set is computed once and the *ledger filter* is per channel.
+// Doing it the other way around — filtering once and fanning out — is the
+// silent-suppression bug migration 0016 documents: whichever channel ran
+// first would consume the other's candidates, and a user opted into both
+// would receive exactly one, with no error anywhere.
+func (w *ScanConcertsWorker) enqueueNotifications(ctx context.Context, user db.User, found []concerts.Concert) {
+	wantsEmail := user.InstantNotifyOptIn && user.Email != ""
+	wantsPush := user.PushOptIn
+	if !wantsEmail && !wantsPush {
+		return
+	}
 	subs, err := db.GetSubscribedArtistIDs(ctx, w.Pool, user.ID)
 	if err != nil || len(subs) == 0 {
 		return
@@ -293,24 +308,37 @@ func (w *ScanConcertsWorker) enqueueInstantNotify(ctx context.Context, user db.U
 	if len(candidates) == 0 {
 		return
 	}
-	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, db.ChannelEmail, candidates)
-	if err != nil {
-		slog.Warn("instant notify: filter unsent failed", "err", err, "user", user.ID)
-		return
-	}
-	toSend := make([]string, 0, len(unsent))
-	for _, k := range candidates {
-		if _, ok := unsent[k]; ok {
-			toSend = append(toSend, k)
+	if wantsEmail {
+		if keys := w.unsentFor(ctx, user, db.ChannelEmail, candidates); len(keys) > 0 {
+			if _, err := w.River.Insert(ctx, SendInstantNotifyArgs{UserID: user.ID, DedupKeys: keys}, nil); err != nil {
+				slog.Warn("instant notify: enqueue failed", "err", err, "user", user.ID)
+			}
 		}
 	}
-	if len(toSend) == 0 {
-		return
+	if wantsPush {
+		if keys := w.unsentFor(ctx, user, db.ChannelPush, candidates); len(keys) > 0 {
+			if _, err := w.River.Insert(ctx, SendPushArgs{UserID: user.ID, DedupKeys: keys}, nil); err != nil {
+				slog.Warn("push: enqueue failed", "err", err, "user", user.ID)
+			}
+		}
 	}
-	_, err = w.River.Insert(ctx, SendInstantNotifyArgs{UserID: user.ID, DedupKeys: toSend}, nil)
+}
+
+// unsentFor returns the candidates this channel has not already delivered,
+// in the order they were given.
+func (w *ScanConcertsWorker) unsentFor(ctx context.Context, user db.User, ch db.Channel, candidates []string) []string {
+	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, ch, candidates)
 	if err != nil {
-		slog.Warn("instant notify: enqueue failed", "err", err, "user", user.ID)
+		slog.Warn("notify: filter unsent failed", "err", err, "user", user.ID, "channel", string(ch))
+		return nil
 	}
+	out := make([]string, 0, len(unsent))
+	for _, k := range candidates {
+		if _, ok := unsent[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // LocationKey produces the canonical string used as user_concert_snapshots.location_key
@@ -586,6 +614,13 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		{"concert_cache", func(c context.Context) (int64, error) { return db.PruneConcertCache(c, w.Pool, 7) }},
 		{"past_concerts", func(c context.Context) (int64, error) { return db.PrunePastConcerts(c, w.Pool, 7) }},
 		{"oauth_handshakes", func(c context.Context) (int64, error) { return db.PruneExpiredHandshakes(c, w.Pool) }},
+		// Single-use, so most rows vanish on redemption; these are the
+		// abandoned logins.
+		{"mobile_auth_codes", func(c context.Context) (int64, error) { return db.PruneExpiredMobileAuthCodes(c, w.Pool) }},
+		// Tokens APNs retired as permanently dead. The 30-day delay lets a
+		// device that reinstalls re-register onto its existing row instead
+		// of racing a delete.
+		{"disabled_devices", func(c context.Context) (int64, error) { return db.PruneDisabledDevices(c, w.Pool, 30) }},
 		// Sessions were the one table with an expiry and no reaper. Both
 		// nightly fanout workers scan this table, so dead rows cost every
 		// night, forever.
