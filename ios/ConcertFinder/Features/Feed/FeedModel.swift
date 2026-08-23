@@ -12,6 +12,14 @@ final class FeedModel {
     private(set) var events: [Event] = []
     private(set) var facets: Facets = .empty
     private(set) var location: UserLocation?
+    /// Whether the feed is being computed against the deployment's fallback
+    /// city rather than one the user chose.
+    ///
+    /// This comes from `GET /me/location`, **not** from the feed response —
+    /// the feed embeds a narrower location struct with no `is_default` field,
+    /// so reading it there is false every time and the prompt never appears.
+    /// One extra request on load, once.
+    private(set) var isUsingFallbackLocation = false
     private(set) var computedAt: Date?
     private(set) var complete = true
     private(set) var retryAfter: Date?
@@ -65,6 +73,16 @@ final class FeedModel {
             apply(cached)
         }
         await load()
+        await refreshLocationState()
+    }
+
+    /// Asks the location endpoint whether the user has actually chosen one.
+    /// Failure is silent: not knowing means not prompting, which is the safe
+    /// direction — a spurious "set your location" banner over a location the
+    /// user did set would be worse than no banner.
+    func refreshLocationState() async {
+        guard let current = try? await api.location() else { return }
+        isUsingFallbackLocation = current.usesFallback
     }
 
     func load() async {

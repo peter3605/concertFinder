@@ -175,12 +175,20 @@ struct EventDetailView: View {
     }
 
     private func openInMaps() {
-        // Geocoded by Maps from the venue string rather than by us: the feed
-        // does not carry venue coordinates, and a wrong pin is worse than
-        // letting Maps search.
-        let query = "\(event.venue), \(event.location)"
-        var components = URLComponents(string: "http://maps.apple.com/")
-        components?.queryItems = [URLQueryItem(name: "q", value: query)]
+        var components = URLComponents(string: "https://maps.apple.com/")
+        var items = [URLQueryItem(name: "q", value: "\(event.venue), \(event.location)")]
+        // Most events carry venue coordinates. Passing them drops an exact
+        // pin instead of making Maps search a venue name, which is ambiguous
+        // for chains ("The Fillmore") and multi-room complexes. The name is
+        // still sent as `q` so the pin is labelled rather than anonymous.
+        //
+        // They are omitempty on the wire, so treat them as optional and fall
+        // back to the search — a wrong pin is worse than letting Maps look.
+        if let latitude = event.latitude, let longitude = event.longitude,
+           latitude != 0 || longitude != 0 {
+            items.append(URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"))
+        }
+        components?.queryItems = items
         if let url = components?.url {
             UIApplication.shared.open(url)
         }

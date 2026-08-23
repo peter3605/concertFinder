@@ -3,13 +3,22 @@ import Testing
 
 @testable import ConcertFinder
 
-/// Decoding tests against captured real responses, not hand-written literals
-/// (plan §8). A literal encodes what we *think* the server sends; a fixture
-/// encodes what it actually sent.
+/// Decoding tests against golden fixtures (plan §8).
 ///
-/// Two clients and no contract test is how a field rename reaches the App
-/// Store, so these are the cheap half of that guarantee: the Go side has the
-/// matching assertions in internal/http.
+/// **The fixtures in `Fixtures/` are generated, not hand-written.** They are
+/// produced by `TestGoldenFixtures` in `internal/http`, which marshals the
+/// real Go response structs. Do not edit them by hand — regenerate with:
+///
+///     go test ./internal/http -run TestGoldenFixtures -update
+///
+/// That is the whole contract check, and both halves are load-bearing:
+/// renaming a `json` tag in Go fails the Go test, and regenerating without
+/// updating these models fails the tests below. Two clients and no contract
+/// test is how a field rename reaches the App Store.
+///
+/// This is not academic. The first run of the generator caught a fabricated
+/// `is_default` on the feed's location object that the server never sends —
+/// and a test here that asserted it was true, passing against the fabrication.
 struct ModelDecodingTests {
 
     // The decoder configuration must match APIClient's exactly, or these
@@ -92,15 +101,47 @@ struct ModelDecodingTests {
         #expect(withoutFraction.computedAt != nil)
     }
 
-    @Test func decodesEmptyFeedAndDefaultLocationFlag() throws {
+    @Test func decodesEmptyFeed() throws {
         let response = try Self.decode(ConcertsResponse.self, "empty-feed")
 
         #expect(response.events.isEmpty)
         #expect(response.count == 0)
         #expect(response.facets.genres.isEmpty)
-        // is_default drives a "set your location" prompt rather than silently
-        // showing someone else's city.
-        #expect(response.location.usesFallback)
+        #expect(response.complete)
+    }
+
+    /// The feed's location object is a *narrower* struct than the one
+    /// `GET /me/location` returns: no `display_name`, no `is_default`.
+    ///
+    /// Reading `isDefault` off the feed therefore yields nil — false — every
+    /// time, so a "set your location" prompt driven from here would never
+    /// appear and the user would be shown the deployment's fallback city as
+    /// though they had chosen it. `FeedModel` asks `/me/location` instead.
+    /// `TestFeedLocationHasNoDisplayFields` pins the Go side.
+    @Test func feedLocationCarriesNoDisplayFields() throws {
+        for fixture in ["festival", "empty-feed", "incomplete-scan"] {
+            let response = try Self.decode(ConcertsResponse.self, fixture)
+            #expect(response.location.isDefault == nil,
+                    "\(fixture): the feed must not be a source of is_default")
+            #expect(response.location.displayName == nil,
+                    "\(fixture): the feed must not be a source of display_name")
+            #expect(!response.location.usesFallback)
+            // What it does carry, and what the scan actually used.
+            #expect(response.location.radiusMiles > 0)
+        }
+    }
+
+    /// Events carry venue coordinates, so the detail screen can drop an exact
+    /// Maps pin rather than making Maps search a venue name. They are
+    /// omitempty on the wire, so the client must treat them as optional.
+    @Test func decodesEventCoordinates() throws {
+        let response = try Self.decode(ConcertsResponse.self, "festival")
+        let event = try #require(response.events.first)
+
+        let latitude = try #require(event.latitude)
+        let longitude = try #require(event.longitude)
+        #expect(latitude != 0)
+        #expect(longitude != 0)
     }
 
     /// `complete: false` and `retry_after` are the two states the UI has to
@@ -111,7 +152,6 @@ struct ModelDecodingTests {
         #expect(!response.complete)
         #expect(response.refreshing)
         #expect(response.retryAfter != nil)
-        #expect(!response.location.usesFallback)
     }
 
     @Test func decodesThrottledRefresh() throws {
