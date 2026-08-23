@@ -20,6 +20,9 @@ type User struct {
 	Email              string
 	DigestOptIn        bool
 	InstantNotifyOptIn bool
+	// PushOptIn is deliberately not a reuse of InstantNotifyOptIn: "push me
+	// but do not email me" is an ordinary preference. See migration 0016.
+	PushOptIn bool
 }
 
 // UpsertUserBySpotifyID inserts a new user or updates an existing one keyed by
@@ -42,11 +45,11 @@ ON CONFLICT (spotify_user_id) DO UPDATE SET
   email                   = COALESCE(EXCLUDED.email, users.email),
   updated_at              = now()
 RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-          COALESCE(email, ''), digest_opt_in, instant_notify_opt_in
+          COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in
 `
 	row := pool.QueryRow(ctx, q, u.ID, u.SpotifyUserID, u.DisplayName, u.EncryptedRefreshToken, u.RefreshTokenNonce, u.Email)
 	var out User
-	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken, &out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn); err != nil {
+	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken, &out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn, &out.PushOptIn); err != nil {
 		return User{}, fmt.Errorf("upsert user: %w", err)
 	}
 	return out, nil
@@ -56,10 +59,10 @@ RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_to
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, error) {
 	const q = `
 SELECT id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in
+       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in
 FROM users WHERE id = $1`
 	var u User
-	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn)
+	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.PushOptIn)
 	if err != nil {
 		return User{}, err
 	}

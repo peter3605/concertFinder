@@ -293,7 +293,7 @@ func (w *ScanConcertsWorker) enqueueInstantNotify(ctx context.Context, user db.U
 	if len(candidates) == 0 {
 		return
 	}
-	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, candidates)
+	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, db.ChannelEmail, candidates)
 	if err != nil {
 		slog.Warn("instant notify: filter unsent failed", "err", err, "user", user.ID)
 		return
@@ -425,7 +425,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	// old "every candidate happens to be unsent" heuristic also fired for
 	// an established user who had just moved cities, silently withholding
 	// everything past the horizon from them.
-	priorSends, err := db.CountDigestSent(ctx, w.Pool, user.ID)
+	priorSends, err := db.CountDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail)
 	if err != nil {
 		return err
 	}
@@ -444,7 +444,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		byKey[c.DedupKey] = c
 	}
 	// Exact "net new" — filter out anything we've already emailed this user.
-	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, candidateKeys)
+	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, db.ChannelEmail, candidateKeys)
 	if err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	// duplicate-send-on-retry, which is the less annoying failure mode for
 	// end users. A retry would find these keys already in user_digest_sent
 	// and skip them.
-	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, sendKeys); err != nil {
+	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, sendKeys); err != nil {
 		return err
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
@@ -511,7 +511,7 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 		return nil // opted out between enqueue and run
 	}
 	// Filter out anything already sent (idempotent under retry).
-	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, job.Args.DedupKeys)
+	unsent, err := db.FilterUnsentDedupKeys(ctx, w.Pool, user.ID, db.ChannelEmail, job.Args.DedupKeys)
 	if err != nil {
 		return err
 	}
@@ -556,7 +556,7 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	}
 	// Record the send BEFORE hitting SMTP; same at-most-once trade-off as
 	// the daily digest.
-	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, sendKeys); err != nil {
+	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, sendKeys); err != nil {
 		return err
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
