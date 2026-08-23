@@ -2,12 +2,14 @@
   "location": {
     "latitude": 38.8951,
     "longitude": -77.0364,
-    "radius_miles": 50,
-    "is_default": true
+    "radius_miles": 50
   },
   "count": 0,
   "events": [],
-  "facets": { "genres": [], "venues": [] },
+  "facets": {
+    "genres": [],
+    "venues": []
+  },
   "computed_at": "2026-08-23T09:14:22Z",
   "refreshing": false,
   "complete": true

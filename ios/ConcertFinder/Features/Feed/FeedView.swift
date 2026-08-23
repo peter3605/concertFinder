@@ -106,7 +106,7 @@ struct FeedView: View {
         }
         // A location the user never set is the deployment's fallback, so
         // prompt rather than silently showing someone else's city.
-        if let location = model.location, location.usesFallback {
+        if model.isUsingFallbackLocation {
             NavigationLink(value: FeedRoute.location) {
                 HStack(spacing: Metrics.tight) {
                     Image(systemName: "location.slash")

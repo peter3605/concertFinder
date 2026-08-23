@@ -65,6 +65,12 @@ struct Event: Codable, Hashable, Identifiable, Sendable {
     let city: String
     let state: String?
     let country: String?
+    /// Venue coordinates. Present on most events and omitted when the source
+    /// gave none, so always optional — but when they are here, use them: they
+    /// put an exact pin in Maps instead of making it search for a venue name,
+    /// which is ambiguous for chains and multi-room complexes.
+    let latitude: Double?
+    let longitude: Double?
     var acts: [Act]
     let links: [TicketLink]
 
@@ -76,14 +82,25 @@ struct Event: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// A saved search location.
+///
+/// **Two endpoints return different subsets of this.** `GET /me/location`
+/// sends all five fields. `GET /me/concerts` embeds a narrower struct —
+/// latitude, longitude, radius and nothing else — so `displayName` and
+/// `isDefault` are always nil there.
+///
+/// That asymmetry is easy to miss and fails silently: reading `isDefault` off
+/// the feed response yields false every time, so a "set your location" prompt
+/// driven from it never fires and the user is shown the deployment's fallback
+/// city as though they had chosen it. Ask `/me/location` for that answer.
+/// `TestFeedLocationHasNoDisplayFields` in internal/http pins the distinction.
 struct UserLocation: Codable, Hashable, Sendable {
     let latitude: Double
     let longitude: Double
     let radiusMiles: Int
     let displayName: String?
     /// True when the server served the deployment-wide fallback because the
-    /// user has no saved location. Drives a "set your location" prompt rather
-    /// than silently showing someone else's city.
+    /// user has no saved location. Only meaningful from `GET /me/location`.
     let isDefault: Bool?
 
     var usesFallback: Bool { isDefault ?? false }
