@@ -1,6 +1,10 @@
 # ConcertFinder for iOS — Project Plan
 
-**Status:** proposal. Nothing in this document has been built.
+**Status:** implemented and deployed as of 2026-08-23 (`35ed72c`, PR #14).
+Everything in this document that is code has been built; what remains is
+gated on third-party accounts. See [§0](#0-where-this-stands) before reading
+further — the body below is the original plan, annotated where reality has
+moved past it.
 **Target:** a native SwiftUI app, feature-parity with the web SPA plus push
 notifications, distributed through the App Store.
 **Written against:** `257bbfc` (`Merge pull request #11 from
@@ -13,8 +17,98 @@ that file explains what breaks without them.
 
 ---
 
+## 0. Where this stands
+
+*Added 2026-08-23, after the implementation landed. Read this first; the rest
+of the document is the plan as written, and its tense is aspirational.*
+
+### Done and live
+
+The backend half is deployed at `https://concertfinder.app`:
+
+- **§4.1 mobile auth** — bearer resolution in `RequireUser`, CSRF pass-through
+  for header-authenticated requests only, the one-time code exchange, the AASA
+  route, and a real SPA page at `/app/auth/callback`.
+- **§4.2 push** — migration `0016`, `internal/push`, `SendPushWorker`, the
+  device endpoints, `push_opt_in`, and the channel-keyed ledger.
+- **§4.3 API surface** — `X-CF-Client` logged, `min_ios_build` on
+  `/api/site-info`. On versioning the plan offered two options; the
+  **additive-only policy** was taken and is written into `CLAUDE.md`. There is
+  no `/api/v1/`.
+- **§5–§6 the app** — all seven screens, offline cache, first-run experience,
+  iPad layout, push registration. `ios/`, built from `ios/project.yml`.
+- **§8 testing** — the Go/Swift contract check (`TestGoldenFixtures`), the
+  database-backed ledger tests, Swift unit and UI tests. CI runs all of it.
+
+Two things the plan predicted were confirmed live in production before the fix
+shipped: `/.well-known/apple-app-site-association` was serving SPA HTML, and
+`/app/auth/callback` was bouncing silently to the feed.
+
+### Not done, and none of it is engineering
+
+**1. Spotify Extended Quota Mode ([§3.2](#32-spotify-development-mode)) —
+start this first.** Multi-week turnaround, approval not guaranteed, and
+nothing downstream shortens it. Until it is granted, only allowlisted accounts
+can sign in — *including App Review's own reviewer*, which is why §3.2 says to
+submit with an allowlisted demo account and treat Extended Quota as the thing
+that makes the app usable by anyone who downloads it.
+
+**2. Apple Developer account.** Gives the App ID, and therefore the bundle
+identifier, the APNs key, and signing. Three placeholders wait on it:
+
+| Placeholder | Where | Note |
+|---|---|---|
+| Bundle identifier | `ios/project.yml` | Currently `com.concertfinder.app`, a guess. Must match the real App ID, and is also `APNS_BUNDLE_ID` and half of `IOS_APP_ID`. |
+| Spotify logo asset | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | A typographic placeholder. The real mark must come from Spotify's brand kit — it may not be recreated. |
+| Signing | Xcode / App Store Connect | — |
+
+**3. Server-side iOS configuration — apply Terraform LAST.**
+
+> ⚠️ `APNS_P8_KEY` is in `operator_secrets`, so `terraform apply` creates it
+> holding `REPLACE_ME`, and `render-env.sh` refuses to write the env file
+> while any parameter holds that sentinel. **Applying before you have the key
+> breaks the next deploy.** Run `./scripts/set-secrets.sh` in the same sitting
+> — it offers `[f]` to read the `.p8` from a file, or `[-]` to mark it unused.
+> Runbook: `docs/aws-deploy.md` §7a.
+
+`MOBILE_CALLBACK_URL` and `IOS_APP_ID` are derived by Terraform from
+`var.domain` and `var.ios_bundle_id`, so they cannot drift from the domain the
+certificate is issued for.
+
+**4. M8 submission.** Privacy labels, screenshots, demo account, review notes.
+[§9](#9-app-store-submission) is the checklist. Raise
+[§10.1](#101-guideline-511v-and-server-side-spotify-tokens) (server-side
+third-party tokens) and [§10.2](#102-guideline-48-and-sign-in-with-apple)
+(Sign in with Apple) in review notes rather than discovering them at review.
+
+### Two open items worth a decision, not just execution
+
+- **§10.1's fallback architecture.** If Apple reads Guideline 5.1.1(v)
+  literally, the app must hold the Spotify token itself. That is a large
+  change and it degrades background freshness substantially. Know the answer
+  before M8; do not design it under submission pressure.
+- **The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**
+  The rate ledger models per-user limits, not Ticketmaster's 5000/day account
+  total, so exceeding it degrades feeds silently. The web app is bounded by
+  the Spotify allowlist; a public App Store listing is not. This should exist
+  before the app is genuinely open — which is to say, before Extended Quota
+  Mode lands, not after.
+
+### What is deliberately not built
+
+- **`since` on `/me/concerts`** ([§4.3](#43-api-surface-adjustments)) — "Not
+  required for v1. Measure before building."
+- **An affinity view.** `/api/me/affinity` is the one endpoint no client
+  calls; the web app does not call it either, and there is no affinity screen
+  in the seven-page parity target. §6's passing reference to "the affinity
+  view" describes where attribution would go if one existed.
+- Everything in [§11](#11-explicitly-out-of-scope).
+
+---
+
 ## Table of Contents
 
+0. [**Where this stands**](#0-where-this-stands) — current status and what is left
 1. [Summary](#1-summary) · [One backend, two clients](#11-one-backend-two-clients)
 2. [What the app is building on](#2-what-the-app-is-building-on)
 3. [The three things that gate this project](#3-the-three-things-that-gate-this-project)
