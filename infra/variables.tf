@@ -63,3 +63,14 @@ variable "billing_alarm_threshold_usd" {
   type        = number
   default     = 15
 }
+
+variable "email_delivery_mode" {
+  description = "How the app sends mail: 'log' writes to slog instead of sending (safe while SES is unverified or in sandbox), 'smtp' actually delivers via SES. Kept a variable rather than hardcoded so flipping it is a Terraform apply, not a hand-edit on the box."
+  type        = string
+  default     = "log"
+
+  validation {
+    condition     = contains(["log", "smtp"], var.email_delivery_mode)
+    error_message = "email_delivery_mode must be \"log\" or \"smtp\"."
+  }
+}
