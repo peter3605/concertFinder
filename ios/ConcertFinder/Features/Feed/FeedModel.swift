@@ -66,6 +66,36 @@ final class FeedModel {
 
     var isEmpty: Bool { events.isEmpty && !isLoading }
 
+    /// Whether to show the first-run experience instead of the feed.
+    ///
+    /// Narrow on purpose. It is a genuine cold start — no snapshot has ever
+    /// been served for this account — and a scan is running. It must NOT
+    /// fire for:
+    ///
+    /// - an established user whose feed is briefly empty (they have a
+    ///   completed first run recorded);
+    /// - someone in a quiet week with no upcoming shows (nothing is
+    ///   refreshing, so there is nothing to wait for);
+    /// - an offline launch (the cached snapshot renders instead).
+    ///
+    /// Getting this wrong the other way — showing "setting up" to a user who
+    /// set up months ago — is worse than showing them an empty feed.
+    var isFirstRun: Bool {
+        guard !FirstRunTracker.hasCompleted else { return false }
+        return isRefreshing || (isLoading && events.isEmpty)
+    }
+
+    /// Records that the account has served a real feed at least once, so the
+    /// first-run screen never returns.
+    private func markFirstRunCompleteIfSettled(_ response: ConcertsResponse) {
+        // "Settled" means a scan finished, not that it found anything: a user
+        // whose area genuinely has no shows has still completed setup, and
+        // showing them the waiting screen forever would be the worse failure.
+        if !response.refreshing {
+            FirstRunTracker.markCompleted()
+        }
+    }
+
     /// Renders the cached snapshot immediately so a cold launch shows content
     /// rather than a spinner, then goes to the network.
     func start() async {
@@ -91,6 +121,7 @@ final class FeedModel {
             let response = try await api.concerts(filters: filters)
             apply(response)
             await SnapshotCache.shared.store(response)
+            markFirstRunCompleteIfSettled(response)
             error = nil
             isShowingCachedData = false
             handlePollingState(refreshing: response.refreshing)
@@ -138,6 +169,10 @@ final class FeedModel {
     }
 
     private func apply(_ entry: SnapshotCache.Entry) {
+        // A snapshot on disk is proof the account has been through setup, so
+        // an offline cold launch shows the cached feed rather than "setting
+        // up" over content we already have.
+        FirstRunTracker.markCompleted()
         events = entry.events
         facets = entry.facets
         location = entry.location
@@ -180,6 +215,7 @@ final class FeedModel {
             let response = try await api.concerts(filters: filters)
             apply(response)
             await SnapshotCache.shared.store(response)
+            markFirstRunCompleteIfSettled(response)
             if !response.refreshing {
                 stopPolling()
                 return false

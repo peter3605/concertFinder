@@ -41,6 +41,26 @@ jobs:
         working-directory: ios
         run: |
           set -o pipefail
+          # Pick a simulator that actually exists on this runner image rather
+          # than naming one. Device line-ups change between Xcode releases —
+          # "iPhone 17" is not a device at all on Xcode 26, only the Pro,
+          # Pro Max and 17e are — so a hardcoded name is a build that breaks
+          # on an image update for no real reason.
+          udid=$(xcrun simctl list devices available --json \
+            | python3 -c "
+import json, sys
+devices = json.load(sys.stdin)['devices']
+for runtime in sorted(devices, reverse=True):
+    if 'iOS' not in runtime:
+        continue
+    for d in devices[runtime]:
+        if d.get('isAvailable') and d['name'].startswith('iPhone'):
+            print(d['udid'])
+            raise SystemExit
+raise SystemExit('no available iPhone simulator')
+")
+          echo "Using simulator $udid"
+
           # xcbeautify ships on the GitHub macOS images, but piping through a
           # tool that might not exist would swallow the build behind a
           # "command not found". Fall back to raw output instead.
@@ -52,6 +72,6 @@ jobs:
           xcodebuild test \
             -project ConcertFinder.xcodeproj \
             -scheme ConcertFinder \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
+            -destination "id=$udid" \
             CODE_SIGNING_ALLOWED=NO \
             | "${fmt[@]}"

@@ -24,19 +24,43 @@ extension Color {
 /// cards, the artists screen, the affinity view. It lives here as one
 /// component precisely so a screen added later cannot forget it (plan §6).
 ///
-/// The wordmark is text rather than a bundled logo asset: shipping Spotify's
-/// mark means following their brand guidelines on size, clear space and
-/// colour, and a wrong asset is a worse compliance story than an honest
-/// typographic credit. Swap in the official asset before submission.
+/// ## Before submission: replace the placeholder mark
+///
+/// This renders a typographic credit, not Spotify's logo. That is deliberate
+/// and it is **not finished work**: Spotify's Design Guidelines require the
+/// actual green mark, at or above a stated minimum size, with clear space
+/// around it, in one of the approved colourways, and the wordmark may not be
+/// recreated or substituted.
+///
+/// Drawing an approximation here would be worse than plain text — it would be
+/// a *wrong* logo that looks deliberate, which is a harder review conversation
+/// than an obvious placeholder. The asset has to come from Spotify's own brand
+/// resource kit; it cannot be reconstructed from a description.
+///
+/// To finish: add the official PNG/SVG to the asset catalogue as
+/// `spotify-logo`, then swap the `Image(systemName:)` below for it and keep
+/// `minimumLogoHeight` at whatever the current guidelines state. The size is
+/// pulled out as a named constant so the guideline value lives in one place
+/// rather than inside a layout.
 struct SpotifyAttribution: View {
+    /// Spotify's guidelines set a minimum rendered height for the mark.
+    /// Scaled so it holds at accessibility text sizes rather than being
+    /// dwarfed by the label beside it.
+    @ScaledMetric(relativeTo: .caption2) private var minimumLogoHeight: CGFloat = 16
+
     var body: some View {
         HStack(spacing: 6) {
+            // PLACEHOLDER — see the note above. Replace with the official
+            // asset before App Store submission.
             Image(systemName: "music.note")
                 .font(.caption2)
+                .frame(minHeight: minimumLogoHeight)
             Text("Powered by Spotify")
                 .font(.caption2)
         }
         .foregroundStyle(.secondary)
+        // One element: the mark is decorative once the label says the same
+        // thing, so VoiceOver should not read it twice.
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Powered by Spotify")
     }
