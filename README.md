@@ -19,10 +19,16 @@ Sign-in is limited to accounts on the Spotify allowlist: the app is in
 Development Mode, and Extended Quota Mode has not been granted. Anyone else
 gets a 403 explaining why rather than a generic failure.
 
-A native iOS client lives in `ios/` (see `docs/ios-app-plan.md`). Its
-server-side half — bearer auth, the mobile code exchange, APNs — is
-implemented; the Apple Developer configuration in Appendix A of that plan is
-not yet filled in, so mobile sign-in and push are inactive until it is.
+A native iOS client lives in `ios/`. Its server-side half — bearer auth, the
+mobile code exchange, APNs — is implemented and deployed; the Apple Developer
+configuration is not filled in, so mobile sign-in returns 501 and push no-ops
+until it is. **`docs/ios-app-plan.md` §0 is the current status and the ordered
+list of what is left** — start there rather than at the top of that document,
+whose body is the original plan and reads as aspirational.
+
+One ordering trap worth knowing before touching infrastructure: do not
+`terraform apply` until you have the APNs key, or `APNS_P8_KEY`'s placeholder
+will fail the next deploy. `docs/aws-deploy.md` §7a explains it.
 
 ## Quickstart
 
