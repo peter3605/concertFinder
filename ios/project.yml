@@ -46,7 +46,7 @@ targets:
         Debug:
           CF_API_BASE_URL: https://127.0.0.1:3000
         Release:
-          CF_API_BASE_URL: https://REPLACE_WITH_YOUR_DOMAIN
+          CF_API_BASE_URL: https://concertfinder.app
 
   ConcertFinderTests:
     type: bundle.unit-test

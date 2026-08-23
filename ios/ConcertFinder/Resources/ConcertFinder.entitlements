@@ -8,14 +8,15 @@
 	<key>aps-environment</key>
 	<string>development</string>
 
-	<!-- The universal link the OAuth callback returns to. The domain must
-	     serve /.well-known/apple-app-site-association over valid TLS with no
-	     redirect, which internal/http/aasa.go does. Replace with the real
-	     domain before the first device build — iOS caches the association,
-	     and a wrong one teaches the device the domain is not ours. -->
+	<!-- The universal link the OAuth callback returns to. iOS fetches
+	     /.well-known/apple-app-site-association from this domain to decide
+	     whether the app may claim its links; internal/http/aasa.go serves it
+	     over valid TLS with no redirect. The association only starts working
+	     once IOS_APP_ID is set on the server — until then that route 404s by
+	     design, rather than serving an association naming an empty app. -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>applinks:REPLACE_WITH_YOUR_DOMAIN</string>
+		<string>applinks:concertfinder.app</string>
 	</array>
 </dict>
 </plist>

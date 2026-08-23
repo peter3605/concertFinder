@@ -39,7 +39,9 @@ app never waits on a fan-out, and event grouping means a festival is one card
 rather than six. Roughly 80% of what an iOS app needs is already served.
 
 The remaining 20% is not evenly distributed. Three pieces of backend work
-are genuinely required before the first Swift file is useful:
+are genuinely required before the first Swift file is useful. (The third has
+since been resolved; the first two are implemented on the `ios-app` branch and
+ship when it does.)
 
 1. **Authentication has no non-browser path.** Sessions are an `HttpOnly`
    cookie established by a 302 redirect, and mutations require a
@@ -50,9 +52,11 @@ are genuinely required before the first Swift file is useful:
    new table, a new worker, and — least obviously — a change to the
    already-sent ledger, which currently cannot distinguish "emailed" from
    "pushed."
-3. **Nothing is deployed.** There is no HTTPS origin, so there is no OAuth
-   redirect target, no universal-link domain, and nothing for the app to
-   talk to.
+3. ~~**Nothing is deployed.**~~ **Resolved.** This was true when the plan was
+   written against `257bbfc`. The backend is now live at
+   `https://concertfinder.app` — EC2 `t4g.small` behind an Elastic IP, Neon
+   Postgres, Caddy TLS — so the OAuth redirect target, the universal-link
+   domain, and the API base URL all exist. See [§3.1](#31-the-backend-is-deployed).
 
 Beyond the engineering, two third-party gates bound what "App Store release"
 can mean. Spotify Development Mode caps who can authorize the app, which
@@ -218,16 +222,32 @@ privacy, terms. That is the parity target.
 
 ## 3. The three things that gate this project
 
-### 3.1 The backend is not deployed
+### 3.1 The backend is deployed
 
-`README.md` and `docs/design.md` §10.3 are explicit: Terraform exists in
-`/infra` and has never been applied; the GitHub Actions deploy has never
-succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset.
+**This section is resolved, and no longer gates anything.** It is kept rather
+than deleted because the reasoning still explains *why* the domain matters.
 
-An iOS app needs a stable HTTPS origin for three separate reasons — the
-Spotify redirect URI, the universal-link domain that receives the OAuth
-callback, and the API base URL itself. None of the three can be `127.0.0.1`.
-This is milestone zero and it is not optional.
+When this plan was written against `257bbfc`, Terraform had never been applied
+and the GitHub Actions deploy had never succeeded. That changed shortly
+afterwards — see `1ec3a4a` (config and secrets into SSM Parameter Store),
+`7086cc2` (Postgres from RDS to Neon), `1cabc7a` (DNS at the registrar), and
+`267535d` (the IAM path fix that made the parameter read work).
+
+The deployment today: `https://concertfinder.app`, an EC2 `t4g.small`
+(`i-00127627308ea91e1`) behind an Elastic IP, Neon Postgres over the direct
+endpoint, Caddy terminating TLS, secrets rendered from SSM at deploy time.
+`GET /api/healthz` returns `{"status":"ok"}`.
+
+The requirement it described stands and is now met: an iOS app needs a stable
+HTTPS origin for three separate reasons — the Spotify redirect URI, the
+universal-link domain that receives the OAuth callback, and the API base URL
+itself, none of which can be `127.0.0.1`.
+
+What remains here is narrower: the deployed binary predates the mobile auth
+work, and the iOS-specific configuration in
+[Appendix A](#appendix-a-new-configuration) is unset, so
+`/api/auth/login?client=ios` returns 501 and the association file 404s until
+that branch ships and those variables are filled in.
 
 ### 3.2 Spotify Development Mode
 
@@ -560,12 +580,13 @@ brand guidelines for the logo asset and minimum sizing.
 ## 7. Milestones
 
 Estimates assume one engineer working part-time and are ranges, not
-commitments. M0 and the Spotify application in [§3.2](#32-spotify-development-mode)
-should start in parallel on day one.
+commitments. M0 is complete ([§3.1](#31-the-backend-is-deployed)); the Spotify
+application in [§3.2](#32-spotify-development-mode) is now the longest pole and
+should start immediately if it has not already.
 
 | # | Milestone | Deliverable | Est. |
 |---|---|---|---|
-| **M0** | **Deploy the backend** | Terraform applied, EC2 + Neon + Caddy live, GitHub Actions deploy green, smoke test passing, a real HTTPS domain. `docs/aws-deploy.md` is the runbook. | 1–2 wk |
+| ~~**M0**~~ | ~~**Deploy the backend**~~ | **Done.** Terraform applied, EC2 + Neon + Caddy live at `https://concertfinder.app`, deploy green, health check passing. `docs/aws-deploy.md` is the runbook. | — |
 | **M1** | **Mobile auth on the server** | Bearer resolution in `RequireUser`, CSRF pass-through, one-time code exchange, AASA served, `X-CF-Client` logged. Go tests for each. | 1 wk |
 | **M2** | **iOS skeleton** | XcodeGen project, CI job, `APIClient`, Keychain, full login round-trip to a screen that prints the user's display name. | 1 wk |
 | **M3** | **Feed** | Month-sectioned events, event detail, filters, facets, SWR polling, pull-to-refresh, the `complete`/`retry_after` states, offline cache. The bulk of the app. | 2–3 wk |
