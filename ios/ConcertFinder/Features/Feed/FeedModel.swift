@@ -1,0 +1,309 @@
+import Foundation
+import Observation
+import UIKit
+
+/// State and behaviour for the concerts feed.
+///
+/// The polling rules here are the ones plan §5.3 calls out as worth designing
+/// rather than discovering.
+@MainActor
+@Observable
+final class FeedModel {
+    private(set) var events: [Event] = []
+    private(set) var facets: Facets = .empty
+    private(set) var location: UserLocation?
+    /// Whether the feed is being computed against the deployment's fallback
+    /// city rather than one the user chose.
+    ///
+    /// This comes from `GET /me/location`, **not** from the feed response —
+    /// the feed embeds a narrower location struct with no `is_default` field,
+    /// so reading it there is false every time and the prompt never appears.
+    /// One extra request on load, once.
+    private(set) var isUsingFallbackLocation = false
+    private(set) var computedAt: Date?
+    private(set) var complete = true
+    private(set) var retryAfter: Date?
+    private(set) var isRefreshing = false
+    private(set) var isLoading = false
+    private(set) var error: APIError?
+    /// True when what is on screen came from disk rather than the network.
+    private(set) var isShowingCachedData = false
+
+    var filters: Filters {
+        didSet {
+            guard filters != oldValue else { return }
+            FilterStore.save(filters)
+            Task { await load() }
+        }
+    }
+
+    private let api: APIClient
+    private var pollTask: Task<Void, Never>?
+    private var pollCount = 0
+
+    /// The web client polls every 10s; matching it keeps the two clients'
+    /// load profiles the same.
+    private static let pollInterval: Duration = .seconds(10)
+
+    /// A hard ceiling on polling — ~10 minutes. The web client bounds its
+    /// loop and the app must too, or a scan that never completes turns into
+    /// an indefinite timer.
+    private static let maxPolls = 60
+
+    init(api: APIClient) {
+        self.api = api
+        self.filters = FilterStore.load()
+    }
+
+    /// Events grouped into month sections, which is how the feed reads.
+    var sections: [(key: String, heading: String, events: [Event])] {
+        let grouped = Dictionary(grouping: events, by: { $0.date.monthKey })
+        return grouped.keys.sorted().map { key in
+            let items = (grouped[key] ?? []).sorted { $0.date < $1.date }
+            return (key: key, heading: items.first?.date.monthHeading ?? key, events: items)
+        }
+    }
+
+    var isEmpty: Bool { events.isEmpty && !isLoading }
+
+    /// Whether to show the first-run experience instead of the feed.
+    ///
+    /// Narrow on purpose. It is a genuine cold start — no snapshot has ever
+    /// been served for this account — and a scan is running. It must NOT
+    /// fire for:
+    ///
+    /// - an established user whose feed is briefly empty (they have a
+    ///   completed first run recorded);
+    /// - someone in a quiet week with no upcoming shows (nothing is
+    ///   refreshing, so there is nothing to wait for);
+    /// - an offline launch (the cached snapshot renders instead).
+    ///
+    /// Getting this wrong the other way — showing "setting up" to a user who
+    /// set up months ago — is worse than showing them an empty feed.
+    var isFirstRun: Bool {
+        guard !FirstRunTracker.hasCompleted else { return false }
+        return isRefreshing || (isLoading && events.isEmpty)
+    }
+
+    /// Records that the account has served a real feed at least once, so the
+    /// first-run screen never returns.
+    private func markFirstRunCompleteIfSettled(_ response: ConcertsResponse) {
+        // "Settled" means a scan finished, not that it found anything: a user
+        // whose area genuinely has no shows has still completed setup, and
+        // showing them the waiting screen forever would be the worse failure.
+        if !response.refreshing {
+            FirstRunTracker.markCompleted()
+        }
+    }
+
+    /// Renders the cached snapshot immediately so a cold launch shows content
+    /// rather than a spinner, then goes to the network.
+    func start() async {
+        if events.isEmpty, let cached = await SnapshotCache.shared.load() {
+            apply(cached)
+        }
+        await load()
+        await refreshLocationState()
+    }
+
+    /// Asks the location endpoint whether the user has actually chosen one.
+    /// Failure is silent: not knowing means not prompting, which is the safe
+    /// direction — a spurious "set your location" banner over a location the
+    /// user did set would be worse than no banner.
+    func refreshLocationState() async {
+        guard let current = try? await api.location() else { return }
+        isUsingFallbackLocation = current.usesFallback
+    }
+
+    func load() async {
+        isLoading = events.isEmpty
+        do {
+            let response = try await api.concerts(filters: filters)
+            apply(response)
+            await SnapshotCache.shared.store(response)
+            markFirstRunCompleteIfSettled(response)
+            error = nil
+            isShowingCachedData = false
+            handlePollingState(refreshing: response.refreshing)
+        } catch let apiError as APIError {
+            // A transient failure over cached content is a banner, not an
+            // error screen: replacing already-loaded data with an error is
+            // strictly worse than showing it with a note.
+            if apiError.isTransient, !events.isEmpty {
+                isShowingCachedData = true
+            }
+            error = apiError
+            stopPolling()
+        } catch {
+            self.error = .unknown(error.localizedDescription)
+            stopPolling()
+        }
+        isLoading = false
+    }
+
+    /// Pull-to-refresh and the manual refresh button.
+    func refresh() async {
+        do {
+            try await api.refreshConcerts()
+            await load()
+        } catch let apiError as APIError {
+            // A 429 here is expected, not exceptional — it carries when the
+            // throttle lifts and why, and both belong on screen.
+            if case .throttled(let retry, _) = apiError {
+                retryAfter = retry ?? retryAfter
+            }
+            error = apiError
+        } catch {
+            self.error = .unknown(error.localizedDescription)
+        }
+    }
+
+    private func apply(_ response: ConcertsResponse) {
+        events = response.events
+        facets = response.facets
+        location = response.location
+        computedAt = response.computedAt
+        complete = response.complete
+        retryAfter = response.retryAfter
+        isRefreshing = response.refreshing
+    }
+
+    private func apply(_ entry: SnapshotCache.Entry) {
+        // A snapshot on disk is proof the account has been through setup, so
+        // an offline cold launch shows the cached feed rather than "setting
+        // up" over content we already have.
+        FirstRunTracker.markCompleted()
+        events = entry.events
+        facets = entry.facets
+        location = entry.location
+        computedAt = entry.computedAt
+        complete = entry.complete
+        isShowingCachedData = true
+    }
+
+    // MARK: - Polling
+
+    private func handlePollingState(refreshing: Bool) {
+        if refreshing {
+            startPollingIfNeeded()
+        } else {
+            stopPolling()
+        }
+    }
+
+    private func startPollingIfNeeded() {
+        guard pollTask == nil else { return }
+        pollCount = 0
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.pollInterval)
+                guard let self, !Task.isCancelled else { return }
+                let shouldContinue = await self.pollOnce()
+                if !shouldContinue { return }
+            }
+        }
+    }
+
+    /// One poll. Returns whether to keep going.
+    private func pollOnce() async -> Bool {
+        pollCount += 1
+        guard pollCount <= Self.maxPolls else {
+            stopPolling()
+            return false
+        }
+        do {
+            let response = try await api.concerts(filters: filters)
+            apply(response)
+            await SnapshotCache.shared.store(response)
+            markFirstRunCompleteIfSettled(response)
+            if !response.refreshing {
+                stopPolling()
+                return false
+            }
+            return true
+        } catch {
+            // A transient error must not kill the loop or replace loaded
+            // data with an error screen — the scan is probably still running.
+            if let apiError = error as? APIError, apiError.isTransient {
+                return true
+            }
+            stopPolling()
+            return false
+        }
+    }
+
+    private func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+        isRefreshing = false
+    }
+
+    /// A 10-second timer that survives backgrounding is a battery complaint
+    /// and an App Review question. The scene calls these on transition.
+    func suspendPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    func resumePollingIfNeeded() {
+        guard isRefreshing else { return }
+        startPollingIfNeeded()
+    }
+
+    // MARK: - Per-act mutations
+
+    /// Save and unsave are per act, and the change is applied optimistically
+    /// so the bookmark responds immediately. On failure the state is put back
+    /// — a control that silently lies about what it did is worse than a slow
+    /// one.
+    func toggleSave(act: Act) async {
+        let target = !act.isSaved
+        setSaved(target, for: act.dedupKey)
+        do {
+            if target {
+                try await api.save(dedupKey: act.dedupKey)
+            } else {
+                try await api.unsave(dedupKey: act.dedupKey)
+            }
+        } catch {
+            setSaved(!target, for: act.dedupKey)
+            self.error = error as? APIError ?? .unknown(error.localizedDescription)
+        }
+    }
+
+    /// Subscribing patches the artist across *every* event in the list: one
+    /// artist can appear on several bills, and leaving the others stale makes
+    /// the bell look broken.
+    func toggleSubscribe(act: Act) async {
+        let target = !act.isSubscribed
+        setSubscribed(target, forArtist: act.artist.id)
+        do {
+            if target {
+                try await api.subscribe(artistID: act.artist.id)
+            } else {
+                try await api.unsubscribe(artistID: act.artist.id)
+            }
+        } catch {
+            setSubscribed(!target, forArtist: act.artist.id)
+            self.error = error as? APIError ?? .unknown(error.localizedDescription)
+        }
+    }
+
+    private func setSaved(_ saved: Bool, for dedupKey: String) {
+        for i in events.indices {
+            for j in events[i].acts.indices where events[i].acts[j].dedupKey == dedupKey {
+                events[i].acts[j].saved = saved
+            }
+        }
+    }
+
+    private func setSubscribed(_ subscribed: Bool, forArtist artistID: String) {
+        for i in events.indices {
+            for j in events[i].acts.indices where events[i].acts[j].artist.id == artistID {
+                events[i].acts[j].subscribed = subscribed
+            }
+        }
+    }
+
+    func clearError() { error = nil }
+}

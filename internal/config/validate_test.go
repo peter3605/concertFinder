@@ -167,3 +167,88 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 		t.Errorf("an empty config should report every missing core var, got %d: %v", len(errs), errs)
 	}
 }
+
+// A partial APNs set is the dangerous state: push.New refuses it, the worker
+// wires up with a nil client, and every notification is dropped silently
+// while every other job runs normally. Nothing distinguishes that from
+// "nobody has opted in yet", so it has to be caught at startup.
+func TestAPNsIsAllOrNothing(t *testing.T) {
+	c := prodConfig()
+	c.APNSKeyID = "ABC123"
+	c.APNSTeamID = "TEAM123"
+	c.APNSBundleID = "com.example.app"
+	c.APNSP8Key = "" // the missing one
+
+	if !problemsContaining(t, c, "APNs is partially configured") {
+		t.Fatalf("expected a partial-APNs error, got %v", c.Validate())
+	}
+	// The message must name the variable nobody set; "APNs is misconfigured"
+	// sends the reader back to four possibilities.
+	if !problemsContaining(t, c, "APNS_P8_KEY") {
+		t.Fatalf("error should name the missing variable, got %v", c.Validate())
+	}
+}
+
+func TestAPNsFullyUnsetIsFine(t *testing.T) {
+	if problemsContaining(t, prodConfig(), "APNs") {
+		t.Fatalf("a deployment with no APNs config should validate, got %v", prodConfig().Validate())
+	}
+}
+
+func TestAPNsFullySetIsFine(t *testing.T) {
+	c := prodConfig()
+	c.APNSKeyID = "ABC123"
+	c.APNSTeamID = "TEAM123"
+	c.APNSBundleID = "com.example.app"
+	c.APNSP8Key = "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----"
+	if problemsContaining(t, c, "APNs") {
+		t.Fatalf("a fully configured APNs set should validate, got %v", c.Validate())
+	}
+}
+
+// iOS fetches apple-app-site-association from the universal link's own host,
+// so a callback URL on a different domain ends every mobile login in Safari
+// with the app still waiting — and nothing logs it.
+func TestMobileCallbackURLMustMatchSiteHost(t *testing.T) {
+	c := prodConfig()
+	c.IOSAppID = "TEAM123.com.example.app"
+	c.MobileCallbackURL = "https://elsewhere.example/app/auth/callback"
+
+	if !problemsContaining(t, c, "differs from SITE_BASE_URL host") {
+		t.Fatalf("expected a host-mismatch error, got %v", c.Validate())
+	}
+}
+
+func TestMobileCallbackURLMustBeHTTPS(t *testing.T) {
+	c := prodConfig()
+	c.IOSAppID = "TEAM123.com.example.app"
+	c.MobileCallbackURL = "http://concerts.example.com/app/auth/callback"
+
+	if !problemsContaining(t, c, "must be https") {
+		t.Fatalf("expected an https error, got %v", c.Validate())
+	}
+}
+
+// A callback with no app ID means the association file 404s, so the link
+// never reaches the app at all.
+func TestMobileCallbackURLRequiresAppID(t *testing.T) {
+	c := prodConfig()
+	c.MobileCallbackURL = c.SiteBaseURL + "/app/auth/callback"
+	c.IOSAppID = ""
+
+	if !problemsContaining(t, c, "IOS_APP_ID is empty") {
+		t.Fatalf("expected a missing-app-id error, got %v", c.Validate())
+	}
+}
+
+// The matching pair, so the tests above are known to fail for the reason
+// stated rather than because any iOS config trips the validator.
+func TestFullyConfiguredMobileFlowPasses(t *testing.T) {
+	c := prodConfig()
+	c.IOSAppID = "TEAM123.com.example.app"
+	c.MobileCallbackURL = c.SiteBaseURL + "/app/auth/callback"
+
+	if errs := c.Validate(); len(errs) != 0 {
+		t.Fatalf("a complete mobile config must validate, got %v", errs)
+	}
+}

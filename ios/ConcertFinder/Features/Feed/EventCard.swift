@@ -1,0 +1,105 @@
+import SwiftUI
+
+/// One show — one card, one night out.
+///
+/// The per-act controls are the thing to get right: a festival card carries
+/// several acts, each with its own dedup key, and a bookmark that saved "the
+/// card" would save the wrong artist.
+struct EventCard: View {
+    let event: Event
+    var onToggleSave: (Act) -> Void
+    var onToggleSubscribe: (Act) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            header
+            Divider()
+            ForEach(event.acts) { act in
+                ActRow(
+                    act: act,
+                    onToggleSave: { onToggleSave(act) },
+                    onToggleSubscribe: { onToggleSubscribe(act) }
+                )
+            }
+        }
+        .padding(Metrics.gutter)
+        .background(Color.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous))
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(event.venue)
+                .font(.headline)
+            Text(event.location)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            // Time is shown for a single-act bill only. On a festival the
+            // date is the *earliest* act's set time, so presenting it as the
+            // show's time would be a claim the data does not support.
+            Text(event.acts.count == 1
+                 ? event.date.formatted(date: .abbreviated, time: .shortened)
+                 : event.date.formatted(date: .abbreviated, time: .omitted))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Three separate labels read as three swipes for one heading.
+        // Combined, VoiceOver announces the card once, the way a sighted
+        // user reads it.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// One artist on the bill, with its own save and subscribe controls.
+struct ActRow: View {
+    let act: Act
+    var onToggleSave: () -> Void
+    var onToggleSubscribe: () -> Void
+
+    var body: some View {
+        HStack(spacing: Metrics.tight) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(act.artist.name)
+                    .font(.subheadline.weight(.medium))
+                if let genres = act.artist.genres, !genres.isEmpty {
+                    Text(genres.prefix(2).joined(separator: " · "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 0)
+
+            // Both controls carry the artist's name, because on a festival
+            // card there are six identical bell icons and "Get alerts" alone
+            // would not say which act it acts on. The label states the action
+            // and the toggle state carries the current value, so VoiceOver
+            // does not read a stale "on/off" alongside a changing verb.
+            Button(action: onToggleSubscribe) {
+                Image(systemName: act.isSubscribed ? "bell.fill" : "bell")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(act.isSubscribed ? Color.accentColor : Color.secondary)
+            .accessibilityLabel("Alerts for \(act.artist.name)")
+            .accessibilityValue(act.isSubscribed ? "On" : "Off")
+            .accessibilityAddTraits(act.isSubscribed ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint(act.isSubscribed
+                               ? "Double tap to stop alerts when this artist announces a show"
+                               : "Double tap to get alerts when this artist announces a show")
+
+            Button(action: onToggleSave) {
+                Image(systemName: act.isSaved ? "bookmark.fill" : "bookmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(act.isSaved ? Color.accentColor : Color.secondary)
+            .accessibilityLabel("Save \(act.artist.name)")
+            .accessibilityValue(act.isSaved ? "Saved" : "Not saved")
+            .accessibilityAddTraits(act.isSaved ? [.isButton, .isSelected] : .isButton)
+        }
+        // Without this the two icon buttons swallow taps meant for the row's
+        // navigation link.
+        .contentShape(Rectangle())
+    }
+}

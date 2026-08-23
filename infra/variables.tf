@@ -74,3 +74,46 @@ variable "email_delivery_mode" {
     error_message = "email_delivery_mode must be \"log\" or \"smtp\"."
   }
 }
+
+# --- iOS client (docs/ios-app-plan.md Appendix A) -------------------------
+#
+# All optional. Left at their defaults the deployment serves the web app
+# unchanged: mobile login is refused, apple-app-site-association 404s, and the
+# push worker no-ops. What must not happen is a partial APNs set, which wires
+# up successfully and then drops every notification silently --
+# config.Validate rejects that at startup.
+
+variable "ios_bundle_id" {
+  description = "iOS app bundle identifier, e.g. com.example.concertfinder. Empty disables the mobile auth flow and push."
+  type        = string
+  default     = ""
+}
+
+variable "ios_team_id" {
+  description = "Apple Developer team ID. Combined with ios_bundle_id to form IOS_APP_ID for apple-app-site-association."
+  type        = string
+  default     = ""
+}
+
+variable "apns_key_id" {
+  description = "APNs auth key ID (the .p8's key ID). The key itself is an operator secret, set out of band."
+  type        = string
+  default     = ""
+}
+
+variable "apns_environment" {
+  description = "Which APNs host to send to. Must match the build's aps-environment entitlement."
+  type        = string
+  default     = "production"
+
+  validation {
+    condition     = contains(["sandbox", "production"], var.apns_environment)
+    error_message = "apns_environment must be \"sandbox\" or \"production\" -- a token minted for one is rejected by the other."
+  }
+}
+
+variable "min_ios_build" {
+  description = "Oldest iOS build the server supports, returned by /api/site-info. 0 means no floor."
+  type        = number
+  default     = 0
+}

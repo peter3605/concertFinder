@@ -107,6 +107,35 @@ for key in SONGKICK_API_KEY BRAVE_SEARCH_API_KEY; do
     esac
 done
 
+# APNs. Multi-line PEM, so this cannot use the single-line `read` above: a
+# pasted key would be truncated at the first newline and fail at send time as
+# an unparseable p8, long after the deploy reported success.
+#
+# It is in operator_secrets, so Terraform creates it holding the sentinel and
+# render-env.sh fails the next deploy until it is set or explicitly marked
+# unused. That is deliberate — a half-configured APNs set is the state that
+# wires up and silently drops every notification — but it does mean a
+# deployment with no Apple account has to mark it "-" once.
+printf '\nAPNS_P8_KEY\n'
+printf '  The .p8 file from developer.apple.com (Keys), PEM contents.\n'
+printf '  [f] read from a file   [-] mark as unused   [Enter] skip: '
+read -r choice
+case "$choice" in
+    f|F)
+        printf '  path to .p8: '
+        read -r p8path
+        # Expand a leading ~ that the shell does not expand inside a variable.
+        case "$p8path" in "~/"*) p8path="$HOME/${p8path#\~/}" ;; esac
+        if [ -r "$p8path" ]; then
+            put APNS_P8_KEY "$(cat "$p8path")"
+        else
+            printf '  \033[31mcannot read %s\033[0m\n' "$p8path"
+        fi
+        ;;
+    -)  put APNS_P8_KEY " " ;;
+    *)  printf '  \033[33mskipped\033[0m\n' ;;
+esac
+
 # The check that matters. A parameter still holding the sentinel fails the next
 # deploy in render-env.sh, so surface it now rather than from a workflow log.
 printf '\n--- parameters still unset ---\n'

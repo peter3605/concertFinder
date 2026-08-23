@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Must match APNS_ENVIRONMENT on the server: a token minted against one
+	     host is rejected by the other as BadDeviceToken. Xcode rewrites this
+	     to "production" for App Store and TestFlight builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
+
+	<!-- The universal link the OAuth callback returns to. iOS fetches
+	     /.well-known/apple-app-site-association from this domain to decide
+	     whether the app may claim its links; internal/http/aasa.go serves it
+	     over valid TLS with no redirect. The association only starts working
+	     once IOS_APP_ID is set on the server — until then that route 404s by
+	     design, rather than serving an association naming an empty app. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:concertfinder.app</string>
+	</array>
+</dict>
+</plist>

@@ -13,9 +13,12 @@ import (
 // verifier and CSRF state, keyed by a short-lived cookie set at /login and
 // consumed at /callback.
 type handshake struct {
-	Verifier  string
-	State     string
-	ExpiresAt time.Time
+	Verifier string
+	State    string
+	// AppChallenge is non-empty only for app-initiated logins; see
+	// db.OAuthHandshake.AppChallenge.
+	AppChallenge string
+	ExpiresAt    time.Time
 }
 
 // HandshakeStore abstracts handshake persistence. Only the DB-backed
@@ -23,7 +26,7 @@ type handshake struct {
 // single-instance dev but was never wired up, and it would have broken the
 // moment /login and /callback landed on different replicas.
 type HandshakeStore interface {
-	Put(ctx context.Context, key, verifier, state string, ttl time.Duration) error
+	Put(ctx context.Context, key, verifier, state, appChallenge string, ttl time.Duration) error
 	Take(ctx context.Context, key string) (*handshake, bool)
 }
 
@@ -39,12 +42,13 @@ func NewDBHandshakeStore(pool *pgxpool.Pool) *DBHandshakeStore {
 	return &DBHandshakeStore{Pool: pool}
 }
 
-func (s *DBHandshakeStore) Put(ctx context.Context, key, verifier, state string, ttl time.Duration) error {
+func (s *DBHandshakeStore) Put(ctx context.Context, key, verifier, state, appChallenge string, ttl time.Duration) error {
 	return db.PutHandshake(ctx, s.Pool, db.OAuthHandshake{
-		Key:       key,
-		Verifier:  verifier,
-		State:     state,
-		ExpiresAt: time.Now().Add(ttl),
+		Key:          key,
+		Verifier:     verifier,
+		State:        state,
+		AppChallenge: appChallenge,
+		ExpiresAt:    time.Now().Add(ttl),
 	})
 }
 
@@ -53,5 +57,10 @@ func (s *DBHandshakeStore) Take(ctx context.Context, key string) (*handshake, bo
 	if err != nil || !hit {
 		return nil, false
 	}
-	return &handshake{Verifier: h.Verifier, State: h.State, ExpiresAt: h.ExpiresAt}, true
+	return &handshake{
+		Verifier:     h.Verifier,
+		State:        h.State,
+		AppChallenge: h.AppChallenge,
+		ExpiresAt:    h.ExpiresAt,
+	}, true
 }
