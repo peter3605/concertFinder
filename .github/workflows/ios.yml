@@ -1,0 +1,57 @@
+name: iOS
+
+# Deliberately separate from deploy.yml rather than a job inside it. The
+# backend deploy must not wait on — or be blocked by — a Swift build: the two
+# ship through different channels on different cadences, and a macOS runner is
+# both slower and scarcer than ubuntu-latest. Plan §5.2.
+#
+# Path-filtered for the same reason deploy.yml ignores ios/: a Go-only commit
+# has nothing here to check.
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  pull_request:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The .xcodeproj is generated, not committed — project.yml is the
+      # source of truth (plan §5.1). Generating it here also proves the spec
+      # is valid, which a committed .pbxproj would not.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      # Build and test in one action so a compile error and a test failure
+      # are told apart by the step that fails, not by reading the log.
+      - name: Build and test
+        working-directory: ios
+        run: |
+          set -o pipefail
+          # xcbeautify ships on the GitHub macOS images, but piping through a
+          # tool that might not exist would swallow the build behind a
+          # "command not found". Fall back to raw output instead.
+          if command -v xcbeautify >/dev/null 2>&1; then
+            fmt=(xcbeautify)
+          else
+            fmt=(cat)
+          fi
+          xcodebuild test \
+            -project ConcertFinder.xcodeproj \
+            -scheme ConcertFinder \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO \
+            | "${fmt[@]}"

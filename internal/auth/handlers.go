@@ -42,6 +42,11 @@ type Deps struct {
 	SpotifyClient *spotify.Client
 	HTTPClient    *http.Client // for Spotify token endpoint
 	PostLoginURL  string       // where to send the browser after a successful callback
+	// MobileCallbackURL is the universal link the callback redirects to for
+	// app-initiated logins, e.g. https://<domain>/app/auth/callback. Empty
+	// disables the mobile flow: /login?client=ios is refused rather than
+	// silently completing into a browser session the app cannot read.
+	MobileCallbackURL string
 	// OnLoginSuccess is invoked after a successful callback + session
 	// creation. Used by main.go to enqueue a pre-warm concert scan for the
 	// new session's user so the first /me/concerts request finds a snapshot.
@@ -55,10 +60,35 @@ func Mount(r chi.Router, d *Deps) {
 	r.Get("/login", d.handleLogin)
 	r.Get("/callback", d.handleCallback)
 	r.Post("/logout", d.handleLogout)
+	// Unauthenticated: the caller is asking for the session it does not yet
+	// have. Replay and forgery are handled by the one-time code and its
+	// challenge, not by a session.
+	r.Post("/mobile/exchange", d.handleMobileExchange)
 	r.With(RequireUser(d.Pool)).Get("/me", d.handleMe)
 }
 
 func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// App-initiated login. The challenge is the app's half of a second
+	// PKCE-shaped exchange — between the app and us, distinct from the one
+	// below against Spotify — and it is what makes an intercepted one-time
+	// code useless without the verifier that never leaves the device.
+	appChallenge := ""
+	if r.URL.Query().Get("client") == ClientIOS {
+		appChallenge = r.URL.Query().Get("app_challenge")
+		if appChallenge == "" {
+			writeAuthError(w, http.StatusBadRequest, "app_challenge is required for client=ios")
+			return
+		}
+		if d.MobileCallbackURL == "" {
+			// Without a universal link to return to there is nowhere to send
+			// the code. Failing here beats completing the login into a
+			// session only a browser could use.
+			slog.Error("mobile login attempted but MOBILE_CALLBACK_URL is unset")
+			writeAuthError(w, http.StatusNotImplemented, "mobile login is not configured on this deployment")
+			return
+		}
+	}
+
 	verifier, err := GenerateVerifier()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -74,7 +104,7 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := d.Handshakes.Put(r.Context(), handshakeKey, verifier, state, HandshakeTTL); err != nil {
+	if err := d.Handshakes.Put(r.Context(), handshakeKey, verifier, state, appChallenge, HandshakeTTL); err != nil {
 		slog.Error("handshake put failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -188,6 +218,24 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// An app-initiated login ends in a one-time code, not a cookie. The
+	// cookie is deliberately not set in that case: ASWebAuthenticationSession
+	// runs in a web context whose jar the app cannot read, so setting it
+	// would leave a session usable only by that throwaway context.
+	if hs.AppChallenge != "" {
+		code, err := d.mintMobileCode(r, sessionID, hs.AppChallenge)
+		if err != nil {
+			slog.Error("mint mobile auth code failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if d.OnLoginSuccess != nil {
+			d.OnLoginSuccess(r.Context(), user.ID)
+		}
+		http.Redirect(w, r, d.mobileCallbackURL(code), http.StatusFound)
+		return
+	}
+
 	setSessionCookie(w, d.CookieDomain, sessionID, expires)
 
 	if d.OnLoginSuccess != nil {
@@ -201,9 +249,12 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
+// handleLogout ends the session presented by either mechanism. Deleting the
+// row is what actually logs the caller out; clearing the cookie is cosmetic
+// for a bearer client, and harmless.
 func (d *Deps) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
-		_ = db.DeleteSession(r.Context(), d.Pool, c.Value)
+	if sessID, _ := sessionCredential(r); sessID != "" {
+		_ = db.DeleteSession(r.Context(), d.Pool, sessID)
 	}
 	clearSessionCookie(w, d.CookieDomain)
 	w.WriteHeader(http.StatusNoContent)
@@ -217,12 +268,5 @@ func (d *Deps) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id":                    full.ID,
-		"spotify_user_id":       full.SpotifyUserID,
-		"display_name":          full.DisplayName,
-		"email":                 full.Email,
-		"digest_opt_in":         full.DigestOptIn,
-		"instant_notify_opt_in": full.InstantNotifyOptIn,
-	})
+	_ = json.NewEncoder(w).Encode(userPayload(full))
 }

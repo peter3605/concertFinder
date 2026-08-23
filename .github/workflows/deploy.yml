@@ -4,11 +4,18 @@ name: Deploy
 # only ran on push to main — i.e. after merge, as part of the deploy — so a red
 # `test` was a fix-forward on main rather than a PR that simply won't merge.
 # The `deploy` job is guarded below so this stays a check, not a deploy.
+# `ios/**` is excluded from both triggers. The app ships through Xcode and
+# App Store Connect, not through this workflow, so a Swift-only commit has
+# nothing to deploy — without the filter it would still rebuild the image on
+# the 2 GB EC2 box and cycle the containers for a change the server cannot
+# see. ios.yml is what checks that directory.
 on:
   push:
     branches: [main]
+    paths-ignore: ['ios/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['ios/**']
   workflow_dispatch:
 
 # Least privilege by default. `id-token: write` is granted to the deploy job
