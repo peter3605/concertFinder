@@ -2,8 +2,10 @@
 
 **Spotify-Driven Concert Discovery — Project Proposal & Design Document**
 
-- Version: 1.1
-- Status: Phases 1–3 implemented; resynced against the code 2026-08-12
+- Version: 1.2
+- Status: Phases 1–3 implemented and deployed at `https://concertfinder.app`;
+  a native iOS client is implemented (§10.5). Resynced against the code
+  2026-08-23.
 - Geographic Scope: United States
 
 > **Reading this document.** It is the authoritative record of *intent* —
@@ -106,10 +108,12 @@ The Go backend follows a standard layered structure with feature-oriented intern
   /jobs           river job args, workers, and wall-clock schedules
   /rate           per-user daily API quota ledger
   /email          digest and instant-notify rendering, SMTP sender
+  /push           APNs delivery: ES256 provider JWT over HTTP/2
   /config         env parsing and cross-setting invariants
 /migrations       SQL migration files
 /web              React + TS frontend
-/infra            Terraform definitions (Phase 3)
+/ios              native SwiftUI client (§10.5); XcodeGen spec, no .pbxproj
+/infra            Terraform definitions (Phase 3, applied)
 ```
 
 Each external API has its own dedicated package with its own types. Shared "models" packages are deliberately avoided; external API schemas drift independently and should not couple to one another.
@@ -124,6 +128,11 @@ Two departures from the original sketch, both from Phase 3:
   second process would also double the LISTEN/NOTIFY connections against a
   0.25 CU compute.
 - **`/internal/bandsintown` was deleted** (see §5.3).
+
+`/internal/push` is the one addition since. It speaks APNs directly rather
+than through a library, for the same reason `/internal` holds no AWS SDK: the
+protocol surface actually used is one POST with four headers, and Go's stdlib
+does HTTP/2 natively.
 
 ---
 
@@ -142,10 +151,17 @@ The application must be registered at `https://developer.spotify.com/dashboard` 
 
 | Item | Value |
 |---|---|
-| Spotify Client ID | `[TODO: pending registration]` |
+| Spotify Client ID | Registered; the value lives in SSM as `/concertfinder/SPOTIFY_CLIENT_ID`, never in this repo |
 | Redirect URI (dev) | `https://127.0.0.1:3000/api/auth/callback` |
-| Redirect URI (prod) | `https://[TODO: production domain]/callback` |
+| Redirect URI (prod) | `https://concertfinder.app/api/auth/callback` |
 | Allowed scopes | See section 3.6 |
+
+**The path is `/api/auth/callback`, not `/callback`.** This table said
+`/callback` for the production entry until 2026-08-23, which is the exact
+misconfiguration `config.Validate` refuses to start on: the handler is mounted
+under `/api/auth`, so a dashboard entry pointing at `/callback` lands on the
+SPA's catch-all instead and the browser finishes the OAuth dance on a
+logged-out page, with no error anywhere.
 
 Note: `http://localhost` redirect URIs are explicitly prohibited by Spotify as of the November 2025 OAuth migration. Only `http://127.0.0.1` (with the literal IP) is accepted for local development.
 
@@ -885,7 +901,7 @@ Target: feature-complete on the local machine, ready to consider hosting.
 - Result streaming: frontend polls for late-arriving results after initial response. Superseded by SWR polling against the snapshot (§6.0).
 - Begin Spotify Extended Quota Mode application.
 
-### 10.3 Phase 3: Hosted Multi-User on AWS — *application complete; deployment not*
+### 10.3 Phase 3: Hosted Multi-User on AWS — *complete and deployed*
 
 Target: shareable public URL; small group of users beyond the developer.
 
@@ -895,7 +911,7 @@ The database was RDS db.t4g.micro through the first Terraform drafts. At ~$14/mo
 
 **In Scope**
 
-- AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Not yet done** — Terraform exists in `/infra` but has never been applied, and the GitHub Actions deploy has never succeeded because `AWS_DEPLOY_ROLE_ARN` and `EC2_INSTANCE_ID` are unset. Everything else in this phase runs locally.
+- AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Done** — applied and serving at `https://concertfinder.app`; `GET /api/healthz` returns ok. Config and secrets are rendered from SSM Parameter Store at deploy time rather than being pushed through the SSM command, whose parameters are retained for ~30 days and readable by anyone with SSM access.
 - Per-user rate-limit accounting against shared API quotas (§8.3).
 - Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
@@ -944,37 +960,107 @@ scheduled offset avoids the trap entirely.
 
 ### 10.4 Phase 4: Polish and Scale
 
-Target: production-quality public app. Speculative.
+Target: production-quality public app. Speculative, except where noted.
 
 - Additional sources. SeatGeek is the leading candidate; Ticketmaster being the sole primary (§5.3) makes a second one more valuable than it looked in Phase 1. Bandsintown would require their partnership program to actually respond.
-- User-favorited venues, calendar integration.
-- Mobile-friendly responsive design improvements.
+- User-favorited venues. ~~Calendar integration~~ — shipped, but on iOS only (§10.5); the web client has no equivalent.
+- ~~Mobile-friendly responsive design improvements.~~ Overtaken by §10.5: the mobile answer became a native client rather than a responsive pass on the SPA.
 - Possible international expansion (significant data-source rework).
+
+**The binding constraint on "public app" is not engineering.** The Spotify
+integration runs in Development Mode, which caps authorized users to a
+hand-maintained allowlist; commit `64bf229` makes that failure legible rather
+than fixing it. Extended Quota Mode is the only route past it, and it is an
+application to Spotify with a multi-week turnaround and no guarantee. Until
+it is granted, everything in this phase is polish on an app that strangers
+cannot sign into.
+
+A second, quieter ceiling: Ticketmaster's account-wide budget is 5000
+calls/day, and the rate ledger (§8.3) enforces **per-user** limits only — it
+does not model the account total, so exceeding it degrades feeds silently
+rather than erroring. A public download button is not bounded by the Spotify
+allowlist the way the web app is, so an account-total ceiling has to exist
+before the app is genuinely open.
+
+---
+
+### 10.5 Native iOS Client — *implemented; not submitted*
+
+Full plan: `docs/ios-app-plan.md`. Summarized here because it changes the
+shape of the system in ways later readers of *this* document need to know.
+
+**One backend, two clients.** The app talks to the same Go binary, the same
+`/api/me/*` handlers, and the same database as the SPA. No mobile BFF, no
+forked handler, no second deployment. That was the right call specifically
+because the expensive work — affinity hydration, the Ticketmaster fan-out,
+the fallback chain — already lives in river workers writing to
+`user_concert_snapshots`, so both clients read one precomputed snapshot and
+neither triggers a fan-out on the read path. Quota is accounted per *user*,
+not per client, which is only true because there is one ledger behind one
+API; and every ToS constraint in §9 is enforced in exactly one place.
+
+**What it cost.** Three changes to shared code, all additive to the web path:
+
+- `auth.RequireUser` resolves `Authorization: Bearer` before the `cf_session`
+  cookie. The session ID is already a 32-byte random credential, so the
+  bearer token *is* the session — no second token type, no new table.
+- `auth.CSRF` becomes a pass-through when, and only when, authentication came
+  from that header. CSRF exists because cookies are ambient authority; a
+  bearer token is not. The signal is the mechanism the middleware recorded,
+  never a `User-Agent` or `X-Requested-With` test — those are strings an
+  attacker's page can set on a cookie-bearing request, which would make this
+  a bypass rather than an exemption.
+- A one-time code exchange (`POST /api/auth/mobile/exchange`) keeps the
+  session out of the callback URL, bound to an app-chosen PKCE challenge so an
+  intercepted code is useless alone. The return path is a **universal link**,
+  not a custom scheme: `concertfinder://` is first-come-first-served on iOS.
+
+**The schema change worth knowing about.** Migration `0016` widened
+`user_digest_sent`'s primary key to `(user_id, dedup_key, channel)`. The
+ledger previously had no channel, and the daily digest and instant-notify
+shared it deliberately — one email per show, whichever found it first. Push
+could not join that unchanged: writing those rows suppresses the email;
+reading them means a user opted into both channels receives exactly one,
+decided by which worker ran first. Neither failure raises an error. The
+alternative — a separate `user_push_sent` — touches less code but re-answers
+the same question in two places, and makes a third channel a third table.
+
+**Standing obligation.** With builds living on people's phones for months,
+`/api/me/*` responses are additive-only; `GET /api/site-info` carries
+`min_ios_build` as the escape hatch for when that has to be broken.
+
+**Not done, and not engineering:** Apple Developer configuration (App ID,
+signing, APNs key), the App Store submission itself, and the Spotify
+allowlist problem in §10.4 — which bites harder here, because App Review's
+own reviewer must be able to sign in. `docs/ios-app-plan.md` §10.1 also flags
+an unresolved question about Guideline 5.1.1(v) and server-side third-party
+tokens that is worth raising with Apple before submitting rather than
+discovering at review.
 
 ---
 
 ## 11. AWS Architecture (Phase 3 Reference)
 
-Phase 3 deploys on AWS, with the database on Neon rather than an AWS service. The application remains portable: no AWS SDK imports in `/internal`, all AWS-specific configuration is environment-driven, and Postgres usage avoids provider-specific features — which is what let the database move off RDS without touching a line of Go. The architecture below is the free-tier-anchored target; §11.3 lists what was deliberately deferred.
+Phase 3 deploys on AWS, with the database on Neon rather than an AWS service. The application remains portable: no AWS SDK imports in `/internal`, all AWS-specific configuration is environment-driven, and Postgres usage avoids provider-specific features — which is what let the database move off RDS without touching a line of Go. The table below is **what is deployed**, not a target; §11.3 lists what was deliberately deferred.
 
 | Component | AWS Service | Notes |
 |---|---|---|
 | Application host | EC2 t4g.small (ARM64, Amazon Linux 2023) | Runs `docker compose`: Go API container + Caddy container. Single instance; no ALB. |
-| Database | RDS PostgreSQL 16 (db.t4g.micro) | Private subnet; reachable only from the EC2 security group on port 5432. |
+| Database | Neon PostgreSQL 16 (serverless, pinned 0.25 CU) | Not an AWS service and not in the VPC — traffic crosses the public internet under TLS, which is why `?sslmode=require` on `DATABASE_URL` replaces what the RDS `rds.force_ssl` parameter group used to enforce. Must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not say so — job pickup silently degrades to the 1s poll fallback. Pin min *and* max compute: the app never scales to zero (River polls every second), so the free plan is a compute-hour budget and one autoscale spike during the nightly fanout exhausts the month. |
 | Frontend assets | Embedded in the Go binary (`go:embed`) | Served by the Go API at `/`. Backend endpoints live under `/api/*`. |
-| Secrets | `.env` file on the EC2 instance, mode 600 | Migrate to Secrets Manager if compromise risk changes. |
+| Config and secrets | SSM Parameter Store, rendered to `/opt/concertfinder/.env` (mode 600) at deploy time | 34 parameters under `/concertfinder/`; secrets are `SecureString`, the rest `String`. The instance fetches them over its instance role rather than being handed values through the SSM command — command parameters are retained for ~30 days and readable by anyone with SSM access, so pushing a secret through one leaks it. `scripts/render-env.sh` writes the file atomically and refuses to write if any secret still holds its `REPLACE_ME` placeholder. Adding a config value is a Terraform change (`infra/secrets.tf`), not a script change. |
 | TLS certificates | Caddy + Let's Encrypt | Auto-provisioned on first HTTPS request. |
 | Response security headers | Caddy, site level | HSTS (`includeSubDomains`, no `preload`), `nosniff`, `Referrer-Policy`, `frame-ancestors 'none'` + `X-Frame-Options`. Site level so they cover Caddy's own error responses, not just proxied ones. Deliberately not a full CSP — restricting script/style sources needs testing against the Vite bundle. |
 | DNS | Cloudflare (registrar is authoritative) | Apex A record → Elastic IP. No Route 53 zone: the registrar already answers for the domain, so records go live in seconds with nothing to delegate. All records stay unproxied — a proxied CNAME breaks SES DKIM, and proxying the apex collapses every client into a Cloudflare edge IP, defeating the `/api/auth` rate limiter. |
 | Static public IP | Elastic IP | Free while attached to a running instance. |
 | Deploy | GitHub Actions → SSM `RunShellScript` | OIDC federation; no long-lived AWS keys in GitHub. `build` and `up -d` are separate commands — `up -d --build` tears running containers down as part of the same command, so a failed or OOM-killed build takes the site with it. |
 | Deploy verification | Container healthcheck + end-to-end smoke test | `up -d --wait` blocks on the api container's healthcheck, which runs the server binary as `/server -healthcheck` (the image is distroless — no shell, no curl — so the binary is the only available probe). `scripts/verify-deploy.sh` then fetches `/api/healthz` *through Caddy* on 443, covering the half `--wait` cannot see. Without both, `docker compose up -d` exits 0 the moment a container is started, so a container that exits on bad config and crash-loops under `restart: unless-stopped` is indistinguishable from a successful deploy. |
-| Health endpoint | `GET /api/healthz` | Pings Postgres. Every route on this server needs the database, so a check that skips it reports green while everything 500s. Reporting unhealthy does not restart the container — Docker restart policies act on exit, not health — so an RDS blip surfaces in `docker compose ps` instead of becoming a restart loop. |
+| Health endpoint | `GET /api/healthz` | Pings Postgres. Every route on this server needs the database, so a check that skips it reports green while everything 500s. Reporting unhealthy does not restart the container — Docker restart policies act on exit, not health — so a database blip surfaces in `docker compose ps` instead of becoming a restart loop. That matters more with Neon than it did with RDS, since the database is now across the public internet rather than inside the VPC. |
 | Logs | Docker logs on the box | `docker compose logs -f` over SSM when needed. |
-| Alerting | Three CloudWatch alarms | EC2 status check failure, RDS free storage low, estimated monthly billing over threshold. None is wired to an SNS topic — alarm state is visible in the console only, so nothing pages you. |
+| Alerting | Two CloudWatch alarms | EC2 status check failure, and estimated monthly billing over threshold. (The third, RDS free storage, went away with RDS; Neon's storage is not a CloudWatch metric, and its compute-hour budget — the thing that actually ends the month — is not alarmed at all.) Neither is wired to an SNS topic: alarm state is visible in the console only, so **nothing pages you**. |
 | Scheduled jobs | River workers folded into the API binary | No EventBridge dependency. |
 | Email (Phase 3) | Amazon SES via SMTP | SMTP-only integration preserves portability across providers. |
-| IaC | Terraform in `/infra` | Reproduces the setup end-to-end; `docs/aws-deploy.md` is the manual fallback. |
+| IaC | Terraform in `/infra`, applied | 42 resources. Reproduces the setup end-to-end; `docs/aws-deploy.md` is the manual fallback. Neon is **not** managed by Terraform — the database is provisioned by hand and reaches the app only as `DATABASE_URL`. |
 
 ### 11.1 Estimated Phase 3 Cost (Low Scale)
 
@@ -988,16 +1074,24 @@ reasoning. Summary, us-east-1, excluding credits:
 | Item | Now | From 2027-01-01 |
 |---|---|---|
 | EC2 t4g.small | $0 — standalone trial, ends 2026-12-31 | ~$12.26/mo |
-| RDS db.t4g.micro + 20 GiB | ~$14/mo | ~$14/mo |
+| Neon Postgres (free plan, pinned 0.25 CU) | $0 | $0 |
 | Public IPv4 (Elastic IP) | ~$3.65/mo | ~$3.65/mo |
 | EBS 20 GiB gp3 | ~$1.60/mo | ~$1.60/mo |
 | DNS (Cloudflare) | $0 | $0 |
 | SES, SSM, CloudWatch, 100 GB egress | ~$0 at this scale | ~$0 |
-| **Total** | **~$20/mo** | **~$32/mo** |
+| **Total** | **~$5/mo** | **~$18/mo** |
 
-Plus ~$10–15/yr for the domain. The largest single lever is RDS: running
-Postgres as a container on the instance removes ~$14/mo, trading away managed
-backups. The t4g.small trial ending 2026-12-31 is the one dated cliff.
+Plus ~$10–15/yr for the domain. The RDS line above used to be the largest
+lever at ~$14/mo, and it has been pulled: the database moved to Neon's free
+plan (§10.3), with nightly `pg_dump` to S3 standing in for the 7-day RDS
+retention that was given up.
+
+Two things to watch, neither of which is a dollar figure on this table. The
+t4g.small standalone trial ends **2026-12-31**, which is the one dated cliff.
+And Neon's free plan is a **compute-hour budget** — roughly 183 of ~192
+CU-hours/month at a pinned 0.25 CU — because the app never scales to zero;
+exhausting it means a suspended compute and 500s, not an overage charge. That
+is why the compute is pinned at both ends rather than left to autoscale.
 
 ### 11.2 Portability Constraints
 
@@ -1119,6 +1213,19 @@ environments.
 | `SITE_BASE_URL` | `https://127.0.0.1:3000` | Base for unsubscribe links in email |
 | `CONTACT_EMAIL` | — | Operator contact shown on `/privacy` and `/terms` |
 
+**iOS client (§10.5)** — all optional. Unset, the web app behaves exactly as
+before: `/api/auth/login?client=ios` returns 501, the association file 404s,
+and the push worker no-ops.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MOBILE_CALLBACK_URL` | unset | Universal link the OAuth callback returns to, e.g. `https://<domain>/app/auth/callback`. Must be https and on the same host as `SITE_BASE_URL`. |
+| `IOS_APP_ID` | derived | `<TeamID>.<BundleID>`, served in `apple-app-site-association`. Derived from `APNS_TEAM_ID` + `APNS_BUNDLE_ID` when unset. |
+| `MIN_IOS_BUILD` | `0` | Oldest client build the server accepts, returned by `/api/site-info`. `0` means no floor. |
+| `APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_BUNDLE_ID` | unset | APNs token-based auth identifiers. |
+| `APNS_P8_KEY` | unset | PEM contents of the `.p8`, not a path. `SecureString`; never logged. |
+| `APNS_ENVIRONMENT` | `production` | `sandbox` or `production`. Must match the build's `aps-environment` entitlement — a token minted for one is rejected by the other. |
+
 Configuration problems are handled in three tiers, by how bad the failure is:
 
 1. **Fall back to the default.** Out-of-range or unparseable *tuning* values —
@@ -1142,6 +1249,9 @@ Configuration problems are handled in three tiers, by how bad the failure is:
    | Missing `SITE_DOMAIN`, or one disagreeing with `SITE_BASE_URL` | Caddy crash loop, or a certificate for a name none of the emailed links use. |
    | `EMAIL_DELIVERY_MODE=smtp` with no `SMTP_HOST`/`SMTP_FROM` | Digest jobs run and deliver nothing. |
    | Missing `SPOTIFY_CLIENT_ID`, `TICKETMASTER_API_KEY`, `SESSION_COOKIE_DOMAIN` | Empty results or a broken login, attributed to anything but config. |
+   | A **partial** APNs set (§10.5) | `push.New` refuses it, the worker wires up with a nil client, and every notification is dropped — indistinguishable from nobody having opted in. |
+   | `MOBILE_CALLBACK_URL` host disagreeing with `SITE_BASE_URL`, or not https | iOS fetches `apple-app-site-association` from the link's own domain, so the login ends in Safari with the app still waiting. |
+   | `MOBILE_CALLBACK_URL` set with an empty `IOS_APP_ID` | The association file 404s, so the universal link never reaches the app. |
 
    Every problem is reported in one pass, so a bad `.env` costs one round trip
    to fix rather than one restart per variable.

@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from '@/components/layout';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { ThemeProvider } from '@/lib/theme';
+import AppCallbackPage from '@/pages/app-callback';
 import ConcertsPage from '@/pages/concerts';
 import LoginPage from '@/pages/login';
 import PrivacyPage from '@/pages/privacy';
@@ -59,6 +60,10 @@ export default function App() {
                 }
               />
               <Route path="/login" element={<LoginPage />} />
+              {/* iOS universal link. Intercepted by the app when installed; this
+                  route is what a browser reaching it sees instead of a silent
+                  bounce to the feed. */}
+              <Route path="/app/auth/callback" element={<AppCallbackPage />} />
               <Route path="/privacy" element={<PrivacyPage />} />
               <Route path="/terms" element={<TermsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

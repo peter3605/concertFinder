@@ -38,7 +38,7 @@ func GetSessionUser(ctx context.Context, pool *pgxpool.Pool, sessionID string) (
 SELECT s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at,
        u.id, u.spotify_user_id, u.display_name,
        u.encrypted_refresh_token, u.refresh_token_nonce,
-       COALESCE(u.email, ''), u.digest_opt_in, u.instant_notify_opt_in
+       COALESCE(u.email, ''), u.digest_opt_in, u.instant_notify_opt_in, u.push_opt_in
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.id = $1 AND s.expires_at > now()
@@ -49,7 +49,7 @@ WHERE s.id = $1 AND s.expires_at > now()
 		&out.Session.LastSeenAt, &out.Session.ExpiresAt,
 		&out.User.ID, &out.User.SpotifyUserID, &out.User.DisplayName,
 		&out.User.EncryptedRefreshToken, &out.User.RefreshTokenNonce,
-		&out.User.Email, &out.User.DigestOptIn, &out.User.InstantNotifyOptIn,
+		&out.User.Email, &out.User.DigestOptIn, &out.User.InstantNotifyOptIn, &out.User.PushOptIn,
 	)
 	if err != nil {
 		return SessionUser{}, err

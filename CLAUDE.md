@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-Phases 1–3 are implemented: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, Terraform in `/infra`.
+Phases 1–3 are implemented **and deployed**, serving at `https://concertfinder.app`: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, Terraform in `/infra` (applied), native iOS client under `/ios`.
 
 ```
 go build ./...      # backend
@@ -13,11 +13,21 @@ go vet ./...
 cd web && npm run build
 ```
 
+The iOS app is a **second client of the same API** — same binary, same handlers, same database, no mobile BFF (`docs/ios-app-plan.md` §1.1). Its `.xcodeproj` is generated, not committed:
+
+```
+cd ios && xcodegen generate
+xcodebuild test -project ConcertFinder.xcodeproj -scheme ConcertFinder \
+  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
+```
+
+Two consequences of having two clients, both of which are cheap now and expensive later: `/api/me/*` responses are **additive-only** — a field rename is a breaking change for builds already on someone's phone — and `/api/site-info` carries `min_ios_build` as the escape hatch when that rule has to be broken.
+
 `docs/design.md` remains the authoritative source of truth for architecture decisions, API choices, schema, and phased scope — read it before implementing anything non-trivial. Where this file and the design doc disagree about what the code does *today*, this file wins; the design doc describes intent.
 
 ## What ConcertFinder Is
 
-A web app that builds a personalized concert feed from a user's Spotify listening data by fanning out across ticketing APIs for shows by artists the user already engages with. Ticketmaster is the only primary source; the Phase 2 fallback chain (MusicBrainz → official artist site → JSON-LD) is the only secondary. US-only. Phase 1 is single-user local; multi-user AWS deployment is Phase 3.
+A web app — and, since `/ios`, a native iOS app against the same API — that builds a personalized concert feed from a user's Spotify listening data by fanning out across ticketing APIs for shows by artists the user already engages with. Ticketmaster is the only primary source; the Phase 2 fallback chain (MusicBrainz → official artist site → JSON-LD) is the only secondary. US-only. Phase 1 is single-user local; multi-user AWS deployment is Phase 3.
 
 ## Planned Architecture
 
@@ -82,6 +92,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   the previous one named a GitHub repo that does not exist, which satisfied
   the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
+- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
@@ -462,6 +473,8 @@ Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATA
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
 Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
+
+iOS (all optional; unset means the web app behaves exactly as before): `MOBILE_CALLBACK_URL`, `IOS_APP_ID`, `MIN_IOS_BUILD`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8_KEY`, `APNS_ENVIRONMENT`. Two things `config.Validate` refuses to start on, because both are silent otherwise: a **partial** APNs set — it wires up successfully and then drops every notification, indistinguishable from nobody having opted in — and a `MOBILE_CALLBACK_URL` whose host disagrees with `SITE_BASE_URL`, since iOS fetches `apple-app-site-association` from the link's own domain and a mismatch ends the login in Safari with the app still waiting. Empty `IOS_APP_ID` makes that route 404 **on purpose**: serving an association naming an empty app is worse, because iOS caches it.
 
 `SITE_DOMAIN` is the odd one out: it is consumed by **Caddy**, not by the Go
 binary, via `docker-compose.prod.yml` handing the caddy container the same

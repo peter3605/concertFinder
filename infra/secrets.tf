@@ -44,6 +44,17 @@ locals {
     SMTP_HOST             = "email-smtp.${var.region}.amazonaws.com"
     SMTP_FROM             = "${var.ses_notification_local_part}@${var.domain}"
     BACKUP_S3_BUCKET      = aws_s3_bucket.backups.id
+
+    # Universal link the OAuth callback returns to. Derived from the domain
+    # for the same reason SITE_BASE_URL is: iOS fetches the association file
+    # from the link's own host, so a hand-typed value that drifts from the
+    # domain ends every mobile login in Safari with the app still waiting.
+    # Empty when no bundle ID is configured, which disables the flow.
+    MOBILE_CALLBACK_URL = var.ios_bundle_id == "" ? "" : "https://${var.domain}/app/auth/callback"
+
+    # "<TeamID>.<BundleID>". Derived so it cannot disagree with the two
+    # halves APNs is configured with.
+    IOS_APP_ID = (var.ios_team_id == "" || var.ios_bundle_id == "") ? "" : "${var.ios_team_id}.${var.ios_bundle_id}"
   }
 
   # Tunables. Defaults mirror .env.example; the comments there explain why each
@@ -79,6 +90,12 @@ locals {
     EMAIL_DELIVERY_MODE = var.email_delivery_mode
     SMTP_PORT           = "587"
     CONTACT_EMAIL       = var.ses_verified_recipient
+
+    APNS_KEY_ID      = var.apns_key_id
+    APNS_TEAM_ID     = var.ios_team_id
+    APNS_BUNDLE_ID   = var.ios_bundle_id
+    APNS_ENVIRONMENT = var.apns_environment
+    MIN_IOS_BUILD    = tostring(var.min_ios_build)
   }
 
   # Operator-supplied. Terraform creates the parameter and never reads it.
@@ -93,6 +110,9 @@ locals {
     "TICKETMASTER_API_KEY",
     "SONGKICK_API_KEY",
     "BRAVE_SEARCH_API_KEY",
+    # The .p8 private key, PEM contents. SecureString like every other
+    # secret; never logged, never in command history.
+    "APNS_P8_KEY",
   ]
 
   # Sentinel written at create time. render-env.sh treats it as fatal.

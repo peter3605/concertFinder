@@ -114,6 +114,32 @@ type Config struct {
 	// operator contact. Defaults to peter.ho433@gmail.com for local dev.
 	ContactEmail string
 
+	// --- iOS client (docs/ios-app-plan.md Appendix A) ---
+
+	// APNs credentials. Token-based auth: one key per team, no annual
+	// certificate rotation. APNSP8Key is the PEM contents, not a path — it
+	// arrives as an SSM SecureString like every other secret here. Never log
+	// it.
+	APNSKeyID       string
+	APNSTeamID      string
+	APNSBundleID    string
+	APNSP8Key       string
+	APNSEnvironment string // "sandbox" | "production"
+
+	// IOSAppID is "<TeamID>.<BundleID>", served in the
+	// apple-app-site-association file.
+	IOSAppID string
+
+	// MobileCallbackURL is the universal link /api/auth/callback redirects to
+	// after an app-initiated login, e.g. https://<domain>/app/auth/callback.
+	// Empty disables the mobile auth flow outright rather than letting it
+	// complete into a session the app cannot read.
+	MobileCallbackURL string
+
+	// MinIOSBuild is the oldest client build this server supports, returned
+	// by /api/site-info. 0 means no floor.
+	MinIOSBuild int
+
 	// SigningKey is used for HMAC over CSRF and unsubscribe tokens.
 	// Separated from EncryptionKey so a signing-key rotation doesn't
 	// invalidate stored refresh-token ciphertexts. 32 bytes hex; falls back
@@ -203,6 +229,27 @@ func Load() (*Config, error) {
 	if c.ContactEmail == "" {
 		c.ContactEmail = "peter.ho433@gmail.com"
 	}
+	c.APNSKeyID = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
+	c.APNSTeamID = strings.TrimSpace(os.Getenv("APNS_TEAM_ID"))
+	c.APNSBundleID = strings.TrimSpace(os.Getenv("APNS_BUNDLE_ID"))
+	c.APNSP8Key = os.Getenv("APNS_P8_KEY")
+	c.APNSEnvironment = strings.ToLower(strings.TrimSpace(os.Getenv("APNS_ENVIRONMENT")))
+	if c.APNSEnvironment == "" {
+		// Production is the safe default: a sandbox client pointed at the
+		// production host fails loudly with BadDeviceToken, whereas a
+		// production build silently pushing to the sandbox host reaches
+		// nobody and reports success.
+		c.APNSEnvironment = "production"
+	}
+	c.IOSAppID = strings.TrimSpace(os.Getenv("IOS_APP_ID"))
+	if c.IOSAppID == "" && c.APNSTeamID != "" && c.APNSBundleID != "" {
+		// The two halves are already configured for APNs; deriving it saves
+		// a variable whose only failure mode is disagreeing with them.
+		c.IOSAppID = c.APNSTeamID + "." + c.APNSBundleID
+	}
+	c.MobileCallbackURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MOBILE_CALLBACK_URL")), "/")
+	c.MinIOSBuild = intEnv("MIN_IOS_BUILD", 0)
+
 	c.SigningKey = os.Getenv("SIGNING_KEY")
 	for k, v := range map[string]string{
 		"SPOTIFY_CLIENT_ID":     c.SpotifyClientID,
@@ -306,6 +353,60 @@ func (c Config) Validate() []error {
 		}
 		if c.SMTPFrom == "" {
 			errs = append(errs, errors.New("SMTP_FROM is required when EMAIL_DELIVERY_MODE=smtp"))
+		}
+	}
+
+	// APNs is all-or-nothing. A partial set is the dangerous state: push.New
+	// refuses it, the push worker wires up with a nil client and no-ops, and
+	// every notification is silently dropped while every other job runs
+	// normally. Nothing in the logs distinguishes that from "no user has
+	// opted in yet".
+	apns := []struct{ name, val string }{
+		{"APNS_KEY_ID", c.APNSKeyID},
+		{"APNS_TEAM_ID", c.APNSTeamID},
+		{"APNS_BUNDLE_ID", c.APNSBundleID},
+		{"APNS_P8_KEY", c.APNSP8Key},
+	}
+	set, missing := 0, []string{}
+	for _, v := range apns {
+		if strings.TrimSpace(v.val) != "" {
+			set++
+		} else {
+			missing = append(missing, v.name)
+		}
+	}
+	if set > 0 && len(missing) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"APNs is partially configured: %s missing. Push would wire up and then silently drop every notification — set all four or none",
+			strings.Join(missing, ", ")))
+	}
+	// Empty is not checked: Load always defaults it, so an empty value here
+	// means a hand-built Config (tests, half-configured checkouts) rather
+	// than a deployment that set it wrong.
+	if c.APNSEnvironment != "" && c.APNSEnvironment != "sandbox" && c.APNSEnvironment != "production" {
+		errs = append(errs, fmt.Errorf(
+			"APNS_ENVIRONMENT must be \"sandbox\" or \"production\" (got %q) — it selects the APNs host, and a token minted for one is rejected by the other",
+			c.APNSEnvironment))
+	}
+
+	// The universal link must live on the domain the AASA file is served
+	// from, or iOS will not hand the redirect to the app: it fetches the
+	// association from the link's own host. A mismatch ends the login in
+	// Safari on a page that bounces to the feed, with the app still waiting.
+	if c.MobileCallbackURL != "" {
+		switch base := hostOf(c.SiteBaseURL); {
+		case !strings.HasPrefix(c.MobileCallbackURL, "https://"):
+			errs = append(errs, fmt.Errorf(
+				"MOBILE_CALLBACK_URL must be https (got %q) — iOS only claims universal links over TLS",
+				c.MobileCallbackURL))
+		case base != "" && !strings.EqualFold(hostOf(c.MobileCallbackURL), base):
+			errs = append(errs, fmt.Errorf(
+				"MOBILE_CALLBACK_URL host (%q) differs from SITE_BASE_URL host (%q) — iOS fetches apple-app-site-association from the link's own domain, so the redirect would open Safari instead of the app",
+				hostOf(c.MobileCallbackURL), base))
+		}
+		if c.IOSAppID == "" {
+			errs = append(errs, errors.New(
+				"MOBILE_CALLBACK_URL is set but IOS_APP_ID is empty — apple-app-site-association would 404 and the universal link would never reach the app"))
 		}
 	}
 	return errs
