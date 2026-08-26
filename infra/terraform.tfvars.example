@@ -24,3 +24,24 @@ ses_dns_records_created = false
 # ses_notification_local_part  = "notifications"
 # backup_retention_days        = 30
 # billing_alarm_threshold_usd  = 15
+
+# --- iOS client (docs/aws-deploy.md §7a) ------------------------------------
+#
+# All optional: left unset the deployment serves the web app unchanged --
+# /api/auth/login?client=ios returns 501, apple-app-site-association 404s (on
+# purpose; serving one that names an empty app is worse, because iOS caches
+# it), and the push worker no-ops. What is not allowed is a PARTIAL APNs set,
+# which wires up successfully and then drops every notification silently;
+# config.Validate refuses to start on one.
+#
+# ios_bundle_id    = "com.example.concertfinder"  # explicit App ID, not a wildcard
+# ios_team_id      = "ABCDE12345"                 # Apple Developer team
+# apns_key_id      = "XYZ9876543"                 # the .p8's key ID
+# apns_environment = "production"                 # or "sandbox" for debug builds
+# min_ios_build    = 0                            # 0 means no floor
+#
+# The .p8 itself is NOT a Terraform value -- it is an operator secret, and it
+# is in operator_secrets, so `terraform apply` creates the parameter holding
+# REPLACE_ME and render-env.sh fails the next deploy until you run
+# ./scripts/set-secrets.sh. That applies even if you never ship the app: mark
+# it unused with [-] once. Do not apply until you have the key in hand.
