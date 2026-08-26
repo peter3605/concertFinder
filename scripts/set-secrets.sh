@@ -127,7 +127,21 @@ case "$choice" in
         # Expand a leading ~ that the shell does not expand inside a variable.
         case "$p8path" in "~/"*) p8path="$HOME/${p8path#\~/}" ;; esac
         if [ -r "$p8path" ]; then
-            put APNS_P8_KEY "$(cat "$p8path")"
+            # Escape the newlines. A PEM is multi-line and every consumer
+            # downstream of here is line-oriented: render-env.sh reads
+            # parameters with `--output text` and a `while IFS=$'\t' read`
+            # loop, so a stored newline ends the record -- APNS_P8_KEY would
+            # arrive holding only "-----BEGIN PRIVATE KEY-----" and each
+            # remaining PEM line would become its own junk `<base64>=` entry
+            # in .env. Even past that, docker compose env_file has no
+            # multi-line syntax. push.parseP8 unescapes before pem.Decode,
+            # and .env.example documents this as the storage format.
+            esc=""
+            while IFS= read -r line || [ -n "$line" ]; do
+                esc="$esc$line\\n"
+            done < "$p8path"
+            put APNS_P8_KEY "$esc"
+            unset esc line
         else
             printf '  \033[31mcannot read %s\033[0m\n' "$p8path"
         fi
