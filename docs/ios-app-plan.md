@@ -44,7 +44,10 @@ Two things the plan predicted were confirmed live in production before the fix
 shipped: `/.well-known/apple-app-site-association` was serving SPA HTML, and
 `/app/auth/callback` was bouncing silently to the feed.
 
-### Not done, and none of it is engineering
+### The four gating items, and none of them is engineering
+
+*Items 2 and 3 closed on 2026-08-25/26; they are kept in place, marked, because
+each records a trap that recurs on any rebuild.*
 
 **1. Spotify Extended Quota Mode ([§3.2](#32-spotify-development-mode)) —
 start this first.** Multi-week turnaround, approval not guaranteed, and
@@ -73,18 +76,44 @@ Production key — reissue before the first upload, alongside flipping
 `apns_environment`. Both halves must move together or push fails as
 `BadDeviceToken` with nothing in the logs to say why.
 
-**3. Server-side iOS configuration — apply Terraform LAST.**
+**3. Server-side iOS configuration — applied and deployed 2026-08-26.** All
+eight parameters exist under `/concertfinder/`, `APNS_P8_KEY` holds the real
+key, and nothing holds the `REPLACE_ME` sentinel. Verified live through Caddy
+after the deploy:
 
-> ⚠️ `APNS_P8_KEY` is in `operator_secrets`, so `terraform apply` creates it
-> holding `REPLACE_ME`, and `render-env.sh` refuses to write the env file
-> while any parameter holds that sentinel. **Applying before you have the key
-> breaks the next deploy.** Run `./scripts/set-secrets.sh` in the same sitting
-> — it offers `[f]` to read the `.p8` from a file, or `[-]` to mark it unused.
-> Runbook: `docs/aws-deploy.md` §7a.
+| Check | Result |
+|---|---|
+| `/.well-known/apple-app-site-association` | 200 `application/json`, no redirect, `L3MY7DN27B.com.concertfinder.ph` |
+| `/api/site-info` | returns `min_ios_build: 0` |
+| `/api/auth/login?client=ios` | 400 "app_challenge is required" — i.e. enabled; with a challenge it 302s to Spotify with the right `redirect_uri` |
+
+> ⚠️ Kept because it still applies to any future rebuild: `APNS_P8_KEY` is in
+> `operator_secrets`, so `terraform apply` creates it holding `REPLACE_ME`, and
+> `render-env.sh` refuses to write the env file while any parameter holds that
+> sentinel. **Applying before you have the key breaks the next deploy.** Run
+> `./scripts/set-secrets.sh` in the same sitting — it offers `[f]` to read the
+> `.p8` from a file, or `[-]` to mark it unused. Runbook:
+> `docs/aws-deploy.md` §7a.
 
 `MOBILE_CALLBACK_URL` and `IOS_APP_ID` are derived by Terraform from
 `var.domain` and `var.ios_bundle_id`, so they cannot drift from the domain the
 certificate is issued for.
+
+**The `.p8` is stored with escaped newlines**, and that is not cosmetic:
+`render-env.sh` parses `--output text` line by line, so a stored newline
+truncates the value at `-----BEGIN PRIVATE KEY-----` and turns each remaining
+PEM line into a junk `.env` entry. `config.Validate` only checks the key is
+non-empty, so the truncation passes validation and surfaces later as
+`push.New` failing on "not valid PEM" — a half-configured push path, which is
+exactly what the partial-set check exists to prevent. `set-secrets.sh` escapes
+on the way in as of `fc0b673`.
+
+Two pieces of unrelated drift were caught by the plan and fixed in
+`terraform.tfvars` rather than applied: `EMAIL_DELIVERY_MODE` would have been
+reset from `smtp` to the `log` default, silently ending every digest and
+instant-notify email, and the SES verification resource would have been
+destroyed because the previous apply passed `-var ses_dns_records_created=true`
+on the command line while the file said `false`.
 
 **4. M8 submission.** Privacy labels, screenshots, demo account, review notes.
 [§9](#9-app-store-submission) is the checklist. Raise
