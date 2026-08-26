@@ -53,14 +53,25 @@ can sign in — *including App Review's own reviewer*, which is why §3.2 says t
 submit with an allowlisted demo account and treat Extended Quota as the thing
 that makes the app usable by anyone who downloads it.
 
-**2. Apple Developer account.** Gives the App ID, and therefore the bundle
-identifier, the APNs key, and signing. Three placeholders wait on it:
+**2. Apple Developer account — done 2026-08-25.** The App ID is registered as
+an explicit `com.concertfinder.ph` under team `L3MY7DN27B`, with Push
+Notifications and Associated Domains enabled, and an APNs auth key
+(`42KZTQHRRH`). `ios/project.yml`, `Keychain.swift`, and
+`infra/terraform.tfvars` carry the real values; the bundle identifier is now
+effectively permanent, since iOS caches `IOS_APP_ID` from the association file.
 
 | Placeholder | Where | Note |
 |---|---|---|
-| Bundle identifier | `ios/project.yml` | Currently `com.concertfinder.app`, a guess. Must match the real App ID, and is also `APNS_BUNDLE_ID` and half of `IOS_APP_ID`. |
+| ~~Bundle identifier~~ | `ios/project.yml` | Resolved: `com.concertfinder.ph`. |
 | Spotify logo asset | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | A typographic placeholder. The real mark must come from Spotify's brand kit — it may not be recreated. |
-| Signing | Xcode / App Store Connect | — |
+| Signing | Xcode / App Store Connect | Team is available; no team is set in `project.yml`, so a device build needs one selected once. |
+
+The APNs key was created restricted to **Sandbox**, which matches the
+`development` entitlement and `apns_environment = "sandbox"`. A Sandbox-only
+key cannot send to the production host, so TestFlight needs a Sandbox &
+Production key — reissue before the first upload, alongside flipping
+`apns_environment`. Both halves must move together or push fails as
+`BadDeviceToken` with nothing in the logs to say why.
 
 **3. Server-side iOS configuration — apply Terraform LAST.**
 
