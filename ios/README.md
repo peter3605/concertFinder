@@ -43,31 +43,40 @@ Change it in `project.yml` under the target's `configs:`, then regenerate.
 ## Before this can run against the real backend
 
 The backend is deployed and serving at `https://concertfinder.app`, and the
-domain is already wired into the entitlements and the Release config. What is
-still outstanding needs an Apple Developer account, and every item fails
-*silently* — the app builds, launches, and sign-in simply never completes.
+domain is already wired into the entitlements and the Release config. The App
+ID was registered 2026-08-25 — `com.concertfinder.ph`, team `L3MY7DN27B` — so
+`project.yml` carries the real bundle identifier rather than a guess, and it
+is now effectively permanent: it is also `APNS_BUNDLE_ID` and the second half
+of `IOS_APP_ID`, which iOS caches from the association file.
 
-1. **Apple identifiers.** The bundle identifier in `project.yml`
-   (`com.concertfinder.app`) is a guess. It has to match the real App ID, and
-   it is also `APNS_BUNDLE_ID` and the second half of `IOS_APP_ID`.
-2. **The server side**, in SSM (see `../infra/secrets.tf`, which derives most
-   of these from `var.domain` and `var.ios_bundle_id`):
+What is still outstanding, and every item fails *silently* — the app builds,
+launches, and sign-in simply never completes:
+
+1. **The server side**, in SSM. `../infra/terraform.tfvars` holds the values
+   and `../infra/secrets.tf` derives the rest from `var.domain` and
+   `var.ios_bundle_id`, but none of it is live until `terraform apply` plus a
+   deploy:
    - `MOBILE_CALLBACK_URL` → `https://concertfinder.app/app/auth/callback`.
      Empty means `/api/auth/login?client=ios` returns 501 rather than
      completing into a session the app cannot read.
-   - `IOS_APP_ID` → `<TeamID>.<BundleID>`. Empty means
+   - `IOS_APP_ID` → `L3MY7DN27B.com.concertfinder.ph`. Empty means
      `/.well-known/apple-app-site-association` 404s **on purpose** — serving
      an association naming an empty app is worse, because iOS caches it.
    - The four `APNS_*` variables. `config.Validate` rejects a partial set at
      startup, so a half-configured deployment refuses to boot rather than
      dropping every notification quietly.
+2. **Signing**, in Xcode. `project.yml` sets no team, so a device build needs
+   one selected once.
 
-Until then the app builds and runs against the live API for everything except
-sign-in and push.
+`aps-environment` in the entitlements is `development` and the server is
+configured `sandbox` to match, which is what a debug build off Xcode produces.
+Xcode rewrites the entitlement to `production` for TestFlight and App Store
+builds, and a token minted against one host is rejected by the other as
+`BadDeviceToken` — so `apns_environment` flips to `"production"` in the same
+sitting as the first TestFlight upload, not afterwards.
 
-Note that the currently deployed binary predates this branch: `/api/site-info`
-does not yet return `min_ios_build`, and the mobile auth routes are not there.
-Deploying `ios-app` is what closes that gap.
+Until the apply lands, the app builds and runs against the live API for
+everything except sign-in and push.
 
 ## Layout
 

@@ -22,7 +22,7 @@ actor KeychainTokenStore: TokenStore {
     private var cached: String?
     private var didLoad = false
 
-    init(service: String = "com.concertfinder.app.session") {
+    init(service: String = "com.concertfinder.ph.session") {
         self.service = service
     }
 
