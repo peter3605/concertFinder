@@ -17,6 +17,12 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    # Signing. Automatic, because the entitlements this app needs -- push and
+    # associated domains -- have to be reflected in the profile, and letting
+    # Xcode regenerate it is less error-prone than maintaining one by hand.
+    # The team is the one the App ID com.concertfinder.ph is registered under.
+    DEVELOPMENT_TEAM: L3MY7DN27B
+    CODE_SIGN_STYLE: Automatic
     # Strict concurrency is the point of targeting Swift 6 here: the app is a
     # network client with a shared cache and a poll timer, which is exactly
     # the shape that grows data races quietly.
