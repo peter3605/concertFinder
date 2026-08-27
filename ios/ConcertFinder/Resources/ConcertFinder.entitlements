@@ -17,6 +17,12 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:concertfinder.app</string>
+		<!-- Separate service, separate purpose, and NOT redundant with
+		     applinks above. ASWebAuthenticationSession's https(host:path:)
+		     callback validates the domain through webcredentials; without
+		     this iOS refuses to start the session and sign-in hangs on the
+		     Spotify page with no error. internal/http/aasa.go serves both. -->
+		<string>webcredentials:concertfinder.app</string>
 	</array>
 </dict>
 </plist>
