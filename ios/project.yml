@@ -32,7 +32,7 @@ targets:
       - path: ConcertFinder
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.concertfinder.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.concertfinder.ph
         INFOPLIST_FILE: ConcertFinder/Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: ConcertFinder/Resources/ConcertFinder.entitlements
         CURRENT_PROJECT_VERSION: 1
