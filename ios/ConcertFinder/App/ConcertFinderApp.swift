@@ -9,6 +9,10 @@ struct ConcertFinderApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                // nil for `system`, which is how SwiftUI spells "do not
+                // override the device".
+                .preferredColorScheme(container.theme.choice.colorScheme)
+                .environment(container.theme)
                 .environment(container.auth)
                 .environment(container.feed)
                 .environment(container.saved)
@@ -36,6 +40,9 @@ struct ConcertFinderApp: App {
 @MainActor
 @Observable
 final class AppContainer {
+    /// Appearance choice. Held here rather than in a view so the override is
+    /// applied once, above every screen, instead of per-screen.
+    let theme = ThemeStore()
     let api: APIClient
     let baseURL: URL
     let auth: AuthController
