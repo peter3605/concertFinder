@@ -171,8 +171,20 @@ extension Date {
         formatted(.dateTime.month(.wide).year())
     }
 
-    /// The key events are grouped into sections by.
+    /// The key events are grouped into sections by. Sorts chronologically as
+    /// text: "2026-08" < "2026-09" < "2027-01".
+    ///
+    /// Built from calendar components rather than `.formatted`, because
+    /// `.formatted` arranges fields by *locale* and not by the order they are
+    /// listed. `.dateTime.year().month(.twoDigits)` renders "08/2026" on a US
+    /// device, so sorting the keys as text put "01/2027" above "08/2026" and
+    /// stood the feed's month sections on their head -- next year first.
+    ///
+    /// `Calendar.current` keeps the bucketing *local*, which the cards depend
+    /// on: a show at 00:30Z on Sep 1 renders as "Aug 31" in an eastern
+    /// timezone and has to sit under August with it.
     var monthKey: String {
-        formatted(.dateTime.year().month(.twoDigits))
+        let parts = Calendar.current.dateComponents([.year, .month], from: self)
+        return String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
     }
 }

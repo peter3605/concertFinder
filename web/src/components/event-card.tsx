@@ -45,6 +45,7 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
               <span>{formatDay(event.date)}</span>
+              {event.is_festival && <Badge variant="muted">Festival</Badge>}
             </div>
             {multi ? (
               <>
@@ -66,12 +67,20 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
               </>
             ) : (
               <>
-                <h3 className="mt-1 truncate text-lg font-semibold">{solo.artist.name}</h3>
+                <div className="mt-1 flex items-center gap-2">
+                  <h3 className="truncate text-lg font-semibold">{solo.artist.name}</h3>
+                  <BillingLabel billing={solo.billing} />
+                </div>
                 <div className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
                   <MapPin className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{place}</span>
                 </div>
               </>
+            )}
+            {event.name && (
+              <p className="mt-1 truncate text-sm text-muted-foreground" title={event.name}>
+                {event.name}
+              </p>
             )}
           </div>
           {/* A single-act card keeps its controls in the corner, where they
@@ -91,7 +100,10 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
             {shown.map((a) => (
               <li key={a.dedup_key} className="flex items-center justify-between gap-3 py-1.5">
                 <div className="min-w-0 flex-1">
-                  <span className="truncate text-sm font-medium">{a.artist.name}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium">{a.artist.name}</span>
+                    <BillingLabel billing={a.billing} />
+                  </span>
                   {a.artist.genres && a.artist.genres.length > 0 && (
                     <div className="mt-0.5 flex flex-wrap gap-1">
                       {a.artist.genres.slice(0, 2).map((g) => (
@@ -147,6 +159,17 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
       </CardContent>
     </Card>
   );
+}
+
+// Where an act sits on the bill, when we have any basis for saying.
+//
+// Absent billing renders nothing at all rather than a neutral label: it is
+// genuinely unknown for every event that did not come from Ticketmaster, and
+// a blank is honest where "Support" would be a claim. The wording stays soft
+// for the same reason — the ordering behind it is inferred, not published.
+function BillingLabel({ billing }: { billing?: Act['billing'] }) {
+  if (!billing) return null;
+  return <Badge variant="muted">{billing === 'headliner' ? 'Headlining' : 'Support'}</Badge>;
 }
 
 // Star (save) + bell (subscribe) for one artist. Labels name the artist

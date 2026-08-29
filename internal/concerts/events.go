@@ -16,16 +16,18 @@ func GroupEvents(cs []Concert) []Event {
 		if !ok {
 			idx[key] = len(events)
 			events = append(events, Event{
-				EventKey:  key,
-				Date:      c.Date,
-				Venue:     c.Venue,
-				City:      c.City,
-				State:     c.State,
-				Country:   c.Country,
-				Latitude:  c.Latitude,
-				Longitude: c.Longitude,
-				Acts:      []Act{actOf(c)},
-				Links:     append([]TicketLink(nil), c.Links...),
+				EventKey:   key,
+				Date:       c.Date,
+				Venue:      c.Venue,
+				City:       c.City,
+				State:      c.State,
+				Country:    c.Country,
+				Latitude:   c.Latitude,
+				Longitude:  c.Longitude,
+				Name:       c.EventName,
+				IsFestival: c.IsFestival,
+				Acts:       []Act{actOf(c)},
+				Links:      append([]TicketLink(nil), c.Links...),
 			})
 			SortLinks(events[len(events)-1].Links)
 			continue
@@ -56,8 +58,38 @@ func GroupEvents(cs []Concert) []Event {
 		if e.Latitude == 0 && e.Longitude == 0 {
 			e.Latitude, e.Longitude = c.Latitude, c.Longitude
 		}
+		if e.Name == "" {
+			e.Name = c.EventName
+		}
+		// Any act's source saying "festival" is enough. Ticketmaster marks
+		// this on roughly 1 event in 400, so requiring agreement across a
+		// bill would discard the signal almost every time it appears.
+		e.IsFestival = e.IsFestival || c.IsFestival
+	}
+	for i := range events {
+		events[i].Name = titleWorthShowing(events[i])
 	}
 	return events
+}
+
+// titleWorthShowing drops an event title that only repeats an act already on
+// the card. Ticketmaster names an ordinary club show after its performer, so
+// keeping it would put "Japanese Breakfast" directly under "Japanese
+// Breakfast" on the majority of cards, while a festival or a package tour --
+// the cases where the title is the whole point -- keeps it.
+//
+// Done here rather than in each client so the two cannot disagree about it.
+func titleWorthShowing(e Event) string {
+	if e.Name == "" {
+		return ""
+	}
+	name := Normalize(e.Name)
+	for _, a := range e.Acts {
+		if name == Normalize(a.Artist.Name) {
+			return ""
+		}
+	}
+	return e.Name
 }
 
 func actOf(c Concert) Act {
@@ -66,6 +98,7 @@ func actOf(c Concert) Act {
 		DedupKey:   c.DedupKey,
 		Saved:      c.Saved,
 		Subscribed: c.Subscribed,
+		Billing:    c.Billing,
 	}
 }
 

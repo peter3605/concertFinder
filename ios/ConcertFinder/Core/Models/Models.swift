@@ -45,10 +45,24 @@ struct Act: Codable, Hashable, Identifiable, Sendable {
     let dedupKey: String
     var saved: Bool?
     var subscribed: Bool?
+    /// Where this act sits on the bill, when the server had any basis for
+    /// saying. Inferred from position in Ticketmaster's attraction list,
+    /// which is not documented as billing order -- see
+    /// internal/concerts/billing.go. `nil` means unknown, which is the honest
+    /// answer for everything found through the Phase 2 fallback chain, and
+    /// must render as nothing rather than as "Support".
+    var billing: String?
 
     var id: String { dedupKey }
     var isSaved: Bool { saved ?? false }
     var isSubscribed: Bool { subscribed ?? false }
+
+    enum Billing: String {
+        case headliner
+        case support
+    }
+
+    var billingSlot: Billing? { billing.flatMap(Billing.init(rawValue:)) }
 }
 
 /// One show — one card, one night out.
@@ -73,6 +87,14 @@ struct Event: Codable, Hashable, Identifiable, Sendable {
     let longitude: Double?
     var acts: [Act]
     let links: [TicketLink]
+    /// The promoter's title for the night -- a festival or a package tour.
+    /// The server omits it when it would only repeat an act's name, which is
+    /// what Ticketmaster calls an ordinary club show, so a value here is
+    /// always worth showing.
+    var name: String?
+    /// Ticketmaster's own classification rather than a guess from the name.
+    /// Sparse: `nil`/false means "not marked", not "definitely not one".
+    var isFestival: Bool?
 
     var id: String { eventKey }
 
