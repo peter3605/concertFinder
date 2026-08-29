@@ -57,11 +57,27 @@ final class FeedModel {
 
     /// Events grouped into month sections, which is how the feed reads.
     var sections: [(key: String, heading: String, events: [Event])] {
-        let grouped = Dictionary(grouping: events, by: { $0.date.monthKey })
-        return grouped.keys.sorted().map { key in
-            let items = (grouped[key] ?? []).sorted { $0.date < $1.date }
-            return (key: key, heading: items.first?.date.monthHeading ?? key, events: items)
-        }
+        Self.monthSections(for: events)
+    }
+
+    /// Split out from `sections` and left free of model state so the ordering
+    /// can be tested directly -- `events` is `private(set)`, so a test cannot
+    /// stage one otherwise, and this got shipped backwards once.
+    ///
+    /// Sections are ordered by their earliest event rather than by `monthKey`,
+    /// so the feed's order does not depend on the key's text format at all.
+    nonisolated static func monthSections(
+        for events: [Event]
+    ) -> [(key: String, heading: String, events: [Event])] {
+        Dictionary(grouping: events, by: { $0.date.monthKey })
+            .map { key, items in
+                let sorted = items.sorted { $0.date < $1.date }
+                return (key: key, heading: sorted.first?.date.monthHeading ?? key, events: sorted)
+            }
+            .sorted {
+                ($0.events.first?.date ?? .distantFuture)
+                    < ($1.events.first?.date ?? .distantFuture)
+            }
     }
 
     var isEmpty: Bool { events.isEmpty && !isLoading }
