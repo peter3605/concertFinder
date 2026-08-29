@@ -526,7 +526,15 @@ func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 		Latitude:  e.Venue.Latitude,
 		Longitude: e.Venue.Longitude,
 		Links:     []TicketLink{{Source: SourceTicketmaster, URL: e.URL}},
+
+		EventName:  e.Name,
+		IsFestival: e.IsFestival,
 	}
+	names := make([]string, 0, len(e.Lineup))
+	for _, at := range e.Lineup {
+		names = append(names, at.Name)
+	}
+	c.Billing = billingOf(names, a.Name)
 	c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
 	return c
 }

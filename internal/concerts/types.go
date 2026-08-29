@@ -62,6 +62,11 @@ type Act struct {
 	// HTTP handler, mirroring the fields they replace on Concert.
 	Saved      bool `json:"saved,omitempty"`
 	Subscribed bool `json:"subscribed,omitempty"`
+	// Billing is "headliner", "support", or "" for unknown -- and unknown is
+	// the honest common case. See billing.go: this is inferred from position
+	// in Ticketmaster's attraction array, which Ticketmaster does not promise
+	// is billing order, and no other source supplies one at all.
+	Billing string `json:"billing,omitempty"`
 }
 
 // Event is one show — a single (date, venue, city) — carrying every artist
@@ -89,6 +94,16 @@ type Event struct {
 	Longitude float64      `json:"longitude,omitempty"`
 	Acts      []Act        `json:"acts"`
 	Links     []TicketLink `json:"links"`
+	// Name is the promoter's title for the night -- a festival or a tour,
+	// e.g. "The R&B Tour - Starring Usher Raymond & Chris Brown".
+	//
+	// Empty when it would only repeat an act's name, which is what
+	// Ticketmaster titles an ordinary club show. GroupEvents does that
+	// clearing so the rule lives in one place instead of in each client.
+	Name string `json:"name,omitempty"`
+	// IsFestival is Ticketmaster's own classification, not a guess from the
+	// name. Sparse: false means "not marked", not "definitely not one".
+	IsFestival bool `json:"is_festival,omitempty"`
 }
 
 // Concert is the canonical shape returned to the frontend. One row per
@@ -110,4 +125,10 @@ type Concert struct {
 	// Subscribed mirrors Saved but for the user's per-artist subscription
 	// list (drives the "notify me instantly for this artist" feature).
 	Subscribed bool `json:"subscribed,omitempty"`
+	// EventName, IsFestival and Billing are carried per row because the
+	// snapshot persists Concerts, not Events; GroupEvents lifts them onto the
+	// Event and its Acts at assembly time.
+	EventName  string `json:"event_name,omitempty"`
+	IsFestival bool   `json:"is_festival,omitempty"`
+	Billing    string `json:"billing,omitempty"`
 }
