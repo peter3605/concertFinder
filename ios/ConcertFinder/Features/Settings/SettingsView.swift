@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AuthController.self) private var auth
+    @Environment(ThemeStore.self) private var theme
     @Environment(PushRegistrar.self) private var push
     @Environment(\.openURL) private var openURL
 
@@ -24,6 +25,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 accountSection
+                appearanceSection
                 notificationsSection
                 NavigationLink { LocationView() } label: {
                     Label("Location", systemImage: "location")
@@ -59,6 +61,21 @@ struct SettingsView: View {
                     await auth.signOut()
                 }
             }
+        }
+    }
+
+    /// Appearance. `System` is the default and defers to the device, which is
+    /// what the app did before this control existed -- so a user who never
+    /// opens this section sees no change.
+    private var appearanceSection: some View {
+        @Bindable var theme = theme
+        return Section("Appearance") {
+            Picker("Theme", selection: $theme.choice) {
+                ForEach(ThemeChoice.allCases) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
         }
     }
 
