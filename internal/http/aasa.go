@@ -31,6 +31,14 @@ func (h *AASAHandler) Get(w http.ResponseWriter, r *http.Request) {
 	// Only the OAuth return path is claimed. Claiming "*" would route every
 	// link on the domain into the app, including the privacy and terms pages
 	// that App Review opens in a browser.
+	//
+	// webcredentials is a separate service from applinks and is NOT optional
+	// here: ASWebAuthenticationSession's https(host:path:) callback -- the only
+	// way an https redirect can end the auth sheet, since a custom scheme would
+	// mean abandoning the universal link -- validates the domain through
+	// webcredentials, not applinks. Without it iOS refuses to start the session
+	// at all. Both services must name the app, and the simulator does not
+	// enforce this, so it only shows up on a device.
 	writeJSON(w, map[string]any{
 		"applinks": map[string]any{
 			"details": []map[string]any{
@@ -41,6 +49,9 @@ func (h *AASAHandler) Get(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			},
+		},
+		"webcredentials": map[string]any{
+			"apps": []string{h.AppID},
 		},
 	})
 }

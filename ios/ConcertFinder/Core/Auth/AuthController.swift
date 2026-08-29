@@ -130,13 +130,31 @@ final class AuthController: NSObject {
         }
     }
 
+    /// The redirect that ends the auth sheet: MOBILE_CALLBACK_URL's host and
+    /// path. Derived from the API origin rather than written out, so the two
+    /// cannot drift -- the server builds the same link from SITE_BASE_URL, and
+    /// config.Validate refuses to start if those hosts disagree.
+    ///
+    /// This must be a real callback and not nil. `callbackURLScheme: nil` asks
+    /// the session to match nothing, so the sheet lands on the callback page
+    /// and sits there forever: the user sees Spotify accept their login and
+    /// then nothing at all, with no error to report. That is how this shipped
+    /// the first time it was run on a device.
+    ///
+    /// `.https` requires the `webcredentials` service for this host in both
+    /// the entitlements and the apple-app-site-association file -- a different
+    /// service from the `applinks` entry that routes the link itself. iOS
+    /// refuses to start the session without it, and the simulator does not
+    /// enforce it, so it fails only on a real phone.
+    private static func authCallback(for baseURL: URL) -> ASWebAuthenticationSession.Callback {
+        .https(host: baseURL.host() ?? "concertfinder.app", path: "/app/auth/callback")
+    }
+
     private func presentWebAuth(startingAt url: URL) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: url,
-                // The universal link's host. iOS matches the redirect against
-                // this to know when the flow is done.
-                callbackURLScheme: nil
+                callback: Self.authCallback(for: baseURL)
             ) { callbackURL, error in
                 if let error {
                     let code = (error as NSError).code
