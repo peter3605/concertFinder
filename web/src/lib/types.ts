@@ -33,6 +33,11 @@ export type Act = {
   dedup_key: string;
   saved?: boolean;
   subscribed?: boolean;
+  // Inferred from position in Ticketmaster's attraction list, which is not
+  // documented as billing order — see internal/concerts/billing.go. Absent
+  // means unknown, which is the honest answer for everything the Phase 2
+  // fallback chain finds, and must not be rendered as "support".
+  billing?: 'headliner' | 'support';
 };
 
 // One show, carrying every artist from the user's profile playing it. A
@@ -50,6 +55,13 @@ export type Event = {
   country?: string;
   acts: Act[];
   links: TicketLink[];
+  // The promoter's title for the night — a festival or a package tour. The
+  // server omits it when it would only repeat an act's name, which is what
+  // Ticketmaster calls an ordinary club show.
+  name?: string;
+  // Ticketmaster's own classification, not a guess from the name. Sparse:
+  // absent means "not marked", not "definitely not a festival".
+  is_festival?: boolean;
 };
 
 export type Location = {
