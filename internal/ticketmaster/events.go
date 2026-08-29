@@ -6,17 +6,33 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Event is Ticketmaster's own shape — kept in this package per the "no shared
 // models" rule. Callers translate to the canonical concerts.Concert.
 type Event struct {
-	ID    string
-	Name  string
-	URL   string
-	Start time.Time
-	Venue Venue
+	ID   string
+	Name string
+	URL  string
+	// Lineup is every attraction on the bill, in the order Ticketmaster
+	// returned them. That order is NOT documented as billing order and is not
+	// always it -- see concerts.billingOf, which is where the caveats live.
+	// Kept raw here; this package reports what the API said.
+	Lineup []Attraction
+	// IsFestival is Ticketmaster's own classification subType, not a guess
+	// from the name. It is sparse -- roughly 1 event in 400 carries it -- so
+	// false means "not marked", never "definitely not a festival".
+	IsFestival bool
+	Start      time.Time
+	Venue      Venue
+}
+
+// Attraction is one act on an event's bill.
+type Attraction struct {
+	ID   string
+	Name string
 }
 
 type Venue struct {
@@ -40,7 +56,16 @@ type eventsResp struct {
 					LocalDate string `json:"localDate"`
 				} `json:"start"`
 			} `json:"dates"`
+			Classifications []struct {
+				SubType struct {
+					Name string `json:"name"`
+				} `json:"subType"`
+			} `json:"classifications"`
 			Embedded struct {
+				Attractions []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"attractions"`
 				Venues []struct {
 					Name string `json:"name"`
 					City struct {
@@ -126,12 +151,28 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 				v.Longitude = lng
 			}
 		}
+		lineup := make([]Attraction, 0, len(e.Embedded.Attractions))
+		for _, a := range e.Embedded.Attractions {
+			if a.Name == "" {
+				continue
+			}
+			lineup = append(lineup, Attraction{ID: a.ID, Name: a.Name})
+		}
+		isFestival := false
+		for _, cl := range e.Classifications {
+			if strings.EqualFold(cl.SubType.Name, "Festival") {
+				isFestival = true
+				break
+			}
+		}
 		events = append(events, Event{
-			ID:    e.ID,
-			Name:  e.Name,
-			URL:   e.URL,
-			Start: start,
-			Venue: v,
+			Lineup:     lineup,
+			IsFestival: isFestival,
+			ID:         e.ID,
+			Name:       e.Name,
+			URL:        e.URL,
+			Start:      start,
+			Venue:      v,
 		})
 	}
 	return events, nil

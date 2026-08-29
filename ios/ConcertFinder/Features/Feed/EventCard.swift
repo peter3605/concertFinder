@@ -31,17 +31,36 @@ struct EventCard: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(event.venue)
                 .font(.headline)
+            // The promoter's title for the night, when it is not just the
+            // act's name repeated. This is the line that tells you the show
+            // is a festival rather than a club date.
+            if let name = event.name, !name.isEmpty {
+                Text(name)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
             Text(event.location)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             // Time is shown for a single-act bill only. On a festival the
             // date is the *earliest* act's set time, so presenting it as the
             // show's time would be a claim the data does not support.
-            Text(event.acts.count == 1
-                 ? event.date.formatted(date: .abbreviated, time: .shortened)
-                 : event.date.formatted(date: .abbreviated, time: .omitted))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: Metrics.tight) {
+                Text(event.acts.count == 1
+                     ? event.date.formatted(date: .abbreviated, time: .shortened)
+                     : event.date.formatted(date: .abbreviated, time: .omitted))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if event.isFestival == true {
+                    Text("Festival")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color(.tertiarySystemFill))
+                        .clipShape(Capsule())
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Three separate labels read as three swipes for one heading.
@@ -49,6 +68,28 @@ struct EventCard: View {
         // user reads it.
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// Where an act sits on the bill, when there is any basis for saying.
+///
+/// An unknown slot renders nothing rather than a neutral label. It is
+/// genuinely unknown for every event that did not come from Ticketmaster, and
+/// silence is honest where "Support" would be a claim. The wording stays soft
+/// for the same reason: the ordering behind it is inferred, not published.
+struct BillingLabel: View {
+    let slot: Act.Billing?
+
+    var body: some View {
+        if let slot {
+            Text(slot == .headliner ? "Headlining" : "Support")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color(.tertiarySystemFill))
+                .clipShape(Capsule())
+        }
     }
 }
 
@@ -61,8 +102,11 @@ struct ActRow: View {
     var body: some View {
         HStack(spacing: Metrics.tight) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(act.artist.name)
-                    .font(.subheadline.weight(.medium))
+                HStack(spacing: 6) {
+                    Text(act.artist.name)
+                        .font(.subheadline.weight(.medium))
+                    BillingLabel(slot: act.billingSlot)
+                }
                 if let genres = act.artist.genres, !genres.isEmpty {
                     Text(genres.prefix(2).joined(separator: " · "))
                         .font(.caption2)
