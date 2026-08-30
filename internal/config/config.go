@@ -81,6 +81,11 @@ type Config struct {
 	// crowd — the ledger enforces per-user limits, not the account total.
 	RateCapTMPerUserDaily       int
 	RateCapSongkickPerUserDaily int
+	// Account-wide daily ceilings. These are the numbers the upstream
+	// actually enforces -- Ticketmaster's 5000/day is per API key, not per
+	// user of ours -- so per-user caps alone let N users multiply past it.
+	RateCapTMAccountDaily       int
+	RateCapSongkickAccountDaily int
 
 	// ConcertCacheTTLHours is how long cached per-artist upstream responses
 	// stay trusted. 0 = package default (12h). Longer means fewer quota-
@@ -209,6 +214,10 @@ func Load() (*Config, error) {
 	// day's allowance for each source; see the field comments.
 	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
 	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 100)
+	// Defaults are the documented upstream allowances, so an operator who
+	// sets nothing is bounded by the real limit rather than by nothing.
+	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
+	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 
 	c.EmailDeliveryMode = strings.ToLower(strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_MODE")))
