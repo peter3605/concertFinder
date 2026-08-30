@@ -178,15 +178,34 @@ func main() {
 		rateLedger := &rate.Ledger{
 			Pool: pool,
 			Caps: rate.Caps{
-				Ticketmaster: cfg.RateCapTMPerUserDaily,
-				Songkick:     cfg.RateCapSongkickPerUserDaily,
+				Ticketmaster:        cfg.RateCapTMPerUserDaily,
+				Songkick:            cfg.RateCapSongkickPerUserDaily,
+				TicketmasterAccount: cfg.RateCapTMAccountDaily,
+				SongkickAccount:     cfg.RateCapSongkickAccountDaily,
 			},
 		}
 		logger.Info("rate ledger enabled",
 			"tm_daily", cfg.RateCapTMPerUserDaily,
 			"songkick_daily", cfg.RateCapSongkickPerUserDaily,
+			"tm_account_daily", cfg.RateCapTMAccountDaily,
+			"songkick_account_daily", cfg.RateCapSongkickAccountDaily,
 			"max_artists_per_scan", spotify.MaxScoredArtists,
 		)
+		// How many users can do a full cold scan on one day before the shared
+		// allowance is gone. This is the number that decides whether opening
+		// the app to the public degrades everyone's feed, and it is not
+		// obvious from either cap on its own.
+		if cfg.RateCapTMAccountDaily > 0 && cfg.RateCapTMPerUserDaily > 0 {
+			logger.Info("TM account allowance covers a bounded number of full scans per day",
+				"full_scans_per_day", cfg.RateCapTMAccountDaily/cfg.RateCapTMPerUserDaily,
+			)
+			if cfg.RateCapTMAccountDaily < cfg.RateCapTMPerUserDaily {
+				logger.Warn("TM account cap is below the per-user cap; no single user can finish a scan",
+					"account", cfg.RateCapTMAccountDaily,
+					"per_user", cfg.RateCapTMPerUserDaily,
+				)
+			}
+		}
 		// A cap below the artist count means a user can never cover their own
 		// profile: every scan runs out of quota partway and reports itself
 		// incomplete. Worth saying out loud rather than leaving to be

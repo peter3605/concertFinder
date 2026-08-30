@@ -63,6 +63,23 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
 - **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now TM=250 / Songkick=100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
+- **Per-user caps multiply; the account ceiling is what the upstream enforces.**
+  Ticketmaster's 5000/day is per API key, not per user of ours, so ten users at
+  `RATE_CAP_TM_PER_USER_DAILY=500` is the entire allowance and the eleventh
+  user's scan gets upstream 403s — which arrive looking exactly like artists
+  with no shows. `rate_ledger_account` (migration 0017) is a second counter
+  keyed `(source, day)` with no `user_id` and no FK, charged in `Reserve` after
+  the per-user block and for no more than that block already allowed. An
+  overdraw is refunded to **both** ledgers: returning it only to the account
+  would leave a user charged for calls they were never granted, draining their
+  personal cap on days someone else was busy. `Release` likewise refunds both,
+  account first — leaving the shared counter high starves everyone, leaving one
+  user's high costs only them. `CheckAndIncrement` checks it too, or it would
+  be an unbounded path to the upstream sitting beside the bounded one.
+  `RATE_CAP_TM_ACCOUNT_DAILY` / `RATE_CAP_SONGKICK_ACCOUNT_DAILY` default to
+  5000; unset (0) disables the ceiling and restores the old behaviour exactly.
+  Exhaustion reuses the existing `retry_after` path, which is correct because
+  the remedy is the same: wait for the UTC day to roll over.
 - **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less. **A call site charges as many permits as it makes requests**: use `rate.AllowN` where one logical lookup is several requests. Songkick's `SearchArtistEvents` is two (resolve the artist ID, then its calendar) with no cache in between, so charging one permit made `RATE_CAP_SONGKICK_PER_USER_DAILY` mean twice its stated number. `TakeN` is all-or-nothing and hands back an over-draw on refusal, so a refused 2-permit take doesn't strand the last permit.
 - **Endpoints removed by Spotify (Feb 2026) that are NOT available:** `/recommendations`, `/audio-features`, `/audio-analysis`, `/artists/{id}/related-artists`, `/artists/{id}/top-tracks`, batch `/tracks`. Do not write code that calls these. Affinity is constructed entirely from the user's own explicit signals.
 - **`GET /playlists/{id}/items` (Feb 2026 change):** only works for playlists the user owns or collaborates on. Skip merely-followed playlists.
@@ -474,7 +491,7 @@ Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATA
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
-Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
 
 iOS (all optional; unset means the web app behaves exactly as before): `MOBILE_CALLBACK_URL`, `IOS_APP_ID`, `MIN_IOS_BUILD`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8_KEY`, `APNS_ENVIRONMENT`. Two things `config.Validate` refuses to start on, because both are silent otherwise: a **partial** APNs set — it wires up successfully and then drops every notification, indistinguishable from nobody having opted in — and a `MOBILE_CALLBACK_URL` whose host disagrees with `SITE_BASE_URL`, since iOS fetches `apple-app-site-association` from the link's own domain and a mismatch ends the login in Safari with the app still waiting. Empty `IOS_APP_ID` makes that route 404 **on purpose**: serving an association naming an empty app is worse, because iOS caches it.
 

@@ -22,6 +22,16 @@ func PruneRateLedger(ctx context.Context, pool *pgxpool.Pool, days int) (int64, 
 	return tag.RowsAffected(), err
 }
 
+// PruneRateLedgerAccount deletes account-wide counters older than the
+// retention window (days). One row per (source, day), so this accumulates far
+// more slowly than rate_ledger -- but it accumulates forever without this,
+// and a table nobody prunes is how the per-user one got its own entry here.
+func PruneRateLedgerAccount(ctx context.Context, pool *pgxpool.Pool, days int) (int64, error) {
+	const q = `DELETE FROM rate_ledger_account WHERE day < (now() - make_interval(days => $1))::date`
+	tag, err := pool.Exec(ctx, q, days)
+	return tag.RowsAffected(), err
+}
+
 // PruneConcertCache deletes cache entries older than the retention window.
 // Note: the runtime cache TTL is shorter (4h read horizon), but keeping rows
 // past TTL wastes space; this prunes them properly.
