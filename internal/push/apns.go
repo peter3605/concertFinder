@@ -62,6 +62,19 @@ type Client struct {
 	tokenExp time.Time
 }
 
+// Environment reports which APNs environment this client sends to, in the
+// same vocabulary the clients register with and user_devices stores
+// ("sandbox" / "production").
+//
+// Derived from Host rather than kept as a second field, so it cannot disagree
+// with where requests actually go.
+func (c *Client) Environment() string {
+	if c.Host == HostSandbox {
+		return "sandbox"
+	}
+	return "production"
+}
+
 // Config is the deployment's APNs settings, sourced from the environment.
 type Config struct {
 	KeyID       string
