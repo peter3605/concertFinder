@@ -777,6 +777,26 @@ in memory and discarded after profile construction, per the ToS constraints
 in `CLAUDE.md` — and only the derived affinity profile is stored with a
 24-hour TTL. Say that plainly in the privacy policy; it is unusually good.
 
+**Privacy manifest — `ios/ConcertFinder/Resources/PrivacyInfo.xcprivacy`.**
+Separate from the labels above and mandatory since May 2024 for any binary
+touching a "required reason" API. This one does: `UserDefaults`, in
+`ThemeStore` and `SnapshotCache`, declared as
+`NSPrivacyAccessedAPICategoryUserDefaults` with reason `CA92.1` (an app's own
+configuration and state — the app-group reasons do not apply while there is no
+app group and no extension).
+
+It is on this checklist rather than in the milestones because of *when* it
+fails. The upload succeeds, processing appears to run, and App Store Connect
+then emails ITMS-91053 and never makes the build available — so nothing local,
+and nothing in CI, sees it. `ConcertFinderTests/AppBundleTests.swift` asserts
+against `Bundle.main`, which catches the manifest being dropped from the
+Resources build phase; it cannot catch a *newly added* required-reason API, so
+adding one means editing the manifest by hand.
+
+The manifest also carries `NSPrivacyCollectedDataTypes`, which must agree with
+the nutrition labels above — deliberately, so the two do not drift. Change
+both together.
+
 **Demo account.** Required, and it must work. See
 [§3.2](#32-spotify-development-mode) — the account has to be on the Spotify
 dashboard allowlist or the reviewer gets a 403 and a rejection.
@@ -793,6 +813,15 @@ push permission requested in context rather than at launch (4.5.4), no
 functionality gated behind push, screenshots at whichever device sizes App
 Store Connect currently requires (they change — check at upload), and an App
 Store description that does not imply a Spotify partnership.
+
+Two of those are settled in the repo rather than in App Store Connect.
+`TARGETED_DEVICE_FAMILY` is `"1,2"`, and an iPad app that does not claim
+`UIRequiresFullScreen` must support all four orientations, so `Info.plist`
+carries `UISupportedInterfaceOrientations~ipad` alongside the base key. The
+suffixed key is the point: putting all four on the base key would clear the
+warning by also letting an iPhone sit upside down. Claiming full screen would
+be the other way out, but it drops multitasking for a layout that already
+adapts.
 
 ---
 
