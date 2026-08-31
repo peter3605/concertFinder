@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Apple's privacy manifest. Required for App Store upload since May 2024
+	     whenever the binary touches a "required reason" API, and its absence is
+	     one of the quieter failures in this project: the upload itself
+	     succeeds, processing appears to run, and App Store Connect then emails
+	     ITMS-91053 ("Missing API declaration") and never makes the build
+	     available to TestFlight. Nothing in a local build, `xcodebuild test`,
+	     or CI reports it.
+
+	     Two halves. NSPrivacyAccessedAPITypes is the mandatory one and is
+	     checked mechanically against the binary. NSPrivacyCollectedDataTypes
+	     describes what leaves the device; it feeds the privacy report Xcode
+	     generates and must agree with the App Store Connect privacy labels, so
+	     it is kept here deliberately -- one artifact rather than two that
+	     drift. It mirrors ios-app-plan.md §9 exactly; change both together. -->
+
+	<!-- No tracking, in Apple's sense: nothing here is linked with data from
+	     other companies' apps or sites for advertising or measurement, and
+	     there is no ad SDK, analytics SDK, or attribution network in the
+	     binary. Hence the empty domain list. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<!-- Identity, from Spotify's /me. The user ID is the account key; the
+		     display name is shown in Settings. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeName</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Only if the user granted user-read-email; it exists to address the
+		     digest and instant-notify mail, and the unsubscribe link ends
+		     both. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Coarse, and only what the search is centred on: the user picks a
+		     city or grants a one-shot fix. Nothing is sampled in the
+		     background. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeCoarseLocation</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- The APNs device token, stored only while push is opted in and
+		     removed on sign-out and account deletion. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Deliberately absent: the Spotify listening data the feed is built
+		     from. It is never persisted anywhere -- held in memory on the
+		     server and discarded once the affinity profile is derived, per the
+		     ToS constraints in CLAUDE.md -- so there is no data type to
+		     declare. This is a real property of the system, not an omission. -->
+	</array>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<!-- UserDefaults. Two call sites, both app-local state on
+		     UserDefaults.standard: the appearance choice
+		     (DesignSystem/Theme.swift) and the offline snapshot cache plus its
+		     first-run flag (Core/Storage/SnapshotCache.swift).
+		     CA92.1 is the reason for reading and writing an app's own
+		     configuration and state; the app-group reasons (1C8F.1, C56D.1)
+		     do not apply, since there is no app group and no extension. Adding
+		     one later means revisiting this entry. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

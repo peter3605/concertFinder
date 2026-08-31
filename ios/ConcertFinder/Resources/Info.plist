@@ -27,9 +27,29 @@
 	<false/>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<!-- Two keys, not one, and the ~ipad variant is the point.
+	     TARGETED_DEVICE_FAMILY is "1,2", and an iPad app that does not set
+	     UIRequiresFullScreen must support all four orientations or Xcode
+	     raises "All interface orientations must be supported unless the app
+	     requires full screen" -- iPad multitasking can hand a Slide Over or
+	     Split View app any of them. Declaring all four on the base key would
+	     fix the warning by also letting an iPhone sit upside down, which is
+	     not the behaviour wanted; the suffixed key overrides the base one on
+	     iPad only.
+
+	     Claiming full screen instead would be the other way out, but it opts
+	     the app out of multitasking entirely for a layout that already
+	     adapts. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
