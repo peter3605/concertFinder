@@ -13,6 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// migrationLockID is the advisory lock every migrator contends for. Arbitrary
+// but fixed: advisory locks share one namespace per database, so the only
+// requirement is that nothing else in this application picks the same number.
+const migrationLockID int64 = 8_675_309
+
 // Migrate applies pending *.up.sql files in dir in order. Idempotent — already
 // applied migrations (tracked in schema_migrations) are skipped. Each file is
 // applied in its own transaction; on error, that migration is rolled back and
@@ -20,8 +25,42 @@ import (
 //
 // Filenames must match NNNN_name.up.sql (e.g. 0001_init.up.sql). Down
 // migrations are not run by this function — down is a manual operation.
+//
+// Serialized against other migrators by a session advisory lock. Idempotent is
+// not the same as concurrency-safe: the applied-set is read and *then* each
+// missing file is applied, so two callers both see a version as pending and
+// both run it. The loser gets a duplicate key on schema_migrations, or —
+// because DDL races before the bookkeeping does — something far less legible
+// like `duplicate key value violates unique constraint pg_type_typname_nsp_index`
+// from two CREATE TYPEs. CI hit this the moment a second package grew a
+// database-backed test, since Go runs packages in parallel; two app instances
+// booting together would race identically.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, dir string) error {
-	if _, err := pool.Exec(ctx, `
+	// Held for the whole function, not per statement: the read of the applied
+	// set and the applying of what is missing must be one critical section, or
+	// the gap between them is exactly the race.
+	//
+	// Everything below runs on THIS connection rather than the pool. A waiter
+	// blocked on the lock is holding a pooled connection while it waits, so a
+	// winner that reached back into the pool for its own work would deadlock
+	// as soon as the racers outnumbered the pool: pgxpool defaults to
+	// max(4, NumCPU), which is 4 on a 2-core CI runner. Using one connection
+	// throughout makes the pool size irrelevant.
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("take migration lock: %w", err)
+	}
+	defer func() {
+		// Best effort: releasing the connection ends the session and drops the
+		// lock anyway. Explicit so a pooled connection is reusable immediately.
+		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLockID)
+	}()
+
+	if _, err := conn.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   name       TEXT NOT NULL,
@@ -30,7 +69,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
@@ -57,7 +96,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if err != nil {
 			return fmt.Errorf("read %s: %w", m.path, err)
 		}
-		tx, err := pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return err
 		}
