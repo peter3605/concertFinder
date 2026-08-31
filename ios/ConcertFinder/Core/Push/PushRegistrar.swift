@@ -16,12 +16,45 @@ final class PushRegistrar {
     /// TestFlight build is rejected by the production host as
     /// BadDeviceToken, and a production token sent to sandbox reaches nobody
     /// while reporting success.
-    private var environment: String {
-        #if DEBUG
-        "sandbox"
-        #else
-        "production"
-        #endif
+    ///
+    /// Read from the embedded provisioning profile rather than inferred from
+    /// the build configuration. `#if DEBUG` is not the same question and gets
+    /// the wrong answer on the path this app actually uses: a build installed
+    /// on a device has to be Release, because Debug bakes `127.0.0.1:3000`
+    /// into Info.plist and cannot reach the API from a phone -- so every real
+    /// device build reported "production" while carrying a `development`
+    /// entitlement, and the token was a sandbox token wearing the wrong label.
+    private var environment: String { Self.apsEnvironment() }
+
+    /// The `aps-environment` entitlement, mapped to the server's vocabulary.
+    ///
+    /// An App Store build has no embedded profile, and that absence is itself
+    /// the answer: App Store distribution is production. Every other failure
+    /// to read one lands on the same default, which is the safe direction --
+    /// the server skips a mismatched device and logs it, whereas guessing
+    /// sandbox on a production build would look like delivery that never
+    /// arrives.
+    static func apsEnvironment() -> String {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              // The profile is CMS-signed with the plist embedded as plain
+              // text; isoLatin1 round-trips arbitrary bytes so the binary
+              // wrapper cannot fail the decode.
+              let text = String(data: data, encoding: .isoLatin1),
+              let start = text.range(of: "<?xml"),
+              let end = text.range(of: "</plist>"),
+              let plistData = String(text[start.lowerBound..<end.upperBound]).data(using: .isoLatin1),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: plistData, format: nil
+              ) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let aps = entitlements["aps-environment"] as? String
+        else {
+            return "production"
+        }
+        // Apple spells it "development"; user_devices.environment and
+        // APNS_ENVIRONMENT both spell it "sandbox".
+        return aps == "development" ? "sandbox" : "production"
     }
 
     init(api: APIClient) {

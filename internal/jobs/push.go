@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
@@ -48,6 +49,10 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	if err != nil {
 		return err
 	}
+	if len(devices) == 0 {
+		return nil
+	}
+	devices = forEnvironment(devices, w.APNs.Environment(), user.ID)
 	if len(devices) == 0 {
 		return nil
 	}
@@ -117,8 +122,11 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 			}
 			var apnsErr *push.Error
 			if errors.As(err, &apnsErr) && apnsErr.IsUnregistered() {
-				// The app was uninstalled, or this token belongs to the
-				// other APNs environment. Neither improves with a retry.
+				// The app was uninstalled or the token was reissued. An
+				// environment mismatch used to land here too and be retired
+				// permanently for it; forEnvironment now keeps those out of
+				// this loop, so reaching here really does mean the token is
+				// dead rather than being sent to the wrong host.
 				if derr := db.DisableDevice(ctx, w.Pool, user.ID, d.DeviceToken); derr != nil {
 					slog.Warn("push: disable device failed", "err", derr, "user", user.ID)
 				}
@@ -137,6 +145,35 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 // notificationFor renders one event as a push. The payload deliberately
 // carries keys rather than the event: APNs caps at 4KB, and the app resolves
 // event_key against the feed it already has.
+// forEnvironment keeps only the tokens minted against the environment this
+// process actually sends to.
+//
+// A token belongs to exactly one APNs environment and the other host answers
+// BadDeviceToken. That rejection is indistinguishable from an uninstall, and
+// the send loop retires a device permanently on it -- so before this filter, a
+// deployment flipped from sandbox to production for TestFlight would silently
+// and permanently disable every device still holding a sandbox token, with the
+// user simply never hearing from the app again.
+//
+// Skipping is loud and reversible: nothing is written, so the device starts
+// working the moment the app re-registers with a matching token.
+func forEnvironment(devices []db.Device, env string, userID uuid.UUID) []db.Device {
+	kept := make([]db.Device, 0, len(devices))
+	skipped := 0
+	for _, d := range devices {
+		if d.Environment == env {
+			kept = append(kept, d)
+			continue
+		}
+		skipped++
+	}
+	if skipped > 0 {
+		slog.Warn("push: skipping devices registered for the other APNs environment",
+			"user", userID, "sending_to", env, "skipped", skipped, "kept", len(kept))
+	}
+	return kept
+}
+
 func notificationFor(ev concerts.Event) push.Notification {
 	title := ev.Acts[0].Artist.Name
 	if len(ev.Acts) > 1 {
