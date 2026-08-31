@@ -19,8 +19,14 @@ import (
 // packages in parallel, so two test binaries migrated the same database at
 // once. The same race exists for two app instances booting together.
 func TestMigrateIsSafeUnderConcurrency(t *testing.T) {
-	pool := testPool(t)
 	ctx := context.Background()
+	// Deliberately fewer connections than racers. A waiter blocked on the
+	// advisory lock holds a pooled connection, so a Migrate that reached back
+	// into the pool for its own statements would deadlock here rather than
+	// fail -- which is what happened on CI, where pgxpool's default of
+	// max(4, NumCPU) is 4 on a 2-core runner and the job simply hung. A dev
+	// machine with more cores hides it, so the constraint is pinned.
+	pool := testPoolWithMaxConns(t, 2)
 
 	// testPool has already migrated, so start from a clean schema to make the
 	// migrations genuinely pending -- otherwise every caller no-ops and the
@@ -29,7 +35,7 @@ func TestMigrateIsSafeUnderConcurrency(t *testing.T) {
 		t.Fatalf("reset schema: %v", err)
 	}
 
-	const racers = 4
+	const racers = 4 // > pool max conns, on purpose
 	errs := make([]error, racers)
 	var wg sync.WaitGroup
 	var start sync.WaitGroup
