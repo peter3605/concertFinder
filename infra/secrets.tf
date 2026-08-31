@@ -87,6 +87,13 @@ locals {
     RATE_CAP_TM_PER_USER_DAILY       = "500"
     RATE_CAP_SONGKICK_PER_USER_DAILY = "100"
 
+    # What the upstream itself enforces, per API key rather than per user of
+    # ours. Without these the per-user caps multiply -- 10 users at 500 is
+    # Ticketmaster's entire daily allowance, and user 11 gets 403s that look
+    # like artists with no shows. 5000/500 = 10 full cold scans a day.
+    RATE_CAP_TM_ACCOUNT_DAILY       = "5000"
+    RATE_CAP_SONGKICK_ACCOUNT_DAILY = "5000"
+
     EMAIL_DELIVERY_MODE = var.email_delivery_mode
     SMTP_PORT           = "587"
     CONTACT_EMAIL       = var.ses_verified_recipient

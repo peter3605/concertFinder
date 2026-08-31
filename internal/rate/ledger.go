@@ -39,20 +39,43 @@ const (
 // enumerate them by hand when reserving or inspecting a whole scan.
 var AllSources = []Source{SourceTicketmaster, SourceSongkick}
 
-// Caps holds the per-user, per-day upper bound for each source. Zero
-// disables enforcement for that source.
+// Caps holds the daily upper bounds for each source. Zero disables
+// enforcement of that bound.
+//
+// The two are different questions and both have to be asked. The per-user cap
+// stops one heavy account starving the others; the account cap is the number
+// the *upstream* actually enforces -- Ticketmaster allows 5000 req/day for the
+// API key, regardless of how many of our users are behind it. Without the
+// second, per-user caps multiply: ten users at 500/day is 5000, and user
+// eleven's scan gets upstream 403s that arrive looking exactly like an artist
+// with no shows.
 type Caps struct {
 	Ticketmaster int
 	Songkick     int
+
+	TicketmasterAccount int
+	SongkickAccount     int
 }
 
-// Cap returns the configured cap for a source, or 0 if unset.
+// Cap returns the configured per-user cap for a source, or 0 if unset.
 func (c Caps) Cap(s Source) int {
 	switch s {
 	case SourceTicketmaster:
 		return c.Ticketmaster
 	case SourceSongkick:
 		return c.Songkick
+	}
+	return 0
+}
+
+// AccountCap returns the configured account-wide cap for a source, or 0 if
+// unset.
+func (c Caps) AccountCap(s Source) int {
+	switch s {
+	case SourceTicketmaster:
+		return c.TicketmasterAccount
+	case SourceSongkick:
+		return c.SongkickAccount
 	}
 	return 0
 }
@@ -86,7 +109,23 @@ func (l *Ledger) CheckAndIncrement(ctx context.Context, userID uuid.UUID, source
 	if err != nil {
 		return true, err // fail open
 	}
-	return newCount <= c, nil
+	if newCount > c {
+		return false, nil
+	}
+	// The account ceiling binds here as well. Skipping it would leave a
+	// second, unbounded path to the upstream sitting next to the bounded one.
+	if acct := l.Caps.AccountCap(source); acct > 0 {
+		total, err := l.chargeAccount(ctx, source, 1)
+		if err != nil {
+			return true, err // fail open
+		}
+		if total > acct {
+			_ = l.refundAccount(ctx, source, 1)
+			_ = l.refund(ctx, userID, source, 1)
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // charge adds n to today's counter and returns the resulting total.
@@ -116,6 +155,34 @@ WHERE user_id = $1 AND source = $2 AND day = $3
 	return err
 }
 
+// chargeAccount adds n to today's account-wide counter and returns the
+// resulting total. Same shape as charge, one row per (source, day).
+func (l *Ledger) chargeAccount(ctx context.Context, source Source, n int) (int, error) {
+	const q = `
+INSERT INTO rate_ledger_account (source, day, count)
+VALUES ($1, $2, $3)
+ON CONFLICT (source, day) DO UPDATE SET count = rate_ledger_account.count + EXCLUDED.count
+RETURNING count
+`
+	var newCount int
+	err := l.Pool.QueryRow(ctx, q, string(source), today(), n).Scan(&newCount)
+	return newCount, err
+}
+
+// refundAccount returns unspent account quota, clamped at zero for the same
+// reason refund is.
+func (l *Ledger) refundAccount(ctx context.Context, source Source, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	const q = `
+UPDATE rate_ledger_account SET count = GREATEST(0, count - $3)
+WHERE source = $1 AND day = $2
+`
+	_, err := l.Pool.Exec(ctx, q, string(source), today(), n)
+	return err
+}
+
 // Reservation is a pre-charged block of quota for one (user, source).
 // Take() hands out permits from it without touching the DB; whatever is
 // left when Release() runs goes back to the ledger.
@@ -127,7 +194,13 @@ type Reservation struct {
 	userID    uuid.UUID
 	source    Source
 	unlimited bool
-	granted   int64
+	// accountTracked records that this block was also charged against the
+	// account-wide ledger, so Release gives the remainder back to both. A
+	// block that skipped the account charge -- because the cap is unset, or
+	// because the account upsert errored and we failed open -- must not
+	// refund quota it never took.
+	accountTracked bool
+	granted        int64
 	// wanted is what Reserve was asked for, kept only for diagnostics.
 	// granted < wanted means the day's cap was already partly spent before
 	// this scan began; it does not by itself mean any call was refused.
@@ -205,6 +278,12 @@ func (r *Reservation) Release(ctx context.Context) error {
 	r.used.Store(0)
 	// denied is intentionally preserved: callers may inspect Exhausted()
 	// after Release when deciding how to record the scan.
+	if r.accountTracked {
+		// Best effort, and before the per-user refund: leaving the shared
+		// counter high is the failure that starves every other user, while
+		// leaving one user's counter high costs only them.
+		_ = r.ledger.refundAccount(ctx, r.source, int(unused))
+	}
 	return r.ledger.refund(ctx, r.userID, r.source, int(unused))
 }
 
@@ -236,11 +315,51 @@ func (l *Ledger) Reserve(ctx context.Context, userID uuid.UUID, source Source, w
 	if granted > want {
 		granted = want
 	}
-	r := &Reservation{ledger: l, userID: userID, source: source, granted: int64(granted), wanted: int64(want)}
 	if over := want - granted; over > 0 {
 		_ = l.refund(ctx, userID, source, over)
 	}
-	return r, nil
+
+	// Now the ceiling the upstream actually enforces. Charged second and only
+	// for what the per-user cap already allowed, so the account counter never
+	// records more than could possibly be spent.
+	accountTracked := false
+	if acct := l.Caps.AccountCap(source); acct > 0 && granted > 0 {
+		newTotal, err := l.chargeAccount(ctx, source, granted)
+		if err != nil {
+			// Fail open, exactly as the per-user path does: quota accounting
+			// must never be the reason a scan fails. The block keeps its
+			// per-user grant and is NOT marked account-tracked, so Release
+			// will not refund a charge that did not land.
+			return &Reservation{
+				ledger: l, userID: userID, source: source,
+				granted: int64(granted), wanted: int64(want),
+			}, err
+		}
+		accountTracked = true
+		allowed := granted - (newTotal - acct)
+		if allowed < 0 {
+			allowed = 0
+		}
+		if allowed > granted {
+			allowed = granted
+		}
+		// Hand the overdraw back to BOTH ledgers. Returning it only to the
+		// account would leave the user charged for calls they were never
+		// granted, and their own cap would drain on days the account was
+		// already full -- a second, invisible penalty for someone else's
+		// usage.
+		if over := granted - allowed; over > 0 {
+			_ = l.refundAccount(ctx, source, over)
+			_ = l.refund(ctx, userID, source, over)
+		}
+		granted = allowed
+	}
+
+	return &Reservation{
+		ledger: l, userID: userID, source: source,
+		accountTracked: accountTracked,
+		granted:        int64(granted), wanted: int64(want),
+	}, nil
 }
 
 // Reservations bundles one block per source for a single unit of work
