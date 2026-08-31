@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,9 +35,24 @@ import (
 // and the schema is dropped on cleanup whether the test passed or failed.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	return testPoolWithMaxConns(t, 0)
+}
+
+// testPoolWithMaxConns is testPool with a bounded pool, for the one test that
+// needs the bound to be the thing under test. maxConns <= 0 leaves pgxpool's
+// default.
+func testPoolWithMaxConns(t *testing.T, maxConns int) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping database-backed test")
+	}
+	if maxConns > 0 {
+		sep := "?"
+		if strings.Contains(url, "?") {
+			sep = "&"
+		}
+		url += sep + "pool_max_conns=" + strconv.Itoa(maxConns)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

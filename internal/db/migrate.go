@@ -39,6 +39,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, dir string) error {
 	// Held for the whole function, not per statement: the read of the applied
 	// set and the applying of what is missing must be one critical section, or
 	// the gap between them is exactly the race.
+	//
+	// Everything below runs on THIS connection rather than the pool. A waiter
+	// blocked on the lock is holding a pooled connection while it waits, so a
+	// winner that reached back into the pool for its own work would deadlock
+	// as soon as the racers outnumbered the pool: pgxpool defaults to
+	// max(4, NumCPU), which is 4 on a 2-core CI runner. Using one connection
+	// throughout makes the pool size irrelevant.
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration lock connection: %w", err)
@@ -53,7 +60,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, dir string) error {
 		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLockID)
 	}()
 
-	if _, err := pool.Exec(ctx, `
+	if _, err := conn.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   name       TEXT NOT NULL,
@@ -62,7 +69,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
@@ -89,7 +96,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if err != nil {
 			return fmt.Errorf("read %s: %w", m.path, err)
 		}
-		tx, err := pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return err
 		}
