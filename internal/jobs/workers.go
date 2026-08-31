@@ -611,6 +611,7 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 	}
 	steps := []step{
 		{"rate_ledger", func(c context.Context) (int64, error) { return db.PruneRateLedger(c, w.Pool, 90) }},
+		{"rate_ledger_account", func(c context.Context) (int64, error) { return db.PruneRateLedgerAccount(c, w.Pool, 90) }},
 		{"concert_cache", func(c context.Context) (int64, error) { return db.PruneConcertCache(c, w.Pool, 7) }},
 		{"past_concerts", func(c context.Context) (int64, error) { return db.PrunePastConcerts(c, w.Pool, 7) }},
 		{"oauth_handshakes", func(c context.Context) (int64, error) { return db.PruneExpiredHandshakes(c, w.Pool) }},
