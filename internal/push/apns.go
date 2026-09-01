@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,33 @@ const (
 	HostSandbox    = "https://api.sandbox.push.apple.com"
 )
 
+// The two environment names, in the vocabulary the app registers with and
+// user_devices stores. Apple spells the entitlement "development"; the
+// mapping to "sandbox" happens on the client, in PushRegistrar.
+const (
+	EnvSandbox    = "sandbox"
+	EnvProduction = "production"
+)
+
+// hostFor maps a device's environment to the host that will accept its token.
+//
+// It returns an error rather than defaulting, and that is the whole point.
+// The obvious spelling — production unless told otherwise — turns a caller
+// who forgets to set Notification.Environment into a sandbox token sent to
+// the production host, which answers BadDeviceToken, which
+// Error.IsUnregistered reports as a dead token, which retires the device
+// permanently. A silent default here costs a user their notifications for
+// good.
+func hostFor(env string) (string, error) {
+	switch env {
+	case EnvSandbox:
+		return HostSandbox, nil
+	case EnvProduction:
+		return HostProduction, nil
+	}
+	return "", fmt.Errorf("push: unknown APNs environment %q", env)
+}
+
 // jwtLifetime is how long a generated authentication token is reused.
 //
 // Apple rejects tokens older than 1 hour (ExpiredProviderToken) and also
@@ -46,14 +74,30 @@ const (
 const jwtLifetime = 50 * time.Minute
 
 // Client sends notifications to APNs.
+//
+// One client serves both environments. The host is chosen per notification
+// from the environment the device registered with, not once from
+// configuration — see Send. Everything an APNs request is authenticated with
+// (the key, its ID, the team, the bundle, and the JWT minted from them) is
+// identical for sandbox and production, so there is nothing per-environment
+// to hold.
 type Client struct {
 	// HTTPClient must speak HTTP/2. The zero value of http.Client does over
 	// TLS, which is the only transport APNs offers.
 	HTTPClient *http.Client
-	Host       string
 	KeyID      string
 	TeamID     string
 	BundleID   string
+
+	// environments the signing key is authorized for. Not "where we send" —
+	// routing is per device — but which hosts this .p8 will be accepted by,
+	// which is a property of how the key was issued in Apple's portal and is
+	// the only thing an operator has to state.
+	//
+	// The zero value serves nothing, which is the safe direction: a
+	// hand-built Client sends no pushes rather than sending them somewhere
+	// that would retire the tokens.
+	environments map[string]bool
 
 	signingKey *ecdsa.PrivateKey
 
@@ -62,26 +106,67 @@ type Client struct {
 	tokenExp time.Time
 }
 
-// Environment reports which APNs environment this client sends to, in the
-// same vocabulary the clients register with and user_devices stores
-// ("sandbox" / "production").
-//
-// Derived from Host rather than kept as a second field, so it cannot disagree
-// with where requests actually go.
-func (c *Client) Environment() string {
-	if c.Host == HostSandbox {
-		return "sandbox"
+// Serves reports whether this deployment's key is authorized for an
+// environment. The push worker filters devices on it, so a key restricted to
+// one environment skips the other's devices — visibly, and without writing
+// anything — instead of sending to a host that answers InvalidProviderToken.
+func (c *Client) Serves(env string) bool { return c.environments[env] }
+
+// Environments lists what Serves accepts, sorted, for logging.
+func (c *Client) Environments() []string {
+	out := make([]string, 0, len(c.environments))
+	for env := range c.environments {
+		out = append(out, env)
 	}
-	return "production"
+	sort.Strings(out)
+	return out
 }
 
 // Config is the deployment's APNs settings, sourced from the environment.
 type Config struct {
-	KeyID       string
-	TeamID      string
-	BundleID    string
-	P8Key       string // PEM contents of the .p8, not a path
-	Environment string // "sandbox" | "production"
+	KeyID    string
+	TeamID   string
+	BundleID string
+	P8Key    string // PEM contents of the .p8, not a path
+	// Environment is APNS_ENVIRONMENT: which environments the key is
+	// authorized for. "sandbox", "production", or both as a comma-separated
+	// list. See ParseEnvironments.
+	Environment string
+}
+
+// ParseEnvironments reads APNS_ENVIRONMENT.
+//
+// It is a *list* because an APNs auth key issued as "Sandbox & Production"
+// can serve both, and a deployment with such a key should serve both: the
+// alternative is the flip this replaced, where moving to production for
+// TestFlight silently stopped push for every debug build, and moving the
+// entitlement without the server variable (or the reverse) broke push
+// entirely with nothing but BadDeviceToken to show for it. A key issued for
+// one environment only still says so, and gets the old behaviour.
+//
+// Empty means production, matching config.Load's default so the two cannot
+// disagree about what an unset variable means.
+func ParseEnvironments(s string) ([]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{EnvProduction}, nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		env := strings.ToLower(strings.TrimSpace(part))
+		if _, err := hostFor(env); err != nil {
+			return nil, fmt.Errorf(
+				"push: %q is not an APNs environment; use %q, %q, or %q",
+				part, EnvSandbox, EnvProduction, EnvSandbox+","+EnvProduction)
+		}
+		if seen[env] {
+			continue
+		}
+		seen[env] = true
+		out = append(out, env)
+	}
+	return out, nil
 }
 
 // New builds a Client from configuration. Returns an error rather than a
@@ -95,19 +180,23 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	host := HostProduction
-	if cfg.Environment == "sandbox" {
-		host = HostSandbox
+	envs, err := ParseEnvironments(cfg.Environment)
+	if err != nil {
+		return nil, err
+	}
+	served := make(map[string]bool, len(envs))
+	for _, e := range envs {
+		served[e] = true
 	}
 	return &Client{
 		// Timeout covers the whole request. APNs is fast; a stalled
 		// connection here would otherwise hold a river worker slot.
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
-		Host:       host,
-		KeyID:      cfg.KeyID,
-		TeamID:     cfg.TeamID,
-		BundleID:   cfg.BundleID,
-		signingKey: key,
+		HTTPClient:   &http.Client{Timeout: 30 * time.Second},
+		KeyID:        cfg.KeyID,
+		TeamID:       cfg.TeamID,
+		BundleID:     cfg.BundleID,
+		environments: served,
+		signingKey:   key,
 	}, nil
 }
 
@@ -181,6 +270,12 @@ func copyPadded(dst []byte, n *big.Int) {
 // Notification is one push to one device.
 type Notification struct {
 	DeviceToken string
+	// Environment is the device's own, from user_devices.environment, and it
+	// selects the host. It travels with the token because it is a property of
+	// the token: the two are minted together and neither means anything at
+	// the other host. Sending the same Notification to several devices means
+	// setting both fields each time, not just the token.
+	Environment string
 	// CollapseID coalesces notifications on the device: a later push with the
 	// same ID replaces an undelivered earlier one rather than stacking.
 	CollapseID string
@@ -236,7 +331,22 @@ func (e *Error) IsUnregistered() bool {
 
 // Send delivers one notification. A nil error means APNs accepted it — which
 // is not a delivery guarantee, only that Apple took responsibility for it.
+//
+// The host comes from n.Environment, so one client reaches both. The Serves
+// check is a guard rather than a live path — SendPushWorker filters devices
+// on the same predicate before it gets here — and it fails rather than
+// falling back for the reason hostFor does not default: the wrong host
+// answers BadDeviceToken, which reads as a dead token and retires the device
+// for good.
 func (c *Client) Send(ctx context.Context, n Notification) error {
+	host, err := hostFor(n.Environment)
+	if err != nil {
+		return err
+	}
+	if !c.Serves(n.Environment) {
+		return fmt.Errorf("push: this deployment's key is not authorized for the %s environment (serves %s)",
+			n.Environment, strings.Join(c.Environments(), ", "))
+	}
 	tok, err := c.authToken()
 	if err != nil {
 		return err
@@ -245,7 +355,7 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 	if err != nil {
 		return err
 	}
-	url := c.Host + "/3/device/" + n.DeviceToken
+	url := host + "/3/device/" + n.DeviceToken
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err

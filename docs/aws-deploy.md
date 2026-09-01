@@ -519,7 +519,7 @@ Terraform derives most of it from `var.domain` and `var.ios_bundle_id`
 ios_bundle_id    = "com.example.concertfinder"  # must match the real App ID
 ios_team_id      = "ABCDE12345"                 # Apple Developer team
 apns_key_id      = "XYZ9876543"                 # the .p8's key ID
-apns_environment = "production"                 # or "sandbox" for TestFlight/debug builds
+apns_environment = "sandbox,production"         # what the .p8 is authorized for, not a host
 min_ios_build    = 0                            # oldest client build the server accepts
 ```
 

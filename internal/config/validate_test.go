@@ -206,6 +206,28 @@ func TestAPNsFullySetIsFine(t *testing.T) {
 	}
 }
 
+// APNS_ENVIRONMENT names which environments the deployment's APNs key is
+// authorized for, and both is the setting a "Sandbox & Production" key wants
+// -- it is what lets one server reach TestFlight builds and a developer's
+// debug build at the same time. A typo must not be accepted: it would leave
+// half the fleet unreachable, and nothing downstream reports that.
+func TestAPNSEnvironmentAcceptsOneOrBoth(t *testing.T) {
+	for _, env := range []string{"", "sandbox", "production", "sandbox,production"} {
+		c := prodConfig()
+		c.APNSEnvironment = env
+		if problemsContaining(t, c, "APNS_ENVIRONMENT") {
+			t.Errorf("APNS_ENVIRONMENT=%q rejected: %v", env, c.Validate())
+		}
+	}
+	for _, env := range []string{"development", "both", "prod"} {
+		c := prodConfig()
+		c.APNSEnvironment = env
+		if !problemsContaining(t, c, "APNS_ENVIRONMENT") {
+			t.Errorf("APNS_ENVIRONMENT=%q accepted", env)
+		}
+	}
+}
+
 // iOS fetches apple-app-site-association from the universal link's own host,
 // so a callback URL on a different domain ends every mobile login in Safari
 // with the app still waiting — and nothing logs it.

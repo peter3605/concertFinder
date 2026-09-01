@@ -1224,7 +1224,7 @@ and the push worker no-ops.
 | `MIN_IOS_BUILD` | `0` | Oldest client build the server accepts, returned by `/api/site-info`. `0` means no floor. |
 | `APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_BUNDLE_ID` | unset | APNs token-based auth identifiers. |
 | `APNS_P8_KEY` | unset | PEM contents of the `.p8`, not a path. `SecureString`; never logged. |
-| `APNS_ENVIRONMENT` | `production` | `sandbox` or `production`. Must match the build's `aps-environment` entitlement — a token minted for one is rejected by the other. |
+| `APNS_ENVIRONMENT` | `production` | Which environments the `.p8` is authorized for: `sandbox`, `production`, or `sandbox,production`. Not a host selector — each device is routed to the host its token was minted at, from `user_devices.environment`. A device in an unserved environment is skipped and logged, never sent to the wrong host. |
 
 Configuration problems are handled in three tiers, by how bad the failure is:
 
