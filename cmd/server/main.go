@@ -545,6 +545,10 @@ func main() {
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)
 			r.Delete("/account", accountH.Delete)
+			// Disconnect Spotify without deleting the account. Guideline
+			// 5.1.1(v) asks for a revoke mechanism inside the app, and
+			// account deletion was the only one (plan §10.1.2).
+			r.Delete("/spotify-connection", accountH.DisconnectSpotify)
 		})
 	})
 
