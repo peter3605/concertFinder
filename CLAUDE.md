@@ -58,6 +58,24 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 
 - **No long-term caching of Spotify Content.** Raw listening data (saved tracks, top artists, recently played, etc.) is held in memory only and discarded after profile construction. Only the *derived* affinity profile (artist IDs + scores) is persisted, with a 24-hour TTL. Do not add tables that store raw Spotify response data.
 - **No ML training on Spotify data.** This includes embeddings and similarity learning.
+- **There are two account-lifecycle endpoints and they are not the same.**
+  `DELETE /me/account` is irreversible and cascades everything; `DELETE
+  /me/spotify-connection` (`db.DisconnectSpotify`) revokes the Spotify
+  credential and the data derived from it while keeping saves, subscriptions,
+  location and email preferences, so signing in again restores the account. The
+  second exists because App Store Guideline 5.1.1(v) wants a revoke mechanism
+  inside the app and deletion was the only one. Two non-obvious things hold it
+  together. It **must** delete `user_concert_snapshots`: `FanoutSendDigestWorker`
+  selects on `digest_opt_in` and a non-empty email with no session or connection
+  check, so a surviving snapshot means a disconnected user keeps getting a
+  nightly digest built from the profile they just revoked, silently. And the
+  credential is *zeroed*, not NULLed (the column is NOT NULL), which makes
+  `AccessTokenFor`'s empty-value check mandatory rather than cosmetic —
+  `gcm.Open` **panics** on a wrong-length nonce, so without it the next job for
+  that user crashes its goroutine instead of returning
+  `auth.ErrSpotifyDisconnected`. Deleting our copy does not revoke the grant at
+  Spotify's end; both clients link to spotify.com/account/apps rather than
+  implying otherwise.
 - **Refresh tokens are AES-256-GCM encrypted at rest** with a per-token nonce. Key comes from `ENCRYPTION_KEY` env var (Phase 1) or AWS Secrets Manager (Phase 3). Never log or return tokens.
 - **Spotify redirect URI is `https://127.0.0.1:3000/api/auth/callback`** for local dev (`https://<domain>/api/auth/callback` in prod) — `http://localhost` is rejected by Spotify as of Nov 2025. The path is not `/callback`: the handler is mounted under `/api/auth`, and a dashboard entry pointing at `/callback` hits the SPA catch-all instead, so login silently completes into a logged-out app.
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.

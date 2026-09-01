@@ -315,8 +315,29 @@ actor APIClient {
         ))
     }
 
-    func deleteAccount() async throws {
-        _ = try await perform(try await makeRequest("DELETE", "api/me/account"))
+    /// Deletes the account. `confirmName` must match the signed-in user's
+    /// display name, case- and whitespace-insensitively.
+    ///
+    /// The body is not optional and its absence was a real defect: this method
+    /// used to send none at all, and the handler decodes one unconditionally,
+    /// so every in-app deletion failed with 400 "invalid body: EOF". Nothing on
+    /// the client distinguished that from any other error, and account
+    /// deletion has to work in-app for App Store Guideline 5.1.1(v) -- so the
+    /// one path a reviewer is guaranteed to exercise was the broken one.
+    func deleteAccount(confirmName: String) async throws {
+        struct Body: Encodable, Sendable {
+            let confirmName: String
+        }
+        _ = try await perform(try await makeRequest(
+            "DELETE", "api/me/account", body: Body(confirmName: confirmName)
+        ))
+    }
+
+    /// Disconnects Spotify without deleting the account: the credential and
+    /// the profile derived from it go, saves and subscriptions stay. Every
+    /// session ends, so the caller must sign out locally afterwards.
+    func disconnectSpotify() async throws {
+        _ = try await perform(try await makeRequest("DELETE", "api/me/spotify-connection"))
     }
 
     // MARK: - Devices

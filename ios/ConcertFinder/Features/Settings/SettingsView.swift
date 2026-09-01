@@ -13,7 +13,9 @@ struct SettingsView: View {
     @State private var instantOptIn = false
     @State private var pushOptIn = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingDisconnectConfirmation = false
     @State private var isDeleting = false
+    @State private var isDisconnecting = false
     @State private var error: APIError?
 
     private var me: Me? {
@@ -31,6 +33,7 @@ struct SettingsView: View {
                     Label("Location", systemImage: "location")
                 }
                 aboutSection
+                connectionSection
                 dangerSection
             }
             .navigationTitle("Settings")
@@ -114,6 +117,49 @@ struct SettingsView: View {
             NavigationLink("Terms of Service") { PolicyView(kind: .terms, api: api) }
             LabeledContent("Version", value: Self.versionString)
             SpotifyAttribution()
+        }
+    }
+
+    /// Disconnecting Spotify without deleting the account.
+    ///
+    /// Its own section above the danger zone, and deliberately not styled
+    /// destructive: this is the recoverable option -- saves, subscriptions and
+    /// preferences survive, and signing in again restores the account. Putting
+    /// it beside "Delete account" in red would push people toward the
+    /// irreversible one.
+    ///
+    /// Guideline 5.1.1(v) asks for a way to revoke the connection from inside
+    /// the app. Account deletion arguably answered that, but it was the only
+    /// answer (plan §10.1.2).
+    private var connectionSection: some View {
+        Section {
+            Button {
+                showingDisconnectConfirmation = true
+            } label: {
+                if isDisconnecting {
+                    HStack { ProgressView(); Text("Disconnecting…") }
+                } else {
+                    Text("Disconnect Spotify")
+                }
+            }
+            .disabled(isDisconnecting)
+            .confirmationDialog(
+                "Disconnect Spotify?",
+                isPresented: $showingDisconnectConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Disconnect") {
+                    Task { await disconnectSpotify() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("We'll delete the Spotify credential we hold and the listening profile built from it, and sign you out. Your saved shows and artist alerts are kept.")
+            }
+        } footer: {
+            // Saying only "disconnected" would overclaim: deleting our copy
+            // stops us using the grant, but the authorisation still exists on
+            // Spotify's side until the user removes it there.
+            Text("This stops ConcertFinder using your Spotify account. To also remove ConcertFinder from Spotify's connected apps, visit spotify.com/account/apps.")
         }
     }
 
@@ -202,7 +248,26 @@ struct SettingsView: View {
         defer { isDeleting = false }
         do {
             await push.deregister()
-            try await api.deleteAccount()
+            // The display name is the server's confirmation token. Sending no
+            // body at all is what this used to do, and the handler rejected
+            // every one of them with 400.
+            try await api.deleteAccount(confirmName: me?.displayName ?? "")
+            await auth.signOut()
+        } catch let apiError as APIError {
+            error = apiError
+        } catch {
+            self.error = .unknown(error.localizedDescription)
+        }
+    }
+
+    private func disconnectSpotify() async {
+        isDisconnecting = true
+        defer { isDisconnecting = false }
+        do {
+            // Deregister first, as with sign-out: the session authorises the
+            // call, and the disconnect ends every session server-side.
+            await push.deregister()
+            try await api.disconnectSpotify()
             await auth.signOut()
         } catch let apiError as APIError {
             error = apiError
