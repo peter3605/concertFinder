@@ -516,6 +516,11 @@ itself, so when Neon bumps the project's major version, bump this too. It is
 pinned rather than `:latest` so that mismatch fails loudly on an ordinary night
 rather than on the one where you need the dump.
 
+**A backup nobody has restored is a hypothesis.** `scripts/restore-drill.sh`
+turns it into a measurement — `--check` alone says whether a restore point even
+exists, which is a live question here rather than a rhetorical one. See
+"Restore drills" below.
+
 To restore, from your laptop with admin credentials:
 
 ```
@@ -641,6 +646,157 @@ If a deploy fails, the workflow prints the SSM output including
 dumps both on its way out. Config problems appear there in full:
 `config.Validate` reports every bad variable at once rather than one per
 restart.
+
+## Rotating a credential
+
+Every secret lives in Parameter Store under `/concertfinder/` as a
+SecureString. `scripts/set-secrets.sh` writes them from a hidden prompt through
+a mode-600 temp file, so a value never reaches shell history or `ps`, and
+Terraform's `ignore_changes = [value]` means no apply ever reads one back or
+resets it to `REPLACE_ME`.
+
+Rotation is therefore two steps, and **the second one is not optional**: the
+instance reads Parameter Store once per deploy, in `render-env.sh`, so a
+rotated parameter does nothing at all until the next deploy re-renders
+`/opt/concertfinder/.env`.
+
+```
+AWS_PROFILE=<profile> ./scripts/set-secrets.sh        # prompts; Enter skips a parameter
+gh workflow run deploy.yml                            # re-renders .env and restarts
+```
+
+Order matters for a rotation that must not drop traffic: at any moment the old
+value is live on the instance and the new one is in SSM, so create the new
+credential upstream *first*, leave the old one valid, rotate the parameter,
+deploy, then revoke the old one upstream once the site is verified.
+
+Two of these do not behave like the others:
+
+- **`ENCRYPTION_KEY` is not rotatable.** It is the AES-256-GCM key for every
+  stored Spotify refresh token, and nothing here re-encrypts them, so changing
+  it does not invalidate a session — it makes `AccessTokenFor` fail for every
+  existing user, permanently, until each one reconnects Spotify. It also
+  derives `SIGNING_KEY` when that is unset. If it is ever genuinely
+  compromised, the honest recovery is to rotate it *and* accept that every user
+  reauthorizes; set `SIGNING_KEY` explicitly beforehand if you want signing
+  rotated without touching the ciphertexts.
+- **`SMTP_USERNAME` / `SMTP_PASSWORD` are Terraform's, not yours.** They come
+  from `aws_iam_access_key` in `ses.tf` and are written to SSM by the apply.
+  Rotate by tainting that key and applying, not with `set-secrets.sh`.
+
+## Escrowing `ENCRYPTION_KEY`
+
+Because it cannot be rotated, it also cannot be lost. Every nightly dump in S3
+stores `users.spotify_refresh_token` as ciphertext under that one key: with the
+parameter gone, the backups restore to a table of unreadable bytes and every
+user reconnects — the exact loss the backups exist to prevent.
+
+Parameter Store is not a second copy of itself. Put the value somewhere with a
+different failure mode from the AWS account (a password manager, a sealed
+envelope), labelled with what it decrypts:
+
+```
+aws ssm get-parameter --name /concertfinder/ENCRYPTION_KEY \
+  --with-decryption --query Parameter.Value --output text
+```
+
+Do that from a machine you would be comfortable typing it on; the value is now
+in that shell's scrollback.
+
+## Restore drills
+
+The backups have a verified *write* path — `backup-db.sh` runs `pg_restore
+--list` over the archive before uploading, and pings a heartbeat after. Nothing
+verifies the *read* path, and an untested restore is a hypothesis.
+`scripts/restore-drill.sh` is that test, run from your laptop (the instance role
+has `PutObject` and nothing else, on purpose).
+
+The cheap half answers "is there a restore point at all", in seconds:
+
+```
+AWS_PROFILE=<profile> ./scripts/restore-drill.sh --check
+```
+
+It fails if the newest object under `pg/` is more than two days old, and prints
+the newest dump's size against the previous one — a dump that halves overnight
+is a database that lost something, and a freshness check alone waves that
+through.
+
+The real drill restores into a **scratch Neon branch** and times it:
+
+```
+neon branches create --name restore-drill        # or the Neon console
+AWS_PROFILE=<profile> ./scripts/restore-drill.sh 'postgres://…restore-drill…?sslmode=require'
+neon branches delete restore-drill
+```
+
+It refuses a target that already has rows in `users`, which is what makes a
+mispasted production URL a refusal rather than an outage. It asserts the four
+tables that do not rebuild themselves (`users`, `user_saved_concerts`,
+`user_subscribed_artists`, `user_locations`) came back with rows — a restore
+that produces an empty schema exits 0 and otherwise looks like a pass. The
+elapsed restore time it prints is the data-layer RTO; record it here when you
+first measure it, and remember it excludes noticing, deciding, branching, and
+pointing `DATABASE_URL` at the result.
+
+The whole-database restore into production, when it is not a drill, is still
+the manual path in §7 above.
+
+## Break-glass access
+
+There is no SSH ingress. Port 22 is closed in `infra/security_groups.tf` and
+the access path is SSM Session Manager, which is the same channel the deploy
+uses:
+
+```
+aws ssm start-session --target <instance-id>
+```
+
+The instance also carries a key pair (`aws_key_pair.breakglass`, private key at
+`infra/.secrets/concertfinder-breakglass.pem`) that has never been usable,
+because nothing has ever opened the port. That is the right steady state and a
+bad thing to discover mid-incident, so the lever is explicit:
+
+```
+# in infra/terraform.tfvars
+ssh_ingress_cidrs = ["203.0.113.4/32"]     # your address, /32, never 0.0.0.0/0
+```
+
+`terraform apply`, then `ssh -i infra/.secrets/concertfinder-breakglass.pem
+ec2-user@<public-ip>`. Set it back to `[]` and apply again when you are done —
+an always-open port 22 beside a box whose only other ingress is Caddy is the
+largest surface this account has, and the variable refuses `0.0.0.0/0`
+outright.
+
+This is for SSM being unavailable or the agent being wedged. For everything
+else, including a deploy that failed, `start-session` is faster and leaves an
+audit trail.
+
+## Terraform state
+
+State is **local** today: `infra/terraform.tfstate`, in a git checkout on one
+laptop, gitignored. It contains the SES SMTP password and the break-glass
+ED25519 private key in cleartext, and there is no lock, so two concurrent
+applies would silently clobber each other's view of reality.
+
+Moving it to S3 is prepared but not applied — the bucket does not exist until
+someone runs the bootstrap, and adding the backend block before that would
+break `terraform init` for everyone:
+
+```
+cd infra/bootstrap && terraform init && terraform apply   # creates the bucket
+cd .. && cp backend.tf.example backend.tf
+# fill in <account-id>: aws sts get-caller-identity --query Account --output text
+terraform init -migrate-state                             # answer yes
+rm terraform.tfstate terraform.tfstate.backup             # stale, and still full of secrets
+git add backend.tf && git commit
+```
+
+`infra/bootstrap/` keeps its own state local forever and that is fine: it
+manages one bucket and holds no secret. Locking is S3-native (`use_lockfile`),
+which needs Terraform ≥ 1.11 — there is no DynamoDB table to create, and none
+to pay for. Bump `required_version` in `main.tf` when you adopt it, or the lock
+is quietly absent for anyone running an older CLI.
 
 ## What's not in this setup
 

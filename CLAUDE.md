@@ -611,10 +611,25 @@ separate SSM steps: `up -d --build` tears down running containers as part of
 the same command, so a failed or OOM-killed build took the site with it. Keep
 them separate in the runbook's manual and rollback commands too — a rollback is
 by definition a moment when the site is already unhappy. CI runs gofmt, vet,
-`go build`, `go test`, and `npm run build` — `go test` alone compiles only
-packages that have tests, and several here have none. Building in Actions and
+`go build`, `go test`, `govulncheck ./...`, and `npm run build` — `go test`
+alone compiles only packages that have tests, and several here have none.
+`govulncheck` reports against the **toolchain in PATH**, so the standard-library
+half of any failure is fixed by bumping `go-version` in the workflow, not by
+changing code; that is why the version there floats on the minor (`'1.25'`),
+which is where the Go team's security backports land. Building in Actions and
 pushing to ECR would remove the on-instance build entirely; that needs an ECR
 repo plus instance-profile pull permissions in `/infra`.
+
+**The backup and its drill must pin the same Postgres image.**
+`scripts/restore-drill.sh` is the read half of `scripts/backup-db.sh` — it
+fetches the newest dump from S3, restores it into a scratch Neon branch, times
+it, and asserts the four tables that do not rebuild themselves came back with
+rows. `pg_restore` refuses an archive produced by a *newer* server, so a
+`PG_IMAGE` that drifts between the two scripts fails the drill for a reason
+that has nothing to do with the backups, on the one day that distinction
+matters. `check-deploy-config.sh` compares them. The drill also refuses a target
+that already holds users, because it restores `--clean --if-exists`: without
+that guard a mispasted production URL is an outage rather than a typo.
 
 ## Required Environment Variables (Appendix A)
 

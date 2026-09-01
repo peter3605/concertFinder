@@ -136,3 +136,30 @@ variable "min_ios_build" {
   type        = number
   default     = 0
 }
+
+# Break-glass SSH. Empty by default, which is the deployed state: port 22 is
+# closed and the key pair in ec2.tf is attached but unreachable. SSM Session
+# Manager is the access path (`aws ssm start-session --target <id>`), and it is
+# the one the deploy already depends on.
+#
+# This variable exists because the alternative to a documented lever is an
+# undocumented emergency: the failure this covers is SSM itself being down or
+# the SSM agent being wedged, and that is the worst moment to be discovering
+# that the security group has no rule and the key has never been tried. Set it
+# to ["<your-ip>/32"], apply, do the work, set it back to [] and apply again.
+#
+# A list rather than a bool: an emergency rule scoped to one address is a
+# different thing from 0.0.0.0/0, and the type is what keeps the difference
+# visible in the diff. Never leave a value in here between incidents — an
+# always-open port 22 on a box whose only other ingress is Caddy is the largest
+# attack surface this account has.
+variable "ssh_ingress_cidrs" {
+  description = "CIDRs allowed to reach port 22 on the app instance. Empty (the default and the intended steady state) means no SSH ingress at all; use SSM Session Manager. Set to your own address for break-glass access, then set it back."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.ssh_ingress_cidrs, "0.0.0.0/0")
+    error_message = "Refusing to open port 22 to the whole internet. Use a /32, or use SSM."
+  }
+}
