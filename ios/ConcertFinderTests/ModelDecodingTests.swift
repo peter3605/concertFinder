@@ -178,6 +178,59 @@ struct ModelDecodingTests {
         #expect(sent == "9:30 Club", "the facet value must be sent unmodified")
     }
 
+    /// `GET /api/discover` — the signed-out "popular shows near you" view.
+    ///
+    /// It reuses the feed's `Event` shape deliberately, so the real models
+    /// and the real card decode and render it. What matters here is what it
+    /// *lacks*: this response has no session behind it and knows nothing
+    /// about who is asking.
+    @Test func decodesDiscoverThroughTheFeedModels() throws {
+        let response = try Self.decode(DiscoverResponse.self, "discover")
+
+        #expect(response.count == 1)
+        #expect(response.events.count == 1)
+
+        let event = try #require(response.events.first)
+        #expect(event.venue == "The Anthem")
+        #expect(event.location == "Washington, DC")
+        #expect(event.acts.count == 2)
+        // Billing survives — it is a property of the show, not of the viewer.
+        #expect(event.acts.first?.billingSlot == .headliner)
+
+        // Every one of these absences is load-bearing rather than incidental.
+        // An act with no artist id cannot be subscribed to, and nil
+        // saved/subscribed is what lets the card render without claiming the
+        // viewer has done something they have not.
+        for act in event.acts {
+            #expect(act.artist.id.isEmpty)
+            #expect(act.saved == nil)
+            #expect(act.subscribed == nil)
+            #expect(act.reason == nil)
+        }
+
+        #expect(response.location.radiusMiles == 50)
+        #expect(response.location.isDefault == nil)
+    }
+
+    /// `reason` is additive and must decode as absent in three situations
+    /// that all happen: an artist the server has nothing honest to say about,
+    /// a profile computed by a build that predates the field, and the
+    /// signed-out discover response. A non-optional here would fail the whole
+    /// feed rather than one line of one card.
+    @Test func actReasonIsOptional() throws {
+        let response = try Self.decode(ConcertsResponse.self, "festival")
+        let acts = try #require(response.events.first?.acts)
+
+        let turnstile = try #require(acts.first { $0.artist.name == "Turnstile" })
+        #expect(turnstile.reason == "You follow them")
+        let snailMail = try #require(acts.first { $0.artist.name == "Snail Mail" })
+        #expect(snailMail.reason == "#7 in your top artists")
+
+        // Absent in the fixture on purpose.
+        let fooFighters = try #require(acts.first { $0.artist.name == "Foo Fighters" })
+        #expect(fooFighters.reason == nil)
+    }
+
     @Test func ticketLinkLabelsCoverRetiredSources() {
         // Rows written before Bandsintown was removed still carry its links
         // until the janitor ages them out; the label is what keeps them

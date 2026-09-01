@@ -15,6 +15,14 @@ extension Color {
     /// increased-contrast settings are inherited rather than reimplemented.
     static let cardBackground = Color(.secondarySystemGroupedBackground)
     static let screenBackground = Color(.systemGroupedBackground)
+    /// The app's accent. Every bookmark, bell and prominent button reads
+    /// `Color.accentColor`, which resolves to the `AccentColor` asset set —
+    /// so this constant and that asset carry the same values, and the asset
+    /// is the one that ships. They are duplicated because an asset catalogue
+    /// cannot read a Swift constant, not because either is optional: without
+    /// the asset (and `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` naming
+    /// it) `accentColor` falls back to system blue, which is what shipped
+    /// while this constant sat unused.
     static let accentGreen = Color(red: 0.11, green: 0.73, blue: 0.33)
 }
 

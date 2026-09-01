@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { FilterBar } from '@/components/filter-bar';
 import { ConcertsList } from '@/components/concerts-list';
 import { LocationBar } from '@/components/location-bar';
+import { LocationPrompt } from '@/components/location-prompt';
+import { SaveSubscribeHint } from '@/components/save-subscribe-hint';
 import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
-import { apiFetch, formatRetry, mutatingFetch } from '@/lib/api';
-import { detectAndSaveLocation } from '@/lib/geolocate';
+import { apiFetch, formatRetry, mutatingFetch, statusMessage } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
-import { EMPTY_FILTERS, type FiltersState, type Location } from '@/lib/types';
+import {
+  EMPTY_FILTERS,
+  hasActiveFilters,
+  type FiltersState,
+  type Location,
+} from '@/lib/types';
 
 export default function ConcertsPage() {
   useDocumentTitle('Concerts');
@@ -20,6 +27,9 @@ export default function ConcertsPage() {
   // it from the user's saved row — so the URL is unchanged and only an
   // explicit token can trigger the refetch.
   const [reloadVersion, setReloadVersion] = useState(0);
+  // Bumped to open the location bar's city field — from the first-run prompt,
+  // whether the user asks for it or the browser refuses the geolocation dialog.
+  const [editLocationToken, setEditLocationToken] = useState(0);
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const { state, toggleSaved, toggleSubscribed, actionError, dismissActionError } = useConcerts(
@@ -55,12 +65,13 @@ export default function ConcertsPage() {
   // Location is fetched independently so the LocationBar can render even
   // if concerts are still loading.
   //
-  // When the server reports is_default, the user has no saved location and is
-  // being shown this deployment's USER_LATITUDE/LONGITUDE fallback — a real
-  // city that is very unlikely to be theirs. Ask the browser once. Everything
-  // about this is best-effort: declining, an unsupported browser, or a failed
-  // fix all leave the fallback in place and the location bar working exactly as
-  // before, so nothing is surfaced to the user.
+  // is_default means the user has no saved location and is looking at this
+  // deployment's USER_LATITUDE/LONGITUDE fallback — a real city that is very
+  // unlikely to be theirs. That used to fire the browser's geolocation dialog
+  // here, unannounced. It doesn't any more: the browser remembers a denial per
+  // origin and will not ask again, so an unexplained prompt spends the only
+  // question we get. LocationPrompt asks first, in words, and offers the city
+  // field beside it.
   useEffect(() => {
     let cancelled = false;
 
@@ -74,16 +85,6 @@ export default function ConcertsPage() {
       }
       if (cancelled) return;
       setLocation(loc);
-
-      if (!loc?.is_default) return;
-
-      const outcome = await detectAndSaveLocation(saveLocation);
-      if (cancelled || outcome.kind !== 'saved') return;
-      setLocation(outcome.location);
-      // A scan already ran at the fallback location. Re-fetch so the list
-      // reflects the detected one — the response carries refreshing:true and
-      // the hook's bounded poll loop picks up the new snapshot.
-      setReloadVersion((v) => v + 1);
     })();
 
     return () => {
@@ -96,8 +97,8 @@ export default function ConcertsPage() {
     setReloadVersion((v) => v + 1);
   }
 
-  // Shared by the location bar and the first-login browser detection above, so
-  // both write a location the same way.
+  // Shared by the location bar and the first-run prompt's browser detection,
+  // so both write a location the same way.
   async function saveLocation(body: {
     latitude: number;
     longitude: number;
@@ -108,7 +109,11 @@ export default function ConcertsPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(await r.text());
+    // The status, not the body: a Go http.Error string reads as an internal
+    // note and a proxy failure is HTML. Nothing renders this today (the
+    // prompt writes its own copy for a failed detection), which is exactly
+    // why it would be the one left behind.
+    if (!r.ok) throw new Error(statusMessage(r.status));
     return (await r.json()) as Location;
   }
 
@@ -132,9 +137,26 @@ export default function ConcertsPage() {
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </Button>
       </div>
-      {location && <LocationBar location={location} onSaved={onLocationSaved} />}
+      {location?.is_default && (
+        <LocationPrompt
+          save={saveLocation}
+          onLocated={onLocationSaved}
+          onTypeCity={() => setEditLocationToken((v) => v + 1)}
+        />
+      )}
+      {location && (
+        <LocationBar
+          location={location}
+          onSaved={onLocationSaved}
+          openEditorToken={editLocationToken}
+        />
+      )}
       <ActionError message={refreshError} onDismiss={() => setRefreshError(null)} />
       <ActionError message={actionError} onDismiss={dismissActionError} />
+      {/* The bar and the list stay mounted across a filter change — the fetch
+          marks them stale instead. Unmounting them dropped focus to <body> and
+          scrolled to the top, so setting a date range cost a round trip
+          between the two inputs. */}
       {state.kind === 'loaded' && (
         <FilterBar
           filters={filters}
@@ -149,11 +171,23 @@ export default function ConcertsPage() {
           Error: {state.message}
         </div>
       )}
+      {state.kind === 'loaded' && state.data.count > 0 && <SaveSubscribeHint />}
       {state.kind === 'loaded' && (
         <ConcertsList
           data={state.data}
+          busy={state.stale}
+          refreshStopped={state.pollStopped}
           onToggleSave={toggleSaved}
           onToggleSubscribe={toggleSubscribed}
+          emptyAction={
+            // Only when the list is empty on its own terms. With a filter on,
+            // the thing to do is clear it, and the empty copy already says so.
+            hasActiveFilters(filters) ? undefined : (
+              <Button asChild size="sm">
+                <Link to="/subscribe">Get alerts when an artist announces a show</Link>
+              </Button>
+            )
+          }
         />
       )}
     </div>

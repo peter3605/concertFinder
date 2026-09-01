@@ -162,6 +162,12 @@ struct SessionLifecycleTests {
      "display_name": "Washington, DC", "is_default": false}
     """
 
+    /// What `GET /me/location` answers for someone who has never chosen one:
+    /// the deployment's fallback city, flagged as such.
+    private static let defaultLocationJSON = """
+    {"latitude": 38.9, "longitude": -77.0, "radius_miles": 50, "is_default": true}
+    """
+
     private static func signedInRoutes() {
         StubURLProtocol.routes = [
             "/api/me/concerts": .init(status: 200, json: concertsJSON),
@@ -330,5 +336,108 @@ struct SessionLifecycleTests {
 
         #expect(feed.rescanRefusal == nil)
         #expect(!feed.events.isEmpty)
+    }
+
+    // MARK: - P3-1
+
+    /// Nothing may sit waiting on a scan of a city the user never named.
+    ///
+    /// Login no longer pre-warms a snapshot for a user with no location of
+    /// their own, so the *feed read* is what enqueues the scan — and a scan
+    /// is up to five minutes and a chunk of a 250-call daily allowance, all
+    /// of it thrown away the moment they set their real city, which produces
+    /// a fresh `location_key` with no snapshot and a second full scan.
+    @Test @MainActor func aFirstRunAsksWhereYouAreBeforeItReadsTheFeed() async {
+        await SnapshotCache.shared.clear()
+        FirstRunTracker.reset()
+        StubURLProtocol.routes = [
+            "/api/me/concerts": .init(status: 200, json: Self.concertsJSON),
+            "/api/me/location": .init(status: 200, json: Self.defaultLocationJSON),
+        ]
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+
+        await feed.start()
+
+        #expect(feed.isAwaitingLocation)
+        #expect(feed.isFirstRun, "the first-run screen has to render the question it is asking")
+        #expect(feed.events.isEmpty, "the feed must not be read, because reading it starts the scan")
+        // The question is asked, but the fallback coordinates are still known
+        // — the signed-out backdrop has somewhere to search in the meantime.
+        #expect(feed.searchOrigin != nil)
+
+        await feed.continueWithoutLocation()
+
+        #expect(!feed.isAwaitingLocation)
+        #expect(!feed.events.isEmpty, "declining the question must not be a dead end")
+
+        FirstRunTracker.reset()
+        await SnapshotCache.shared.clear()
+    }
+
+    /// The gate is first-run only. Someone who has been using the app for
+    /// months and never set a location still has a feed, and withholding it
+    /// until they answer a question would be a worse bug than the one above.
+    @Test @MainActor func anEstablishedUserWithNoLocationStillGetsTheirFeed() async {
+        await SnapshotCache.shared.clear()
+        FirstRunTracker.reset()
+        FirstRunTracker.markCompleted()
+        StubURLProtocol.routes = [
+            "/api/me/concerts": .init(status: 200, json: Self.concertsJSON),
+            "/api/me/location": .init(status: 200, json: Self.defaultLocationJSON),
+        ]
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+
+        await feed.start()
+
+        #expect(!feed.isAwaitingLocation)
+        #expect(!feed.isFirstRun)
+        #expect(!feed.events.isEmpty)
+        #expect(feed.isUsingFallbackLocation, "the banner asking them to set one still applies")
+
+        FirstRunTracker.reset()
+        await SnapshotCache.shared.clear()
+    }
+
+    // MARK: - P3-4
+
+    /// Raised on the first settled scan with results in it, and never again —
+    /// the system dialog behind it is a one-shot, so "once ever" is the whole
+    /// contract.
+    @Test @MainActor func theSoftPushPromptIsRaisedOnceEver() async {
+        await SnapshotCache.shared.clear()
+        FirstRunTracker.reset()
+        Self.signedInRoutes()
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+
+        await feed.load()
+        #expect(feed.isShowingPushPrompt)
+        #expect(FirstRunTracker.hasOfferedPushPrompt)
+
+        // Dismissed without accepting. A second load must not ask again:
+        // silence is an answer.
+        feed.isShowingPushPrompt = false
+        await feed.load()
+        #expect(!feed.isShowingPushPrompt)
+
+        FirstRunTracker.reset()
+        await SnapshotCache.shared.clear()
+    }
+
+    // MARK: - P3-5
+
+    /// A hint the user dismissed was postponed rather than dismissed if it
+    /// comes back on the next launch, and the user has no way to tell the
+    /// difference except by dismissing it again.
+    @Test func theSaveVersusSubscribeHintStaysDismissed() {
+        HintStore.reset()
+        #expect(!HintStore.isDismissed(.saveVersusSubscribe))
+
+        HintStore.dismiss(.saveVersusSubscribe)
+        #expect(HintStore.isDismissed(.saveVersusSubscribe))
+
+        // Sign-out clears it, so the next account on this device is
+        // introduced to the pair too.
+        HintStore.reset()
+        #expect(!HintStore.isDismissed(.saveVersusSubscribe))
     }
 }

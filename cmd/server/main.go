@@ -445,6 +445,9 @@ func main() {
 			// is plenty at single-instance scale — typically one live entry
 			// per active user per location.
 			SnapshotCache: webhttp.NewSnapshotCache(200),
+			// Read-only use of the profile: the handler asks for reasons, not
+			// for a computation. See ConcertsHandler.Affinity.
+			Affinity: affinitySvc,
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
 		devicesH = &webhttp.DevicesHandler{Pool: pool}
@@ -459,10 +462,27 @@ func main() {
 		// snapshot job. Uses a detached background context so a browser
 		// disconnect mid-callback doesn't cancel the enqueue.
 		authDeps.OnLoginSuccess = func(_ context.Context, userID uuid.UUID) {
-			loc := fallbackLoc
-			if ul, hit, err := db.GetUserLocation(context.Background(), pool, userID); err == nil && hit {
-				loc = concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
+			ul, hit, err := db.GetUserLocation(context.Background(), pool, userID)
+			if err != nil {
+				logger.Warn("prewarm location lookup failed", "err", err, "user", userID)
+				return
 			}
+			if !hit {
+				// No location of the user's own yet, so the only thing to
+				// scan is this deployment's USER_LATITUDE/USER_LONGITUDE —
+				// a city the user has never mentioned. That scan takes up to
+				// ScanBudget and reserves a chunk of a daily per-user cap
+				// sized at roughly one scan, and the moment the user names a
+				// real place the result is filed under a different
+				// location_key and never read. The user waited through it to
+				// be handed nothing.
+				//
+				// Both clients ask for a location before the first feed, and
+				// the SWR read enqueues the scan when the answer arrives.
+				logger.Info("prewarm skipped: user has no location yet", "user", userID)
+				return
+			}
+			loc := concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
 			args := jobs.ScanConcertsArgs{
 				UserID:      userID,
 				Latitude:    loc.Latitude,
@@ -547,6 +567,22 @@ func main() {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		})
+		// "Popular shows near you" for a visitor with no session: the login
+		// page, App Review's first screen, and the backdrop behind the iOS
+		// first-run flow. Served entirely from concert_cache — it cannot
+		// reach an upstream API and cannot touch the rate ledger, which is
+		// the property that makes an unauthenticated concert endpoint safe
+		// to have at all.
+		//
+		// Its own bucket, tighter than /api's, because it is unauthenticated
+		// and its refresh decodes thousands of cached payloads. 2/s with
+		// burst 20 is far above a page that calls it once on load.
+		discoverLimiter := auth.NewIPRateLimit(2, 20)
+		// One instance for the process. The handler holds the decoded
+		// candidate set (DiscoverRefreshInterval), so a per-request one would
+		// be an empty cache every time, i.e. no cache at all.
+		discoverH := &webhttp.DiscoverHandler{Pool: pool}
+		api.With(discoverLimiter.Middleware).Get("/discover", discoverH.Get)
 		api.Get("/site-info", (&webhttp.SiteInfoHandler{
 			ContactEmail:  cfg.ContactEmail,
 			EffectiveDate: "2026-07-29",

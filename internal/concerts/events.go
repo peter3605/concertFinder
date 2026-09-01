@@ -98,6 +98,7 @@ func actOf(c Concert) Act {
 		DedupKey:   c.DedupKey,
 		Saved:      c.Saved,
 		Subscribed: c.Subscribed,
+		Reason:     c.Reason,
 		Billing:    c.Billing,
 	}
 }

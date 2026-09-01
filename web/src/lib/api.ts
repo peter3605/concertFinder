@@ -56,6 +56,36 @@ export function mutatingFetch(input: string, init: RequestInit = {}): Promise<Re
   return apiFetch(input, { ...init, headers });
 }
 
+// What a failed request says to the user.
+//
+// The body of a refusal is not user-facing copy: Go's `http.Error` strings are
+// written for a log ("radius_miles must be 1..500", "internal error"), and a
+// request that dies before reaching the app carries whatever HTML the proxy
+// felt like — both of which used to be rendered verbatim, in the interface, as
+// the explanation. Status is the only part of a failure this app can read, so
+// the message is chosen from it.
+//
+// `overrides` is for the cases where a handler's meaning is narrower than the
+// status: 404 from the location endpoint is "no such city", not "no such page".
+export function statusMessage(status: number, overrides: Record<number, string> = {}): string {
+  const custom = overrides[status];
+  if (custom) return custom;
+  if (status === 401) return 'Your session expired. Log in again.';
+  if (status === 403) return "That request wasn't allowed. Reload and try again.";
+  if (status === 404) return "We couldn't find that.";
+  if (status === 409) return "You've reached the limit for this list. Remove something first.";
+  if (status === 413) return 'That was too large to send.';
+  if (status === 429) return 'Too many requests just now — wait a moment and try again.';
+  if (status >= 500) return 'Something went wrong on our end. Try again in a moment.';
+  if (status >= 400) return "That didn't work. Check what you entered and try again.";
+  return `Something went wrong (HTTP ${status}).`;
+}
+
+// The other half: a fetch that rejects never had a status. Its `message` is
+// the browser's ("Failed to fetch", "NetworkError when attempting to fetch
+// resource"), which is the same defect in a different coat.
+export const NETWORK_ERROR_MESSAGE = "Couldn't reach the server. Check your connection and try again.";
+
 // Renders a future instant as a local time the user can act on ("after
 // 8:00 PM") rather than an opaque UTC timestamp. Used for both the daily
 // quota reset and the manual-refresh cooldown.

@@ -137,14 +137,29 @@ final class LocationModel {
         }
     }
 
+    /// Two decimal places is roughly a kilometre, which is the resolution the
+    /// feature actually uses.
+    ///
+    /// Not cosmetic and not redundant with `desiredAccuracy`: that limits
+    /// what CoreLocation *spends* to get a fix, not what it hands back, and
+    /// on a device with a recent GPS fix it hands back metres. The privacy
+    /// manifest declares coarse location, so sending a precise coordinate
+    /// would be collecting something the app says it does not. The server
+    /// rounds too — this stops it being sent at all.
+    /// `nonisolated` because `@MainActor` on the class covers its static
+    /// members too, and this is a pure function the tests call directly.
+    nonisolated static func coarse(_ value: Double) -> Double {
+        (value * 100).rounded() / 100
+    }
+
     func useCurrentLocation() async {
         isSaving = true
         defer { isSaving = false }
         do {
             let coordinate = try await provider.requestOnce()
             location = try await api.setLocation(
-                latitude: coordinate.latitude,
-                longitude: coordinate.longitude,
+                latitude: Self.coarse(coordinate.latitude),
+                longitude: Self.coarse(coordinate.longitude),
                 radiusMiles: Int(radius)
             )
             cityQuery = location?.displayName ?? cityQuery

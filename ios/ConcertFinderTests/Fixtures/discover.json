@@ -1,0 +1,44 @@
+{
+  "location": {
+    "latitude": 38.8951,
+    "longitude": -77.0364,
+    "radius_miles": 50
+  },
+  "count": 1,
+  "events": [
+    {
+      "event_key": "22334455667788990011223344556677",
+      "date": "2026-10-03T19:30:00Z",
+      "venue": "The Anthem",
+      "city": "Washington",
+      "state": "DC",
+      "country": "US",
+      "latitude": 38.879,
+      "longitude": -77.0217,
+      "acts": [
+        {
+          "artist": {
+            "id": "",
+            "name": "Fontaines D.C."
+          },
+          "dedup_key": "0011223344556677889900aabbccddee",
+          "billing": "headliner"
+        },
+        {
+          "artist": {
+            "id": "",
+            "name": "Been Stellar"
+          },
+          "dedup_key": "11223344556677889900aabbccddeeff",
+          "billing": "support"
+        }
+      ],
+      "links": [
+        {
+          "source": "ticketmaster",
+          "url": "https://www.ticketmaster.com/event/anthem"
+        }
+      ]
+    }
+  ]
+}

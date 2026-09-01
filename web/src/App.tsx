@@ -1,15 +1,24 @@
+import { lazy } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from '@/components/layout';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { ThemeProvider } from '@/lib/theme';
-import AppCallbackPage from '@/pages/app-callback';
 import ConcertsPage from '@/pages/concerts';
 import LoginPage from '@/pages/login';
-import PrivacyPage from '@/pages/privacy';
+import NotFoundPage from '@/pages/not-found';
 import SavedPage from '@/pages/saved';
 import SettingsPage from '@/pages/settings';
-import SubscribePage from '@/pages/subscribe';
-import TermsPage from '@/pages/terms';
+
+// Split out of the main bundle. None of these four is on the path to the
+// first paint of the feed — the two policy pages are read once, the
+// subscribe page pulls in its own search UI, and /app/auth/callback exists
+// for a browser that reached an iOS universal link — so shipping them in the
+// entry chunk is parse work every signed-in visit pays for nothing.
+// Layout renders the Suspense boundary these need.
+const AppCallbackPage = lazy(() => import('@/pages/app-callback'));
+const PrivacyPage = lazy(() => import('@/pages/privacy'));
+const SubscribePage = lazy(() => import('@/pages/subscribe'));
+const TermsPage = lazy(() => import('@/pages/terms'));
 
 // RequireAuth gates authenticated routes. Anon users get bounced to /login;
 // still-loading auth just renders nothing rather than flash the login screen.
@@ -66,7 +75,10 @@ export default function App() {
               <Route path="/app/auth/callback" element={<AppCallbackPage />} />
               <Route path="/privacy" element={<PrivacyPage />} />
               <Route path="/terms" element={<TermsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
+              {/* Not a redirect to `/`. Sending a dead link to the feed made
+                  every typo look like a working page, and signed out it
+                  bounced to the login screen as though that were the answer. */}
+              <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

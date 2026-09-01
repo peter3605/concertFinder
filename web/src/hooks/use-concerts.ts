@@ -2,8 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 import { apiFetch, mutatingFetch } from '@/lib/api';
 import type { Act, ConcertsResponse, FiltersState } from '@/lib/types';
 
+// `stale` is true while a fetch is in flight over data we already have — a
+// filter change, a location change, a manual refresh. It exists so those never
+// go back through `loading`: unmounting the loaded branch tore down the filter
+// bar and the list mid-interaction, which dropped keyboard focus to <body> and
+// scrolled to the top, so setting a date range cost a round trip between the
+// two inputs. Consumers keep rendering the last data and mark it aria-busy.
+// `pollStopped` marks a refresh we have stopped watching — the poll ceiling
+// was reached, or the retries were. It is optional because it is the unusual
+// case, and every state that omits it means "nothing has given up".
 type State =
   | { kind: 'loading' }
+  | { kind: 'loaded'; data: ConcertsResponse; stale: boolean; pollStopped?: boolean }
+  | { kind: 'error'; message: string };
+
+// What one fetch produced, before it is folded into the state above. Separate
+// from State because a fetch has no opinion about staleness — that is a
+// property of the view it is replacing.
+type FetchResult =
   | { kind: 'loaded'; data: ConcertsResponse }
   | { kind: 'error'; message: string };
 
@@ -18,7 +34,7 @@ function buildQuery(f: FiltersState): string {
   return s ? `?${s}` : '';
 }
 
-async function fetchFeed(endpoint: string, query: string): Promise<State> {
+async function fetchFeed(endpoint: string, query: string): Promise<FetchResult> {
   try {
     const r = await apiFetch(`${endpoint}${query}`);
     if (!r.ok) return { kind: 'error', message: `HTTP ${r.status}` };
@@ -76,7 +92,9 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
   useEffect(() => {
     const myGen = ++generation.current;
     if (pollTimer.current) clearTimeout(pollTimer.current);
-    setState({ kind: 'loading' });
+    // Only the very first load has nothing to show. Every later one keeps the
+    // previous response on screen and flags it stale.
+    setState((prev) => (prev.kind === 'loaded' ? { ...prev, stale: true } : { kind: 'loading' }));
     const q = buildQuery(filters);
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     reloadToken;
@@ -86,8 +104,21 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
     // Once we've shown real data, a later failure must not replace it with
     // a bare error screen — the data on screen is still the best we have.
     let haveData = false;
+    // True while there is still something to poll for. Distinct from having a
+    // timer armed: a hidden tab has no timer and every reason to resume when
+    // it comes back, while a finished or abandoned refresh has neither.
+    let wantsPoll = false;
+
+    const isHidden = () => document.visibilityState === 'hidden';
 
     const schedulePoll = (delayMs: number) => {
+      wantsPoll = true;
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+      // Don't poll a tab nobody is looking at. Browsers throttle background
+      // timers to roughly one a minute anyway, so the loop half-runs either
+      // way; this makes it stop honestly and resume on the events below,
+      // rather than dribbling requests at a rate nothing in the code states.
+      if (isHidden()) return;
       pollTimer.current = setTimeout(async () => {
         if (myGen !== generation.current) return;
         const next = await fetchFeed(endpoint, q);
@@ -97,7 +128,7 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
           consecutiveErrors = 0;
           haveData = true;
           if (next.data.computed_at !== lastComputedAt || !next.data.refreshing) {
-            setState(next);
+            setState({ ...next, stale: false });
             lastComputedAt = next.data.computed_at;
           }
           if (next.data.refreshing) {
@@ -106,8 +137,18 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
             } else {
               // Give up, and stop showing a spinner for a refresh nothing
               // is watching any more — otherwise the badge spins forever.
-              setState({ kind: 'loaded', data: { ...next.data, refreshing: false } });
+              // pollStopped is what says so in words; a spinner that simply
+              // stops is indistinguishable from one that finished.
+              wantsPoll = false;
+              setState({
+                kind: 'loaded',
+                data: { ...next.data, refreshing: false },
+                stale: false,
+                pollStopped: true,
+              });
             }
+          } else {
+            wantsPoll = false;
           }
           return;
         }
@@ -122,28 +163,62 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
           schedulePoll(backoff);
           return;
         }
-        if (!haveData) setState(next);
+        wantsPoll = false;
+        if (!haveData) {
+          setState(next);
+          return;
+        }
+        // We still have something to show, so the error stays off screen —
+        // but the list must stop claiming a refresh is on its way, and the
+        // spinner has to come down with it.
+        setState((prev) =>
+          prev.kind === 'loaded'
+            ? {
+                ...prev,
+                data: { ...prev.data, refreshing: false },
+                stale: false,
+                pollStopped: true,
+              }
+            : prev,
+        );
       }, delayMs);
     };
+
+    // Coming back to the tab, or back onto the network, is exactly when the
+    // answer is most likely to have changed and least likely to have been
+    // seen. Without this a laptop closed mid-scan reopened onto a spinner
+    // whose timer had been throttled into uselessness.
+    const resume = () => {
+      if (myGen !== generation.current || !wantsPoll || isHidden()) return;
+      schedulePoll(0);
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('online', resume);
 
     fetchFeed(endpoint, q).then((initial) => {
       if (myGen !== generation.current) return;
       if (initial.kind === 'loaded') {
         haveData = true;
-        setState(initial);
+        setState({ ...initial, stale: false });
         lastComputedAt = initial.data.computed_at;
         if (initial.data.refreshing) schedulePoll(REFRESH_POLL_INTERVAL_MS);
         return;
       }
-      // The very first fetch failed: show the error, but keep trying in the
-      // background so a blip on load doesn't strand the user on a dead page.
-      setState(initial);
+      // The first fetch of this generation failed. Anything already on screen
+      // answers a query the user has since changed, so it stays only while the
+      // retries run; the error replaces it once they are exhausted, below.
+      // Meanwhile keep trying in the background so a blip on load doesn't
+      // strand the user on a dead page.
+      const failure: State = initial;
+      setState((prev) => (prev.kind === 'loaded' ? prev : failure));
       consecutiveErrors = 1;
       schedulePoll(ERROR_BACKOFF_MS[0]);
     });
 
     return () => {
       if (pollTimer.current) clearTimeout(pollTimer.current);
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('online', resume);
     };
     // Rebuild the query key so useEffect only refires when a filter changes,
     // not on any parent re-render.
@@ -179,7 +254,9 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
     const events = prev.data.events.map((e) =>
       e.acts.some(match) ? { ...e, acts: e.acts.map((a) => (match(a) ? { ...a, ...patch } : a)) } : e,
     );
-    return { kind: 'loaded', data: { ...prev.data, events } };
+    // Staleness is carried through: an optimistic star must not look like the
+    // in-flight fetch it happens to overlap with has landed.
+    return { ...prev, data: { ...prev.data, events } };
   }
 
   function patchConcert(dedupKey: string, patch: Partial<{ saved: boolean; subscribed: boolean }>) {

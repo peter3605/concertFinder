@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"github.com/peterho/concertfinder/internal/affinity"
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
@@ -33,6 +34,12 @@ type ConcertsHandler struct {
 	FallbackLocation   concerts.Location
 	SnapshotStaleAfter time.Duration
 	SnapshotCache      *SnapshotCache // nil = cache disabled
+	// Affinity supplies the per-act "why is this in my feed" line. Read-only
+	// here — the handler calls ReasonsFor, never LoadOrCompute, so a missing
+	// or expired profile costs one line on a card and never a Spotify
+	// fan-out on a request the frontend polls every 10s. nil disables the
+	// annotation entirely.
+	Affinity *affinity.Service
 }
 
 type concertsResponse struct {
@@ -80,9 +87,10 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		loc        = h.FallbackLocation
 		saved      map[string]struct{}
 		subscribed map[string]struct{}
+		reasons    map[string]string
 	)
 	var pre sync.WaitGroup
-	pre.Add(3)
+	pre.Add(4)
 	go func() {
 		defer pre.Done()
 		userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID)
@@ -115,6 +123,18 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		subscribed = s
+	}()
+	go func() {
+		defer pre.Done()
+		if h.Affinity == nil {
+			return
+		}
+		rs, err := h.Affinity.ReasonsFor(r.Context(), u.ID)
+		if err != nil {
+			slog.Warn("concerts: affinity reasons lookup failed", "err", err, "user", u.ID)
+			return
+		}
+		reasons = rs
 	}()
 	pre.Wait()
 
@@ -229,6 +249,12 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, ok := subscribed[filtered[i].Artist.ID]; ok {
 			filtered[i].Subscribed = true
+		}
+		// Absent for an artist scored before signals were recorded, or one
+		// whose only contribution has no wording. A missing reason renders
+		// as nothing on both clients, never as a placeholder.
+		if reason, ok := reasons[filtered[i].Artist.ID]; ok {
+			filtered[i].Reason = reason
 		}
 	}
 

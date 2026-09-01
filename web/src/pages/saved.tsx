@@ -48,6 +48,8 @@ export default function SavedPage() {
       {state.kind === 'loaded' && (
         <ConcertsList
           data={state.data}
+          busy={state.stale}
+          refreshStopped={state.pollStopped}
           onToggleSave={toggleSaved}
           onToggleSubscribe={toggleSubscribed}
           awaitsFirstScan={false}

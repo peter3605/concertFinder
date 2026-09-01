@@ -26,7 +26,8 @@
             ]
           },
           "dedup_key": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
-          "saved": true
+          "saved": true,
+          "reason": "You follow them"
         },
         {
           "artist": {
@@ -37,7 +38,8 @@
             ]
           },
           "dedup_key": "b2c3d4e5f60718293a4b5c6d7e8f9001",
-          "subscribed": true
+          "subscribed": true,
+          "reason": "#7 in your top artists"
         },
         {
           "artist": {
@@ -47,7 +49,8 @@
               "dream pop"
             ]
           },
-          "dedup_key": "c3d4e5f60718293a4b5c6d7e8f900112"
+          "dedup_key": "c3d4e5f60718293a4b5c6d7e8f900112",
+          "reason": "You saved 3 of their albums"
         },
         {
           "artist": {
@@ -57,7 +60,8 @@
               "indie rock"
             ]
           },
-          "dedup_key": "d4e5f60718293a4b5c6d7e8f90011223"
+          "dedup_key": "d4e5f60718293a4b5c6d7e8f90011223",
+          "reason": "Recently played"
         },
         {
           "artist": {
@@ -67,7 +71,8 @@
               "indie rock"
             ]
           },
-          "dedup_key": "e5f60718293a4b5c6d7e8f9001122334"
+          "dedup_key": "e5f60718293a4b5c6d7e8f9001122334",
+          "reason": "In 2 of your playlists"
         },
         {
           "artist": {

@@ -45,14 +45,21 @@ export default function SubscribePage() {
 
   useEffect(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    // Invalidate whatever is in flight here, at the top of the effect —
+    // not inside the debounce timer. Clearing the box takes the early return
+    // below, which never armed a timer, so the generation never advanced and
+    // a fetch that resolved afterwards refilled the results under an empty
+    // search field. The same return is why `searching` is cleared explicitly:
+    // that request's `finally` is now on a stale generation and will not.
+    const my = ++generation.current;
     const trimmed = query.trim();
     if (!trimmed) {
       setResults([]);
       setSearchErr('');
+      setSearching(false);
       return;
     }
     debounceTimer.current = setTimeout(async () => {
-      const my = ++generation.current;
       setSearching(true);
       setSearchErr('');
       try {

@@ -135,3 +135,78 @@ func TestScoreArtists_SkipsEmptyID(t *testing.T) {
 }
 
 func approxEq(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+// The signals are what the feed says out loud ("#7 in your top artists"), so
+// a miscount is a false statement on a card rather than a slightly different
+// ordering. They are also all that survives scoring: nothing else about a
+// listen is kept.
+func TestScoreArtistsRecordsSignals(t *testing.T) {
+	a := ArtistRef{ID: "a", Name: "Alpha"}
+	b := ArtistRef{ID: "b", Name: "Beta"}
+	filler := func(n int) []TopArtist {
+		out := make([]TopArtist, 0, n)
+		for i := range n {
+			out = append(out, TopArtist{ArtistRef: ArtistRef{ID: "pad" + string(rune('a'+i))}})
+		}
+		return out
+	}
+	src := Sources{
+		Followed: []ArtistRef{a},
+		Top: TopArtistsByRange{
+			// Alpha is 5th over six months and 2nd over four weeks. The
+			// better of the two is the true thing to say.
+			Short:  append(filler(1), TopArtist{ArtistRef: a}),
+			Medium: append(filler(4), TopArtist{ArtistRef: a}),
+			Long:   []TopArtist{{ArtistRef: b}},
+		},
+		SavedAlbums: []SavedAlbum{{Album: AlbumRef{Artists: []ArtistRef{a}}}, {Album: AlbumRef{Artists: []ArtistRef{a}}}},
+		SavedTracks: []SavedTrack{{Track: TrackRef{Artists: []ArtistRef{a}}}},
+		Recent:      []RecentPlay{{Track: TrackRef{Artists: []ArtistRef{a}}}, {Track: TrackRef{Artists: []ArtistRef{a}}}},
+		PlaylistItems: [][]PlaylistItem{
+			// Three of Alpha's tracks on one playlist is one playlist.
+			{
+				{Track: &TrackRef{Artists: []ArtistRef{a}}},
+				{Track: &TrackRef{Artists: []ArtistRef{a}}},
+				{Track: &TrackRef{Artists: []ArtistRef{a}}},
+			},
+			{{Track: &TrackRef{Artists: []ArtistRef{a}}}},
+		},
+	}
+
+	sig := map[string]ArtistSignals{}
+	for _, s := range ScoreArtists(src) {
+		sig[s.ID] = s.Signals
+	}
+
+	want := ArtistSignals{
+		Followed: true, TopRank: 2, SavedAlbums: 2,
+		SavedTracks: 1, RecentPlays: 2, Playlists: 2,
+	}
+	if sig["a"] != want {
+		t.Errorf("Alpha: got %+v, want %+v", sig["a"], want)
+	}
+	if got := sig["b"]; got != (ArtistSignals{TopRank: 1}) {
+		t.Errorf("Beta: got %+v, want only a top rank of 1", got)
+	}
+}
+
+// The three time ranges are iterated over a map, whose order Go randomises.
+// Taking the best rank rather than the first one seen is what keeps the line
+// on the card the same between two requests against one profile.
+func TestScoreArtistsTopRankIsStableAcrossRanges(t *testing.T) {
+	a := ArtistRef{ID: "a", Name: "Alpha"}
+	pad := ArtistRef{ID: "pad"}
+	src := Sources{Top: TopArtistsByRange{
+		Short:  []TopArtist{{ArtistRef: pad}, {ArtistRef: pad}, {ArtistRef: a}},
+		Medium: []TopArtist{{ArtistRef: a}},
+		Long:   []TopArtist{{ArtistRef: pad}, {ArtistRef: a}},
+	}}
+	for range 20 {
+		got := ScoreArtists(src)
+		for _, s := range got {
+			if s.ID == "a" && s.Signals.TopRank != 1 {
+				t.Fatalf("top rank came out %d; it must be the best across ranges every time", s.Signals.TopRank)
+			}
+		}
+	}
+}
