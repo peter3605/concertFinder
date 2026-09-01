@@ -1,0 +1,105 @@
+{
+  "_embedded": {
+    "events": [
+      {
+        "name": "Test Coded Venue",
+        "type": "event",
+        "id": "vvG1zZ9venuecode",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9venuecode",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-03-04", "localTime": "20:00:00", "dateTime": "2026-03-05T01:00:00Z" },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestDC",
+              "postalCode": "20009",
+              "city": { "name": "Washington" },
+              "state": { "name": "District of Columbia", "stateCode": "DC" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "address": { "line1": "815 V St NW" },
+              "location": { "longitude": "-77.0234", "latitude": "38.9180" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Uncoded Venue",
+        "type": "event",
+        "id": "vvG1zZ9venuename",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9venuename",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-03-06", "localTime": "20:00:00", "dateTime": "2026-03-07T01:00:00Z" },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Provincial Hall",
+              "type": "venue",
+              "id": "KovZpZAtestPR",
+              "city": { "name": "Toronto" },
+              "state": { "name": "Ontario", "stateCode": "" },
+              "country": { "name": "Canada", "countryCode": "" },
+              "location": { "longitude": "-79.3832", "latitude": "43.6532" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Unlocatable Venue",
+        "type": "event",
+        "id": "vvG1zZ9venuegeo",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9venuegeo",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-03-08", "localTime": "20:00:00", "dateTime": "2026-03-09T00:00:00Z" },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Pop-Up Room",
+              "type": "venue",
+              "id": "KovZpZAtestPU",
+              "city": { "name": "Brooklyn" },
+              "state": { "name": "New York", "stateCode": "NY" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "", "latitude": "" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Venueless Listing",
+        "type": "event",
+        "id": "vvG1zZ9venuenone",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9venuenone",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-03-10", "localTime": "20:00:00", "dateTime": "2026-03-11T00:00:00Z" },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "attractions": [
+            { "name": "Test Headliner", "type": "attraction", "id": "K8vZ917headline", "locale": "en-us" }
+          ]
+        }
+      }
+    ]
+  },
+  "page": { "size": 100, "totalElements": 4, "totalPages": 1, "number": 0 }
+}

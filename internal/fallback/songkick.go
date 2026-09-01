@@ -25,7 +25,13 @@ const (
 	songkickMaxRetries    = 3
 	songkickMaxRetryAfter = 30 * time.Second
 	songkickBaseBackoff   = 200 * time.Millisecond
-	songkickUserAgent     = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
+
+	// songkickUserAgent is the last-resort default for a client built with an
+	// empty string, same arrangement as fallback.UserAgent and
+	// NewMusicBrainzClient. The point of the header is that Songkick can reach
+	// us before they rate-limit us, which a URL for a repository that does not
+	// exist cannot do.
+	songkickUserAgent = "ConcertFinder/1.0 (+https://concertfinder.app)"
 )
 
 // SongkickCallsPerLookup is how many upstream requests one
@@ -39,12 +45,33 @@ const SongkickCallsPerLookup = 2
 type SongkickClient struct {
 	HTTP   *http.Client
 	APIKey string
+
+	// UserAgent identifies the deployment. Empty falls back to the package
+	// default; main.go passes one built from SITE_BASE_URL + CONTACT_EMAIL,
+	// the same string the MusicBrainz, Nominatim and page-fetch clients get.
+	UserAgent string
 }
 
 // NewSongkickClient panics on a nil httpClient — a hung Songkick call would
 // otherwise burn a scan worker's whole budget.
-func NewSongkickClient(apiKey string) *SongkickClient {
-	return &SongkickClient{HTTP: &http.Client{Timeout: 10 * time.Second}, APIKey: apiKey}
+func NewSongkickClient(apiKey, userAgent string) *SongkickClient {
+	if userAgent == "" {
+		userAgent = songkickUserAgent
+	}
+	return &SongkickClient{
+		HTTP:      &http.Client{Timeout: 10 * time.Second},
+		APIKey:    apiKey,
+		UserAgent: userAgent,
+	}
+}
+
+// ua returns the header value, defaulting for a hand-built client (tests
+// construct SongkickClient directly) that left the field empty.
+func (c *SongkickClient) ua() string {
+	if c.UserAgent == "" {
+		return songkickUserAgent
+	}
+	return c.UserAgent
 }
 
 // Enabled reports whether this client can actually reach Songkick. Callers
@@ -220,7 +247,7 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 			return nil, fmt.Errorf("songkick %s: %w", path, redactURLError(err))
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", songkickUserAgent)
+		req.Header.Set("User-Agent", c.ua())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = redactURLError(err)

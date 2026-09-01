@@ -254,6 +254,43 @@ role's password in the Neon console, then update `DATABASE_URL` in
 **Restore from a backup:** see `docs/aws-deploy.md` §7. The instance can only
 write to the bucket, so restores run from your laptop with admin credentials.
 
+**Pin `subnet_id`, once, on an existing deployment.** The instance used to take
+its subnet from `data.aws_subnets.default.ids[0]`. That is index 0 of a *set*,
+and a set is unordered — the value can come back different with nothing in this
+config having changed. `subnet_id` forces replacement, so the consequence is
+not a diff, it is Terraform destroying the box: `/opt/concertfinder`, the `.env`
+`render-env.sh` rendered from SSM, and the caddy volumes holding the issued
+certificates. Set `subnet_id` in `terraform.tfvars` to the subnet the instance
+is *already* in:
+
+```bash
+aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder \
+  --query 'Reservations[].Instances[].SubnetId' --output text
+```
+
+Left empty it falls back to the old lookup, so an existing gitignored
+`terraform.tfvars` keeps working — but that is the state this exists to get out
+of, not a supported configuration.
+
+**The instance carries `lifecycle { prevent_destroy = true }`.** It is the
+backstop for the paragraph above: any plan that would replace or destroy
+`aws_instance.app` now fails at plan time naming the resource, instead of
+succeeding. `ignore_changes` covers only `user_data` and `ami`; everything else
+that forces replacement is caught here.
+
+The trade is that a *deliberate* rebuild no longer just works. Two ways
+through, both intentional friction:
+
+- Comment the `prevent_destroy` line out for the single apply that rebuilds,
+  then put it back. Simplest, and it leaves a diff someone has to write.
+- `terraform state rm aws_instance.app`, make the change, then
+  `terraform import aws_instance.app <instance-id>` — for the case where the
+  real instance is fine and only the state's idea of it needs moving.
+
+If a plan is refusing with "Instance cannot be destroyed", read *why* it wants
+to replace before reaching for either. On this config the likely answer is a
+drifting `subnet_id`, which wants pinning, not overriding.
+
 **Add more SES-verified recipients (while in sandbox):**
 Edit `ses.tf`, add another `aws_ses_email_identity` resource. Re-apply.
 Or exit sandbox with an AWS support ticket and skip this.
@@ -265,6 +302,11 @@ Or exit sandbox with an AWS support ticket and skip this.
 aws s3 rm "s3://$(terraform output -raw backup_bucket)" --recursive
 terraform destroy
 ```
+
+This will now stop on `aws_instance.app`: `prevent_destroy` does not
+distinguish an accidental replacement from a teardown you meant. Remove the
+`lifecycle` block's `prevent_destroy` line in `ec2.tf` first, and treat having
+to do so as the last chance to notice you are destroying production.
 
 `destroy` does not touch the database. Neon is outside this state entirely, so
 the project and its data survive — delete it in the Neon console separately, and

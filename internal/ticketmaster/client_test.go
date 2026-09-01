@@ -94,3 +94,34 @@ func TestRedactPath(t *testing.T) {
 		}
 	}
 }
+
+// The gap the URL redaction above does not close. An unexpected 4xx puts the
+// upstream response body into the error, and a 4xx is not always Ticketmaster
+// answering: a WAF or corporate proxy in front of it returns an HTML error
+// page, and those routinely quote the full request URL they refused -- query
+// string and apikey included. internal/concerts/search.go logs that error
+// verbatim.
+func TestDoGETRetryBodyEchoingTheRequestURLIsScrubbed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// What a gateway between us and Ticketmaster looks like when it
+		// refuses the request itself.
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html>Access denied for https://app.ticketmaster.com" +
+			r.URL.Path + "?apikey=" + secret + "</html>"))
+	}))
+	defer srv.Close()
+
+	c := NewClient(&http.Client{Timeout: 2 * time.Second}, secret)
+	_, _, err := c.doGETRetry(context.Background(), srv.URL+"/discovery/v2/events.json?apikey="+secret)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("api key leaked into error via the response body: %q", err)
+	}
+	// The body must still be there -- scrubbing it entirely would cost the
+	// diagnosability this error exists for.
+	if !strings.Contains(err.Error(), "Access denied") {
+		t.Errorf("scrubbing removed the diagnostic body: %q", err)
+	}
+}

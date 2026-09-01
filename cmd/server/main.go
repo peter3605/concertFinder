@@ -73,13 +73,20 @@ func main() {
 	}
 
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	pool, err := db.Connect(dbCtx, cfg.DatabaseURL)
+	pool, err := db.Connect(dbCtx, cfg.DatabaseURL, cfg.DBMaxConns)
 	dbCancel()
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Its own context, cancelled before the pool closes (defers run LIFO), so
+	// the reporter never outlives what it reports on. dbCtx is no use here —
+	// it is a 10s connect deadline and is already cancelled.
+	statsCtx, stopStats := context.WithCancel(context.Background())
+	defer stopStats()
+	db.StartPoolStatsLogger(statsCtx, pool)
 
 	// App + river migrations run at startup. Both are idempotent.
 	migCtx, migCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -225,11 +232,16 @@ func main() {
 			if cfg.BraveSearchAPIKey != "" {
 				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
 			}
+			// One User-Agent for every outbound client, not just the two that
+			// happened to take one. The artist-site fetcher and the Songkick
+			// client each carried their own hardcoded string naming a GitHub
+			// repository that does not exist — which is worse than none, since
+			// it looks like an operator can be contacted and nobody can be.
 			fallbackChain = &fallback.Chain{
 				Pool:     pool,
-				Fetcher:  fallback.NewFetcher(pool),
+				Fetcher:  fallback.NewFetcher(pool, userAgent),
 				Resolver: resolver,
-				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey, userAgent),
 				VenueGeo: fallback.NewVenueGeocoder(geocoder).WithPool(pool),
 			}
 			budget := time.Duration(cfg.Phase2FallbackBudgetSeconds) * time.Second
@@ -476,7 +488,28 @@ func main() {
 	// types (images, video) automatically.
 	r.Use(middleware.Compress(5))
 
+	// Rate limiting lives here rather than in Caddy on purpose. The stock
+	// caddy:2-alpine image ships no rate_limit directive — it is a
+	// third-party module that has to be compiled in with xcaddy — and the
+	// image is pinned by digest, so adding one means owning a custom build and
+	// its update path. Middleware costs a map lookup and stays in the same
+	// place as the handlers it protects.
+	//
+	// Three tiers, outermost first:
+	//   - the whole /api subtree, generous, so no single address can flood any
+	//     endpoint including the ones added later;
+	//   - /api/auth, /api/healthz and /api/unsubscribe, each tighter for its
+	//     own reason (below);
+	//   - /me/artists/search, keyed by user rather than address, because the
+	//     resource it spends is the app's single Spotify client ID.
+	//
+	// 20 req/s with burst 60 per address. A signed-in browser polls
+	// /me/concerts every 10s during a refresh and the first paint of the feed
+	// issues a handful of calls, so this is roughly two orders of magnitude
+	// above real use — the aim is a ceiling, not a quota.
+	apiLimiter := auth.NewIPRateLimit(20, 60)
 	r.Route("/api", func(api chi.Router) {
+		api.Use(apiLimiter.Middleware)
 		// Unknown /api/* paths return a JSON 404 rather than falling through
 		// to the SPA HTML handler — matters for API clients that would
 		// otherwise see HTML and misdiagnose.
@@ -494,7 +527,15 @@ func main() {
 		// on this server means reaching Postgres. Reporting ok without
 		// checking it is backwards: a restart loop or an alert would see a
 		// green light while every real endpoint 500s.
-		api.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		//
+		// Which is also why it needs its own, tighter limit: each call is a
+		// round trip to a Neon compute pinned at 0.25 CU, and the free plan is
+		// a compute-hour budget rather than a request budget. 1/s with burst
+		// 10 is far above the two callers that legitimately exist — the
+		// container healthcheck and scripts/verify-deploy.sh — while leaving
+		// them room to retry.
+		healthLimiter := auth.NewIPRateLimit(1, 10)
+		api.With(healthLimiter.Middleware).Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
 			w.Header().Set("Content-Type", "application/json")
@@ -530,8 +571,24 @@ func main() {
 		// POST, so link-scanning mail gateways can't unsubscribe people by
 		// prefetching. POST is also what RFC 8058 one-click sends, which is
 		// what the List-Unsubscribe-Post header on our mail advertises.
-		api.Get("/unsubscribe", unsubscribeH.Get)
-		api.Post("/unsubscribe", unsubscribeH.Post)
+		//
+		// Its own bucket because it is the other unauthenticated mutation on
+		// the server and its guard is an HMAC verification, which is cheap but
+		// not free, followed by a write. 2/s with burst 20 comfortably covers
+		// a mail gateway prefetching links and a person clicking twice.
+		unsubLimiter := auth.NewIPRateLimit(2, 20)
+		api.With(unsubLimiter.Middleware).Get("/unsubscribe", unsubscribeH.Get)
+		api.With(unsubLimiter.Middleware).Post("/unsubscribe", unsubscribeH.Post)
+		// One instance for the process, mounted per route below. A limiter
+		// constructed inside a handler is a fresh empty bucket on every
+		// request, i.e. no limiter at all.
+		//
+		// 1 req/s with burst 10 per user. The picker is debounced client-side,
+		// so this is many times a real typist; what it stops is one account
+		// spending the whole app's Spotify /v1/search allowance, which is
+		// enforced against our client ID and would 429 every other user's
+		// searches with nothing in our logs to connect the two.
+		artistSearchLimiter := auth.NewUserRateLimit(1, 10)
 		api.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
 			r.Use(auth.CSRF(signingKey))
@@ -546,7 +603,8 @@ func main() {
 			r.Get("/subscribed-artists", subscribedH.List)
 			r.Post("/subscribed-artists/{artistID}", subscribedH.Post)
 			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
-			r.Get("/artists/search", subscribedH.SearchArtists)
+			// Mounted inside RequireUser so the limiter has a user to key on.
+			r.With(artistSearchLimiter.Middleware).Get("/artists/search", subscribedH.SearchArtists)
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)

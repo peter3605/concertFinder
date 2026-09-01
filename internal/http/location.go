@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -13,7 +15,19 @@ import (
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/geocoding"
+	"github.com/peterho/concertfinder/internal/jobs"
 )
+
+// secondsUntilNextUTCDay is how long until the daily allowances reset. Never
+// less than one second, so a Retry-After of "0" can't invite an immediate
+// retry that is guaranteed to fail again.
+func secondsUntilNextUTCDay(now time.Time) int {
+	next := startOfUTCDay(now).Add(24 * time.Hour)
+	if s := int(next.Sub(now).Seconds()); s > 0 {
+		return s
+	}
+	return 1
+}
 
 // LocationHandler serves GET/PUT /me/location.
 type LocationHandler struct {
@@ -109,7 +123,7 @@ func (h *LocationHandler) Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req putLocationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -124,6 +138,14 @@ func (h *LocationHandler) Put(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.Latitude != nil && req.Longitude != nil:
 		lat, lng = *req.Latitude, *req.Longitude
+		// radius_miles has been bounded since this endpoint shipped and the
+		// coordinates were not, which is backwards: the radius only widens a
+		// search, while a coordinate is half of the snapshot identity and
+		// therefore of what gets scanned.
+		if !validCoords(lat, lng) {
+			http.Error(w, "latitude must be -90..90 and longitude -180..180", http.StatusBadRequest)
+			return
+		}
 	case req.Query != "":
 		res, err := h.Geocoder.Search(r.Context(), req.Query)
 		if err != nil {
@@ -136,11 +158,44 @@ func (h *LocationHandler) Put(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lat, lng, displayName = res.Latitude, res.Longitude, res.DisplayName
+		// Nominatim is a third party and its output is the same input to the
+		// same scan identity as a client-supplied pair, so it gets the same
+		// check rather than the benefit of the doubt.
+		if !validCoords(lat, lng) {
+			slog.Warn("geocode returned an out-of-range point", "query", req.Query, "lat", lat, "lng", lng)
+			http.Error(w, "no usable match for that location", http.StatusNotFound)
+			return
+		}
 	default:
 		http.Error(w, "supply query OR (latitude, longitude)", http.StatusBadRequest)
 		return
 	}
 	lat, lng = roundCoord(lat), roundCoord(lng)
+
+	// Claim one of today's location slots before writing anything. A scan is
+	// keyed by (user, location_key), so every new location is a fresh
+	// five-minute job holding one of five worker slots for the whole
+	// deployment — cycling coordinates starves every other user's scans,
+	// digests and pushes, with each individual job looking perfectly
+	// ordinary. Recorded against the rounded coordinates and the radius, i.e.
+	// exactly the key the scan will use, so a location already opened today
+	// costs nothing to return to.
+	locKey := jobs.LocationKey(concerts.Location{Latitude: lat, Longitude: lng, RadiusMiles: req.RadiusMiles})
+	switch allowed, err := db.RecordLocationVisit(r.Context(), h.Pool, u.ID, locKey, maxDailyLocations); {
+	case err != nil:
+		slog.Error("location visit accounting failed", "err", err, "user", u.ID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	case !allowed:
+		// Retry-After to the next UTC midnight, which is when the allowance
+		// resets — the same boundary the upstream quota ledger rolls on.
+		w.Header().Set("Retry-After", strconv.Itoa(secondsUntilNextUTCDay(time.Now())))
+		http.Error(w,
+			"too many different locations today; returning to a location you already used today is always allowed",
+			http.StatusTooManyRequests)
+		return
+	}
+
 	if err := db.UpsertUserLocation(r.Context(), h.Pool, db.UserLocation{
 		UserID:      u.ID,
 		Latitude:    lat,

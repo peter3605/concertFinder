@@ -2,7 +2,10 @@ package rate
 
 import (
 	"context"
+	"os"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAccountCapLookup(t *testing.T) {
@@ -126,5 +129,117 @@ func TestUnsetAccountCapChangesNothing(t *testing.T) {
 	}
 	if got := accountCount(t, pool, SourceTicketmaster); got != 0 {
 		t.Errorf("account counter = %d, want 0 (never charged)", got)
+	}
+}
+
+// hideAccountLedger returns a pool whose view of rate_ledger_account is broken
+// and whose view of everything else is the real schema, so the account upsert
+// -- and nothing else -- fails. There is no seam in the code itself: with a nil
+// pool every path short-circuits to unlimited, which is exactly the behaviour
+// under test.
+//
+// The obvious implementation is to rename the table away for the duration of
+// the test, and that is what this did first. It is not safe here. `go test
+// ./...` gives one database to three package binaries at once -- internal/db
+// and internal/jobs migrate and query the same tables -- and CI runs precisely
+// that against a fresh Postgres. A rename is a schema change underneath those
+// other binaries mid-run, and it failed that way on a cold database:
+// intermittently, in a test whose own subject is a database error, which is the
+// worst version of a flake to debug.
+//
+// A search_path shadow is local to this pool. `rate_ledger_account` resolves to
+// a stub carrying none of the columns the upsert names; `rate_ledger`, `users`
+// and everything else still resolve to public. Nothing another binary can
+// observe is altered.
+func hideAccountLedger(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	// Named for the package, not the test: schema creation is idempotent and
+	// only this package ever puts it on a search_path.
+	const schema = "rate_account_failure_shadow"
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+schema); err != nil {
+		t.Fatalf("create shadow schema: %v", err)
+	}
+	// Deliberately missing source/day/count: any statement that reaches this
+	// table fails on the column list, before it can do anything.
+	if _, err := pool.Exec(ctx,
+		`CREATE TABLE IF NOT EXISTS `+schema+`.rate_ledger_account (unusable boolean)`); err != nil {
+		t.Fatalf("create shadow table: %v", err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	shadow, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("shadow pool: %v", err)
+	}
+	t.Cleanup(func() {
+		shadow.Close()
+		if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			t.Errorf("drop shadow schema: %v", err)
+		}
+	})
+	return shadow
+}
+
+// Failing fully open here is not the same trade as failing open per user. The
+// account ceiling is the one Ticketmaster enforces, so a database blip during
+// the nightly fanout would let every concurrent scan spend its whole per-user
+// block against a counter nobody is keeping -- and the resulting 403s reach the
+// scan looking exactly like artists with no shows.
+func TestAccountLedgerWriteFailureGrantsABoundedBlock(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	shadow := hideAccountLedger(t, pool)
+
+	l := &Ledger{Pool: shadow, Caps: Caps{Ticketmaster: 500, TicketmasterAccount: 5000}}
+	user := testUser(t, pool)
+
+	r, err := l.Reserve(ctx, user, SourceTicketmaster, 400)
+	if err == nil {
+		t.Fatal("Reserve reported success though the account charge failed")
+	}
+	if r.granted != failOpenAccountGrant {
+		t.Errorf("granted = %d, want %d — an unbounded grant is what overruns the upstream quota",
+			r.granted, failOpenAccountGrant)
+	}
+	if r.unlimited {
+		t.Error("block is unlimited; the account ceiling would not bind at all")
+	}
+	if r.accountTracked {
+		t.Error("block marked account-tracked though nothing landed on the account counter; Release would refund a charge never made")
+	}
+	// The per-user charge did land. Whatever is not granted must go back to it:
+	// charging someone for calls this block can never make drains their own cap
+	// for the rest of the day over an outage that was not theirs.
+	if got := userCount(t, pool, user, SourceTicketmaster); got != failOpenAccountGrant {
+		t.Errorf("user counter = %d, want %d", got, failOpenAccountGrant)
+	}
+}
+
+// The bound is a ceiling, not a grant. A scan that only wanted a few calls must
+// still get only those — handing it failOpenAccountGrant would charge the
+// user's ledger for calls nobody asked for.
+func TestAccountLedgerWriteFailureNeverGrantsMoreThanAsked(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	shadow := hideAccountLedger(t, pool)
+
+	l := &Ledger{Pool: shadow, Caps: Caps{Ticketmaster: 500, TicketmasterAccount: 5000}}
+	user := testUser(t, pool)
+
+	r, err := l.Reserve(ctx, user, SourceTicketmaster, 10)
+	if err == nil {
+		t.Fatal("Reserve reported success though the account charge failed")
+	}
+	if r.granted != 10 {
+		t.Errorf("granted = %d, want 10", r.granted)
+	}
+	if got := userCount(t, pool, user, SourceTicketmaster); got != 10 {
+		t.Errorf("user counter = %d, want 10", got)
 	}
 }

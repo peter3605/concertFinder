@@ -20,6 +20,7 @@ package rate
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -287,10 +288,21 @@ func (r *Reservation) Release(ctx context.Context) error {
 	return r.ledger.refund(ctx, r.userID, r.source, int(unused))
 }
 
+// failOpenAccountGrant caps what a scan may spend when the account-wide ledger
+// cannot be written. Small enough that a handful of concurrent scans riding out
+// a database blip stay well inside Ticketmaster's 5000/day, large enough that a
+// scan still covers something rather than reporting itself capped and setting a
+// retry_after of tomorrow midnight over an outage that lasted seconds.
+const failOpenAccountGrant = 50
+
 // Reserve pre-charges up to `want` calls for (user, source) and returns a
 // block covering however much of that fits under the cap. A cap of 0, a nil
-// ledger, or a DB error all yield an unlimited block — quota accounting is
-// best-effort and must never be the reason a scan fails.
+// ledger, or a failed per-user charge all yield an unlimited block — quota
+// accounting is best-effort and must never be the reason a scan fails.
+//
+// A failed *account* charge is the exception, and grants failOpenAccountGrant:
+// that ceiling is the one the upstream enforces, so failing open on it hands
+// out quota that does not exist.
 func (l *Ledger) Reserve(ctx context.Context, userID uuid.UUID, source Source, want int) (*Reservation, error) {
 	if l == nil || l.Pool == nil {
 		return &Reservation{unlimited: true}, nil
@@ -326,13 +338,34 @@ func (l *Ledger) Reserve(ctx context.Context, userID uuid.UUID, source Source, w
 	if acct := l.Caps.AccountCap(source); acct > 0 && granted > 0 {
 		newTotal, err := l.chargeAccount(ctx, source, granted)
 		if err != nil {
-			// Fail open, exactly as the per-user path does: quota accounting
-			// must never be the reason a scan fails. The block keeps its
-			// per-user grant and is NOT marked account-tracked, so Release
-			// will not refund a charge that did not land.
+			// Fail open, but bounded -- unlike the per-user path above. A
+			// per-user cap only protects our users from each other, so an
+			// unlimited block there costs at most one noisy account. This is
+			// the ceiling Ticketmaster itself enforces, and past 5000/day it
+			// answers with 403s that reach the scan looking exactly like an
+			// artist with no shows -- so a Postgres blip during the nightly
+			// fanout would hand every concurrent scan its whole per-user block
+			// against a counter nobody is keeping.
+			//
+			// The block is still NOT marked account-tracked: nothing landed on
+			// the account counter, so Release must not refund it. The per-user
+			// charge did land, so the part we are declining to grant goes back
+			// -- leaving the user charged for calls this block can never make
+			// drains their own cap for the rest of the day over an outage that
+			// was not theirs.
+			bounded := granted
+			if bounded > failOpenAccountGrant {
+				bounded = failOpenAccountGrant
+			}
+			if over := granted - bounded; over > 0 {
+				_ = l.refund(ctx, userID, source, over)
+			}
+			slog.Error("rate: account ledger write failed, granting a bounded block",
+				"source", string(source), "user", userID,
+				"wanted", want, "granted", bounded, "err", err)
 			return &Reservation{
 				ledger: l, userID: userID, source: source,
-				granted: int64(granted), wanted: int64(want),
+				granted: int64(bounded), wanted: int64(want),
 			}, err
 		}
 		accountTracked = true

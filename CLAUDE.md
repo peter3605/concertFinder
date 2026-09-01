@@ -129,7 +129,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   the previous one named a GitHub repo that does not exist, which satisfied
   the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
-- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly.
+- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly. **Push records after the send round, not before.** `SendPushWorker` used to write the ledger first, matching the digest's at-most-once trade — but it then merely logged transient APNs errors and returned nil, so the keys were burned and river's retry found them already recorded and sent nothing. The user was never told about those shows and nothing said so. `sendRound` now reports which keys actually landed (delivered, or refused for a dead token — that one will never succeed), records only those, and returns an error if anything failed transiently. The reversed trade is that a crash between send and record costs a duplicate rather than a lost notification, which is the milder direction and which `CollapseID` absorbs.
 - **APNs routing is per device, and a notification carries its address in two
   halves.** A device token belongs to exactly one APNs environment and the
   other host answers `BadDeviceToken` — which `push.Error.IsUnregistered`
@@ -151,6 +151,46 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   matching entitlement flip, and either half moving alone broke push with
   nothing but `BadDeviceToken` to show for it.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
+- **A session token is never stored, only its SHA-256** (migration 0018).
+  `sessions.id` used to *be* the credential — the `cf_session` cookie and the
+  iOS `Authorization: Bearer` value — so every nightly `pg_dump` in S3 was a
+  file of working logins. `id` is now an opaque UUID that other tables
+  reference (`mobile_auth_codes.session_id` cascades off it); `token_hash` is
+  what authenticates, and `auth.HashSessionToken` is the **only** thing allowed
+  to produce it — a second spelling of the hash authenticates nothing, silently.
+  Unsalted SHA-256 is correct rather than lazy: the input is 32 bytes of
+  `crypto/rand`, so there is no keyspace for a work factor to slow down.
+  A **NULL** `token_hash` does double duty and both halves matter: it is what
+  makes pre-0018 rows stop resolving (they cannot be backfilled — the token is
+  gone), and it is the escrow state for the mobile login. `/api/auth/callback`
+  writes the app's row with no hash, so it exists but authenticates nobody, and
+  `POST /mobile/exchange` claims it via `db.ClaimSessionToken`, minting the
+  token there and returning it exactly once. That is why `mobile_auth_codes`
+  never holds a working credential. `CreateSession` must keep `NULLIF($3,'')`:
+  an empty string is a *value*, and the second escrowed row would collide on
+  the unique index.
+- **The location cap bounds a set, not a count.** A scan is keyed by
+  `(user, location_key)` and river's uniqueness only collapses jobs sharing
+  that key, so one account walking coordinates fills all five worker slots with
+  five-minute jobs and starves everyone else's scans, digests and pushes — with
+  no error, because each job is individually legitimate. `user_location_visits`
+  (migration 0020) is therefore one row per `(user_id, day, location_key)`, not
+  a counter: re-entering a location already opened today is `ON CONFLICT DO
+  NOTHING` and costs nothing. A counter — a second use of `rate_ledger`, say —
+  cannot tell a revisit from a new location, so a commuter toggling between
+  home and work would spend the allowance twice every morning and be locked out
+  by lunchtime. Count and insert are one statement so two tabs cannot straddle
+  the check.
+- **The artist-site fetcher follows URLs from a user-editable wiki, so it is
+  guarded at the dialer.** MusicBrainz "official homepage" relationships are
+  attacker-supplyable, and `fallback.Fetcher` caches what it retrieves.
+  `https` only, and `newGuardedTransport` resolves the host and refuses
+  loopback/private/link-local/CGNAT/unique-local addresses **in `DialContext`**
+  — which is what covers redirects, and which dials the resolved literal so DNS
+  rebinding cannot win the gap between check and connect. robots.txt goes
+  through the same client. The cost is real and accepted: MusicBrainz lists
+  plenty of `http://` homepages, and those artists now fail the fallback rather
+  than being fetched.
 - **Display "Powered by Spotify"** attribution on any UI surface showing
   Spotify-derived data, **with Spotify's logo** — their guidelines require the
   mark, not just the words. One component per client owns it
@@ -543,7 +583,7 @@ repo plus instance-profile pull permissions in `/infra`.
 
 ## Required Environment Variables (Appendix A)
 
-Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
+Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `DB_MAX_CONNS` (optional, default 20 — pgx's own default is `max(4, NumCPU)`, i.e. 4 on the t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers; exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries), `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 

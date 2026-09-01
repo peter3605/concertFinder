@@ -37,7 +37,7 @@ func (h *DevicesHandler) Post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req deviceRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}

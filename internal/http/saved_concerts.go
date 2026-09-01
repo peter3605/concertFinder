@@ -109,7 +109,7 @@ func (h *SavedConcertsHandler) Post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req saveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -118,9 +118,23 @@ func (h *SavedConcertsHandler) Post(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dedup_key required", http.StatusBadRequest)
 		return
 	}
-	if err := db.SaveConcert(r.Context(), h.Pool, u.ID, req.DedupKey); err != nil {
+	// The key is caller-supplied and goes straight into a primary key, so its
+	// length is ours to bound. A real one is 64 hex characters.
+	if len(req.DedupKey) > maxDedupKeyLen {
+		http.Error(w, "dedup_key is too long", http.StatusBadRequest)
+		return
+	}
+	saved, err := db.SaveConcert(r.Context(), h.Pool, u.ID, req.DedupKey, maxSavedConcerts)
+	if err != nil {
 		slog.Error("save concert failed", "err", err, "user", u.ID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !saved {
+		// 409 rather than 429: waiting changes nothing, and the remedy is the
+		// user's own — unsave something. Saying which limit was hit matters
+		// because the alternative is a star that silently refuses to stick.
+		http.Error(w, "you have reached the maximum number of saved shows; remove one to save another", http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -135,6 +149,10 @@ func (h *SavedConcertsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "dedupKey")
 	if key == "" {
 		http.Error(w, "dedup_key required", http.StatusBadRequest)
+		return
+	}
+	if len(key) > maxDedupKeyLen {
+		http.Error(w, "dedup_key is too long", http.StatusBadRequest)
 		return
 	}
 	if err := db.UnsaveConcert(r.Context(), h.Pool, u.ID, key); err != nil {

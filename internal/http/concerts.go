@@ -118,6 +118,20 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}()
 	pre.Wait()
 
+	if !validCoords(loc.Latitude, loc.Longitude) {
+		// Defence in depth rather than a reachable state: PUT /me/location
+		// validates what it stores and config.Validate rejects a bad
+		// USER_LATITUDE/USER_LONGITUDE at startup. It is here because the
+		// consequence of a bad pair reaching this point is not an error — it
+		// is a valid-looking location_key, a snapshot filed under it, and a
+		// five-minute scan job, all of which look completely normal from the
+		// outside.
+		slog.Error("concerts: refusing to scan an out-of-range location",
+			"user", u.ID, "lat", loc.Latitude, "lng", loc.Longitude)
+		http.Error(w, "your saved location is invalid; set it again", http.StatusInternalServerError)
+		return
+	}
+
 	locKey := jobs.LocationKey(loc)
 
 	var (
@@ -282,6 +296,14 @@ func (h *ConcertsHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 			Longitude:   userLoc.Longitude,
 			RadiusMiles: userLoc.RadiusMiles,
 		}
+	}
+	// Same guard as Get, and for the same reason: this path enqueues the very
+	// job the coordinate identifies.
+	if !validCoords(loc.Latitude, loc.Longitude) {
+		slog.Error("refresh: refusing to scan an out-of-range location",
+			"user", u.ID, "lat", loc.Latitude, "lng", loc.Longitude)
+		http.Error(w, "your saved location is invalid; set it again", http.StatusInternalServerError)
+		return
 	}
 	locKey := jobs.LocationKey(loc)
 

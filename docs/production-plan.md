@@ -379,7 +379,7 @@ These failures only appear with concurrency, which means you will not see them i
 manual testing and they will all arrive at once.
 
 ### P2-1 — A scan persists using the context that is expiring
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/jobs/workers.go:109,198,209,236`
 
@@ -396,7 +396,7 @@ path at :127 already does this correctly.
 is still written.
 
 ### P2-2 — Latitude and longitude are unvalidated
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/http/location.go:116`, `internal/http/concerts.go:171`
 
@@ -412,7 +412,7 @@ Then bound the churn: count distinct `location_key` values per user per UTC day
 — 10 is plenty for a real person — with a 429 and a clear message.
 
 ### P2-3 — The connection pool is four connections, shared with River
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/db/pool.go:12`, `.env.example`, `docs/local-dev.md`
 
@@ -426,7 +426,7 @@ of what the connection string says. Log `pool.Stat()` every 60s at INFO. Documen
 the variable in `.env.example`.
 
 ### P2-4 — A transient APNs failure loses the notification permanently
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/jobs/push.go:110,136-142`
 
@@ -446,7 +446,7 @@ the channel argument stays mandatory.
 leaves the keys unrecorded, and that a dead-token failure does not.
 
 ### P2-5 — The account-wide quota ledger fails open
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/rate/ledger.go:307,331-336`
 
@@ -459,7 +459,7 @@ shows".
 (`min(granted, 50)`) instead of an unlimited one, and log at ERROR.
 
 ### P2-6 — Rate limiting exists only on `/api/auth`
-- [ ] Done
+- [x] Done
 
 **Files:** `cmd/server/main.go:522`, `internal/http/subscribed_artists.go:98`,
 `internal/http/{saved_concerts,account,email_prefs,location}.go`,
@@ -478,7 +478,7 @@ shows".
    `display_name`, and a ceiling on saves and subscriptions per user.
 
 ### P2-7 — Session IDs are stored unhashed with a 90-day TTL
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/db/sessions.go:28,44`, `internal/auth/session.go`, new
 migration
@@ -493,7 +493,7 @@ column in a **later** migration, not this one (expand/contract, see P2-8's note
 on rollback safety).
 
 ### P2-8 — Infrastructure safety valves
-- [ ] Done
+- [x] Done
 
 **Files:** `docker-compose.prod.yml`, `infra/ec2.tf:64`, `Dockerfile`
 
@@ -513,7 +513,7 @@ on rollback safety).
    `caddy:2-alpine`). Record the digests under *Decisions taken*.
 
 ### P2-9 — First tests for the only primary source
-- [ ] Done
+- [x] Done
 
 **Files:** new `internal/ticketmaster/*_test.go`
 
@@ -527,7 +527,7 @@ literals. Redaction from P0-1 gets a test here too if it does not already have
 one.
 
 ### P2-10 — `.env` values are written unquoted and then sourced
-- [ ] Done
+- [x] Done
 
 **Files:** `scripts/render-env.sh:73`, `scripts/backup-db.sh:40-42`
 
@@ -541,7 +541,7 @@ quote), which Compose strips, so both consumers are safe. Add a test case to
 `check-deploy-config.sh` or a small shell test.
 
 ### P2-11 — Outbound-fetch hygiene in the fallback chain
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/fallback/http.go:24,46,60-100,145`
 
@@ -560,7 +560,7 @@ check the resolved IP against loopback, private and link-local ranges in a
 LRU and a TTL.
 
 ### P2-12 — Two data-layer gaps
-- [ ] Done
+- [x] Done
 
 **Files:** new migration, `internal/db/janitor.go:243`,
 `internal/jobs/workers.go:635`
@@ -882,6 +882,103 @@ _Append one line per judgement call, with the task ID._
   `len(ev.Acts) > 0` check (which guarded the dedup key while two other
   indexings went unguarded) is gone in favour of a stated precondition.
 
+- **P2-1** — The persist step is an extracted `persistScan` behind a narrow
+  `concertStore` interface rather than an inline `context.WithoutCancel`, so
+  the behaviour ("an expired scan context still writes") is testable without a
+  database or a river client. `enqueueNotifications` got the same detached
+  context: it runs after a full `ScanBudget` of searching, and an enqueue
+  refused because the scan's own context expired loses the notification with
+  nothing revisiting that snapshot's net-new set.
+- **P2-2** — The churn ceiling is a new table (`user_location_visits`,
+  migration 0020) keyed `(user_id, day, location_key)`, not a second use of
+  `rate_ledger`. What is being bounded is set membership; a counter cannot tell
+  a revisit from a new location, so someone toggling between home and work
+  would spend the allowance twice every morning and be locked out by lunchtime.
+  Count and insert are one statement so two tabs cannot straddle the check.
+  Coordinates are also validated at the third entry point the task did not name
+  — `config.Validate` on `USER_LATITUDE`/`USER_LONGITUDE`, the deployment-wide
+  fallback location.
+- **P2-3** — `DB_MAX_CONNS` is read in `internal/config`, not in `pool.go`,
+  because `os.Getenv` outside `internal/config` appears nowhere else in the
+  repo outside tests. Cost: `db.Connect` gained a third parameter (one call
+  site). The stats goroutine's lifetime is owned by `main.go` rather than
+  `Connect`, since pgxpool exposes no "pool closed" signal and the ctx
+  `Connect` receives is a 10s connect deadline that is cancelled immediately.
+- **P2-4** — An event is all-or-nothing across devices: one transient rejection
+  holds back every act on that bill, so the retry re-sends the whole card
+  rather than half of it. The cost is a duplicate on devices that did receive
+  it, which `CollapseID` absorbs. This also inverts the crash trade — a crash
+  between send and record now costs a duplicate rather than a lost
+  notification, which is the milder direction. Recorded in `CLAUDE.md`, which
+  had never documented the original ordering.
+- **P2-5** — The un-granted remainder is refunded to the *per-user* ledger when
+  the account write fails. Not strictly asked for; without it the user stays
+  charged for calls the block can never make, draining their own cap over
+  someone else's outage.
+- **P2-6** — Rate limits: `/api` 20/s burst 60; `/api/healthz` 1/s burst 10;
+  `/api/unsubscribe` 2/s burst 20; `/me/artists/search` **per user** 1/s burst
+  10; `/api/auth` unchanged at 5/s burst 20. Body cap 4 KiB everywhere (matches
+  `devices.go`). Lengths: `dedup_key` 128, `artistID` 64, `display_name` 200,
+  search `q` 100. Ceilings: 1000 saved concerts and 500 subscribed artists,
+  refused with **409** (waiting does not help; unsaving does), and 10 distinct
+  locations per UTC day with **429**. The ceilings are enforced *inside* the
+  insert — a handler-side count leaves a window a looping client lives in — and
+  re-saving or renaming at the cap still succeeds, so idempotency does not
+  start failing once a list fills.
+- **P2-6** — Done in Go middleware, not Caddy, contrary to the task's wording.
+  The stock `caddy:2-alpine` image ships no `rate_limit` directive; it is a
+  third-party module needing an `xcaddy` build, and P2-8 has just pinned that
+  image by digest, so adding one would mean owning a custom image and its
+  update path. Verified rather than assumed.
+- **P2-6** — `UserRateLimit.Middleware` fails **closed** with a 401 when
+  mounted outside `RequireUser`. One shared bucket would be a global limit
+  wearing a per-user label.
+- **P2-7** — `sessions.id` could not be dropped in a later migration as the
+  task's expand/contract note assumed: it is the primary key and
+  `mobile_auth_codes.session_id` cascades off it. Instead `id` became a fresh
+  opaque UUID and the new `token_hash` carries the credential, which achieves
+  the same thing (the raw token is never written) with nothing left to drop.
+- **P2-7** — The mobile flow got a better arrangement than the brief sketched.
+  `/api/auth/callback` writes the app's session row with `token_hash = NULL` —
+  it exists, so the FK cascade is untouched, but authenticates nobody — and
+  `POST /mobile/exchange` mints the token and claims the row in one
+  `UPDATE … WHERE token_hash IS NULL … RETURNING`. `mobile_auth_codes` never
+  holds a working credential, and single use is enforced by the same statement.
+- **P2-8** — `subnet_id` defaults to `""` and falls back through a `local` to
+  the old data-source lookup, matching the `var.alert_email` precedent, because
+  `terraform.tfvars` is gitignored and a newly-required variable would break
+  the existing working copy.
+- **P2-8** — Base images pinned to multi-arch **index** digests, not per-arch
+  ones: the build host is arm64 (t4g.small). `node:24-alpine@sha256:e67514e5…`,
+  `golang:1.25-alpine@sha256:1ae0735f…`,
+  `gcr.io/distroless/static-debian12@sha256:d75cdd72…`,
+  `caddy:2-alpine@sha256:5f5c8640…`. Re-resolve with
+  `docker buildx imagetools inspect <ref> --format '{{.Manifest.Digest}}'`.
+- **P2-10** — `render-env.sh` single-quotes values and **refuses** a value
+  containing a single quote rather than escaping it. Verified against
+  `docker compose config` rather than reasoned about: the shell's `'\''` idiom
+  is a hard parse error for compose (`unexpected character "\" in variable
+  name`), and the alternative — double quotes with backslash escapes — agrees
+  with bash on `\`, `"` and `$` but diverges on the backtick, where compose
+  keeps the backslash and bash strips it and runs the command substitution.
+  There is no encoding both parsers read alike, so the one value single quotes
+  cannot carry fails at render time, by name, instead of on the instance
+  mid-deploy. Two preflight checks cover it, both confirmed to fail without
+  the fix.
+- **P2-11** — `https`-only is a deliberate coverage loss: MusicBrainz lists
+  plenty of `http://` official homepages, and those artists now fail the
+  fallback chain instead of being fetched. The SSRF guard lives in
+  `DialContext` and dials the *resolved* literal, which covers redirects and
+  closes the DNS-rebinding gap between check and connect. The Songkick client's
+  hardcoded User-Agent was threaded too — same defect, same fix.
+- **P2-9** — `internal/ticketmaster`'s credential redaction was incomplete and
+  I closed it rather than only testing it. The unexpected-4xx branch
+  interpolates the upstream response *body* into an error that
+  `internal/concerts/search.go` logs verbatim; Ticketmaster's own bodies are
+  clean, but a WAF or proxy in front of it answers with a page quoting the
+  full request URL, `apikey=` included. `Client.scrubKey` removes the client's
+  own key by exact match rather than by pattern. The new test fails without it.
+
 ## Deferred
 
 _Append anything skipped, with the task ID and one sentence of why._
@@ -894,6 +991,44 @@ _Append anything skipped, with the task ID and one sentence of why._
   `list`, so they are not visible when the feed is completely empty. The empty
   state carries its own error copy and Try again button instead, which covers
   the same ground on that screen.
+
+- **P2-9 / dedup identity** — Ticketmaster event dates are stored as UTC
+  *instants* and keyed as UTC *calendar days*, which is wrong for most US
+  shows and is not safe to fix inside this run. `internal/ticketmaster/events.go`
+  parses `dates.start.dateTime` (which TM sends as `Z`) and never reads
+  `localTime` or `dates.timezone` — neither field is in the struct — while
+  `concerts.DedupKey`/`EventKey` format `date.UTC()`. A 20:00 Pacific show on
+  the 15th has a `dateTime` of `…16T03:00Z` and keys to the **16th**. Worse, a
+  `timeTBA` event falls back to `localDate`, which parses to UTC midnight — the
+  *local* day — so the same show's `dedup_key` **changes** the moment
+  Ticketmaster publishes a set time. `dedup_key` is the primary key of
+  `concerts` and half of `user_saved_concerts`', so that orphans the save, and
+  because `user_digest_sent` is keyed on it the user is re-notified about a show
+  they were already told about. The same divergence exists across sources:
+  `fallback.parseTime` reads naive JSON-LD timestamps as UTC, so an official
+  site's 20:00 keys to the local day while TM's row for the same show keys to
+  the next one, and the merger never collapses them. Fixing it means changing
+  the dedup identity and migrating the key across every existing save — a
+  product decision, not a hardening task. `TestSearchEventsStartIsAnInstantNot
+  ALocalCalendarDay` pins the current behaviour and says explicitly that it
+  documents rather than blesses it.
+- **P2-9 / `Retry-After` HTTP-date form** — RFC 7231 permits
+  `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`; `retryAfter` parses only the
+  delta-seconds form, so such a response falls through to sub-second backoff —
+  which `CLAUDE.md` warns turns a soft limit into a ban. A small fix, but a
+  behaviour change nobody asked for in this phase; pinned as current behaviour
+  in the retry table instead.
+- **P2-9 / pagination** — `SearchEvents` sets `size=100` and never reads
+  `page.totalPages` or follows `_links.next`, so an attraction with more than
+  100 events in radius is silently truncated. Almost certainly harmless at the
+  radii in use, but it is unbounded-silent rather than bounded-loud.
+- **P2-9 / 429 cancelled mid-backoff** reports "retries exhausted" rather than
+  the context error, losing the distinction in exactly the case (scan hit
+  `ScanBudget` while rate-limited) where a log would want it. Cosmetic.
+- **P2-11 / `musicbrainz.go` default UA** still names
+  `github.com/peter3605/concertFinder`. `main.go` always passes a real
+  User-Agent so the default is unreachable in production; left alone rather
+  than fixed blind, since unlike the other two that repo may actually exist.
 
 ## Progress log
 
@@ -926,3 +1061,57 @@ _One line per session: date, phases completed, anything the next session needs._
   and both recorded above rather than acted on: `/api/me/saved-concerts` diverges
   from `/me/concerts` by never sending `computed_at` (see the P1-10 decision),
   and `FeedModel.canRescan` is time-dependent without a timer (see *Deferred*).
+- **2026-09-01 — Phase 2 complete** (P2-1…P2-12), on branch
+  `production-hardening`. Four subagents in three waves (infra lane; Go lane A;
+  then Ticketmaster tests and Go lane B), all reviewed hunk by hunk by the main
+  session. New files: `migrations/0018_session_token_hash.*`,
+  `0019_snapshot_updated_at_index.*`, `0020_location_visits.*`,
+  `internal/http/limits.go`, `internal/fallback/fetch_guard_test.go`,
+  `internal/auth/{session_hash,ratelimit}_test.go`,
+  `internal/http/limits_test.go`, `internal/db/{janitor,sessions,caps}_test.go`,
+  and `internal/ticketmaster/{testing,events,attractions,retry}_test.go` with
+  eight JSON fixtures under `testdata/`.
+
+  Verified, serially: `gofmt`, `go build`, `go vet`, `go test ./...` — green
+  both **with** a live Postgres and without one (the DB-backed tests skip
+  cleanly, which is how CI behaves when the service container is missing);
+  `./scripts/check-deploy-config.sh` (16 checks); `terraform fmt -check` and
+  `terraform validate`. Phase 2 touched no web or iOS code, so those lanes were
+  not run. Nothing applied, nothing deployed.
+
+  Three corrections the main session made to subagent work, all found by
+  running things rather than reading them:
+  1. **P2-10's escaping was wrong in the dangerous direction** and would have
+     failed every deploy — see *Decisions taken*. Caught by actually running
+     `docker compose config` against a rendered file.
+  2. **P2-5's tests were a CI flake.** They induced the account-ledger failure
+     by renaming `rate_ledger_account` away, which is a schema change under the
+     other two package binaries `go test ./...` runs against the same database
+     — the exact shape CI uses. It failed on a cold database and passed on warm
+     ones. Replaced with a `search_path` shadow: a pool-local schema holding a
+     stub `rate_ledger_account` with none of the columns the upsert names, so
+     only the account write fails and nothing another binary can see changes.
+     Confirmed across three cold-database full-suite runs.
+  3. **The DB-backed tests were silently skipping locally** (no
+     `TEST_DATABASE_URL`), which is how the flake stayed hidden. A throwaway
+     Postgres is now the standing local check; added
+     `internal/db/{sessions,caps}_test.go` to cover the three hand-written CTEs
+     nothing else exercised — the mobile session escrow claim, and the capped
+     save/subscribe/location inserts. A SQL error in any of those is a login or
+     save outage with a green build.
+
+  `CLAUDE.md` gained four entries this phase: session-token hashing and the
+  NULL-`token_hash` escrow, the location cap being set membership rather than a
+  counter, the fallback fetcher's `https`-only dial guard, and push's
+  record-after-send ordering. `DB_MAX_CONNS` added to Appendix A.
+
+  For Phase 4 / a human: **the nightly backup may already be dead.** P2-10 is
+  not hypothetical — `APNS_P8_KEY` is written unquoted today and contains
+  spaces, so any deployment with APNs configured has an `.env` that
+  `scripts/backup-db.sh` cannot source. Check S3 for recent objects before
+  assuming there is a restore point. Also still outstanding from Phase 0: the
+  Ticketmaster and Songkick keys want rotating, and the SNS subscriptions sit
+  in `PendingConfirmation` until someone clicks the link.
+
+  Next: Phase 3, two subagents (iOS lane and web lane), after the main session
+  does P3-2's endpoint and P3-3's response field itself.

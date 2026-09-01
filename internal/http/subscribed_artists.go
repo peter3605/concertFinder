@@ -41,12 +41,31 @@ func (h *SubscribedArtistsHandler) Post(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "artist_id required", http.StatusBadRequest)
 		return
 	}
+	// Both of these land in a primary key and a stored column, and neither is
+	// anything but caller-supplied: a Spotify artist ID is 22 base62
+	// characters and the display name is whatever the client says it is.
+	if len(artistID) > maxArtistIDLen {
+		http.Error(w, "artist_id is too long", http.StatusBadRequest)
+		return
+	}
 	var req subscribeRequest
 	// Body is optional — if the caller omits it, decode fails silently.
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if err := db.SubscribeArtist(r.Context(), h.Pool, u.ID, artistID, strings.TrimSpace(req.DisplayName)); err != nil {
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req)
+	displayName := strings.TrimSpace(req.DisplayName)
+	if len(displayName) > maxDisplayNameLen {
+		http.Error(w, "display_name is too long", http.StatusBadRequest)
+		return
+	}
+	subscribed, err := db.SubscribeArtist(r.Context(), h.Pool, u.ID, artistID, displayName, maxSubscribedArtists)
+	if err != nil {
 		slog.Error("subscribe artist failed", "err", err, "user", u.ID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !subscribed {
+		// 409, not 429: nothing about waiting helps. Unsubscribing from
+		// something does.
+		http.Error(w, "you have reached the maximum number of artist subscriptions; remove one to add another", http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -61,6 +80,10 @@ func (h *SubscribedArtistsHandler) Delete(w http.ResponseWriter, r *http.Request
 	artistID := strings.TrimSpace(chi.URLParam(r, "artistID"))
 	if artistID == "" {
 		http.Error(w, "artist_id required", http.StatusBadRequest)
+		return
+	}
+	if len(artistID) > maxArtistIDLen {
+		http.Error(w, "artist_id is too long", http.StatusBadRequest)
 		return
 	}
 	if err := db.UnsubscribeArtist(r.Context(), h.Pool, u.ID, artistID); err != nil {
@@ -104,6 +127,14 @@ func (h *SubscribedArtistsHandler) SearchArtists(w http.ResponseWriter, r *http.
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
 		writeJSON(w, map[string]any{"artists": []any{}})
+		return
+	}
+	// This endpoint forwards to Spotify's /v1/search under the app's client
+	// ID, so the size of what we forward is our problem and not the caller's.
+	// The per-user token bucket in front of the route bounds how often; this
+	// bounds how much.
+	if len(query) > maxSearchQueryLen {
+		http.Error(w, "q is too long", http.StatusBadRequest)
 		return
 	}
 	token, err := h.Tokens.AccessTokenFor(r.Context(), u.ID)
