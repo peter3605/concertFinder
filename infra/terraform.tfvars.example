@@ -16,6 +16,16 @@ ses_dns_records_created = false
 # pasted into /opt/concertfinder/.env as DATABASE_URL — see docs/aws-deploy.md
 # §1. This Terraform owns only the S3 bucket its nightly dump lands in.
 
+# Where CloudWatch alarm mail goes. Unset, it reuses ses_verified_recipient
+# above -- the same address CONTACT_EMAIL already uses. Set it only if alerts
+# should go somewhere other than the operator's own inbox.
+#
+# An email subscription is PENDING until the recipient clicks the confirmation
+# link AWS mails on the first apply. Terraform reports the resource created
+# either way, so a green apply is not proof that alerts are deliverable; check
+# the subscription reads Confirmed in the SNS console once.
+# alert_email = "alerts@example.com"
+
 # Everything else has sensible defaults; override only if needed:
 # region                       = "us-east-1"
 # github_repo                  = "peter3605/concertFinder"
