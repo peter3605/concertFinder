@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,7 +53,7 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	if len(devices) == 0 {
 		return nil
 	}
-	devices = forEnvironment(devices, w.APNs.Environment(), user.ID)
+	devices = forEnvironment(devices, w.APNs.Environments(), user.ID)
 	if len(devices) == 0 {
 		return nil
 	}
@@ -114,8 +115,7 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	for _, ev := range events {
 		n := notificationFor(ev)
 		for _, d := range devices {
-			n.DeviceToken = d.DeviceToken
-			err := w.APNs.Send(ctx, n)
+			err := w.APNs.Send(ctx, addressedTo(n, d))
 			if err == nil {
 				sent++
 				continue
@@ -123,10 +123,10 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 			var apnsErr *push.Error
 			if errors.As(err, &apnsErr) && apnsErr.IsUnregistered() {
 				// The app was uninstalled or the token was reissued. An
-				// environment mismatch used to land here too and be retired
-				// permanently for it; forEnvironment now keeps those out of
-				// this loop, so reaching here really does mean the token is
-				// dead rather than being sent to the wrong host.
+				// environment mismatch cannot land here: each token now goes
+				// to its own host, and a host the key is not authorized for
+				// is refused before the request. So reaching here really does
+				// mean the token is dead.
 				if derr := db.DisableDevice(ctx, w.Pool, user.ID, d.DeviceToken); derr != nil {
 					slog.Warn("push: disable device failed", "err", derr, "user", user.ID)
 				}
@@ -142,34 +142,60 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	return nil
 }
 
+// addressedTo stamps a rendered notification with one device's address.
+//
+// A copy, and both fields together, on purpose. The token and the environment
+// are minted as a pair and neither means anything at the other host, so
+// setting the token alone -- which the previous shape of this loop allowed,
+// by mutating one Notification per device -- sends a sandbox token to the
+// production host. That answers BadDeviceToken, which Error.IsUnregistered
+// reports as a dead token, which the loop below retires permanently. The user
+// stops hearing from the app and nothing says why.
+//
+// Taking a copy also means no field can survive from the previous device.
+func addressedTo(n push.Notification, d db.Device) push.Notification {
+	n.DeviceToken = d.DeviceToken
+	n.Environment = d.Environment
+	return n
+}
+
 // notificationFor renders one event as a push. The payload deliberately
 // carries keys rather than the event: APNs caps at 4KB, and the app resolves
 // event_key against the feed it already has.
-// forEnvironment keeps only the tokens minted against the environment this
-// process actually sends to.
+// forEnvironment keeps only the tokens this deployment's APNs key is
+// authorized to send to.
 //
-// A token belongs to exactly one APNs environment and the other host answers
-// BadDeviceToken. That rejection is indistinguishable from an uninstall, and
-// the send loop retires a device permanently on it -- so before this filter, a
-// deployment flipped from sandbox to production for TestFlight would silently
-// and permanently disable every device still holding a sandbox token, with the
-// user simply never hearing from the app again.
+// Usually that is all of them: an auth key issued as "Sandbox & Production"
+// serves both, and each token is routed to its own host. The filter matters
+// for a key restricted to one environment, where the other host answers
+// InvalidProviderToken and the job fails for a reason no retry improves.
+//
+// It is also the last line of defence for the older hazard. A token belongs
+// to exactly one environment and the wrong host answers BadDeviceToken, a
+// rejection indistinguishable from an uninstall — and the send loop retires a
+// device permanently on it. That is how a deployment flipped to production
+// for TestFlight used to disable every lingering sandbox device for good,
+// with the user simply never hearing from the app again.
 //
 // Skipping is loud and reversible: nothing is written, so the device starts
-// working the moment the app re-registers with a matching token.
-func forEnvironment(devices []db.Device, env string, userID uuid.UUID) []db.Device {
+// working the moment the deployment gains a key that covers it.
+func forEnvironment(devices []db.Device, served []string, userID uuid.UUID) []db.Device {
+	serves := make(map[string]bool, len(served))
+	for _, e := range served {
+		serves[e] = true
+	}
 	kept := make([]db.Device, 0, len(devices))
 	skipped := 0
 	for _, d := range devices {
-		if d.Environment == env {
+		if serves[d.Environment] {
 			kept = append(kept, d)
 			continue
 		}
 		skipped++
 	}
 	if skipped > 0 {
-		slog.Warn("push: skipping devices registered for the other APNs environment",
-			"user", userID, "sending_to", env, "skipped", skipped, "kept", len(kept))
+		slog.Warn("push: skipping devices in an APNs environment this key does not serve",
+			"user", userID, "serves", strings.Join(served, ","), "skipped", skipped, "kept", len(kept))
 	}
 	return kept
 }

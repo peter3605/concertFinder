@@ -130,6 +130,26 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
 - **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly.
+- **APNs routing is per device, and a notification carries its address in two
+  halves.** A device token belongs to exactly one APNs environment and the
+  other host answers `BadDeviceToken` — which `push.Error.IsUnregistered`
+  reports as a dead token, which `SendPushWorker` retires permanently with
+  `db.DisableDevice`. So sending to the wrong host does not fail a
+  notification, it costs the user every future one, silently. `push.Client`
+  therefore holds no host: `Send` derives it from `Notification.Environment`,
+  and `jobs.addressedTo` stamps the token and the environment **together**
+  from one `db.Device`, returning a copy so nothing survives from the previous
+  device. `push.hostFor` refuses an unrecognised or empty environment rather
+  than defaulting to production, because the default is precisely the value a
+  caller who forgot the field would send. `APNS_ENVIRONMENT` is no longer a
+  host selector — it names which environments the `.p8` is **authorized** for
+  (`sandbox`, `production`, or both), which is a property of how Apple issued
+  the key. `forEnvironment` skips devices outside that set, and skipping is
+  deliberately a no-op with a log rather than a write: the device starts
+  working the moment the deployment holds a key that covers it. This replaced
+  a single-host client where moving to production for TestFlight meant a
+  matching entitlement flip, and either half moving alone broke push with
+  nothing but `BadDeviceToken` to show for it.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
 - **Display "Powered by Spotify"** attribution on any UI surface showing
   Spotify-derived data, **with Spotify's logo** — their guidelines require the
