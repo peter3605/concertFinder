@@ -123,10 +123,16 @@ third-party tokens) and [§10.2](#102-guideline-48-and-sign-in-with-apple)
 
 ### Two open items worth a decision, not just execution
 
-- **§10.1's fallback architecture.** If Apple reads Guideline 5.1.1(v)
-  literally, the app must hold the Spotify token itself. That is a large
-  change and it degrades background freshness substantially. Know the answer
-  before M8; do not design it under submission pressure.
+- ~~**§10.1's fallback architecture.**~~ **Decided 2026-08-31.** Ship as
+  built; the clause is scoped to social networks and the paragraph names its
+  own examples. The fallback is costed in
+  [§10.1.3](#1013-the-fallback-if-a-reviewer-insists-anyway) and the review
+  notes are written in [§10.1.4](#1014-review-notes-text-ready-to-paste).
+  Reading the guideline in full also turned up a requirement this plan had
+  missed — the same paragraph demands a way to revoke the credential from
+  inside the app, and today only account deletion does that. See
+  [§10.1.2](#1012-the-revoke-clause-which-this-plan-had-missed); it is small
+  and it is the one piece of this still to build.
 - **The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**
   The rate ledger models per-user limits, not Ticketmaster's 5000/day account
   total, so exceeding it degrades feeds silently. The web app is bounded by
@@ -829,8 +835,12 @@ adapts.
 
 ### 10.1 Guideline 5.1.1(v) and server-side Spotify tokens
 
-**This is the highest-consequence unknown in the plan.** Guideline 5.1.1(v)
-states, verbatim:
+**Decided 2026-08-31 — see [§10.1.1](#1011-the-decision-made-2026-08-31).**
+This was the highest-consequence unknown in the plan; what follows is the
+framing as originally written, kept because the two arguments are still the
+two arguments, with the decision and its reasoning after it.
+
+Guideline 5.1.1(v) states, verbatim:
 
 > An app may not store credentials or tokens to social networks off of the
 > device and may only use such credentials or tokens to directly connect to
@@ -855,16 +865,133 @@ Spotify has social features, follows, and shared playlists — would find a
 literal violation, and the app cannot function without the thing that
 violates it.
 
-**What to do:** do not discover the answer at submission. Raise it in review
-notes on the first submission with the reasoning above. Before M8, know what
-the fallback architecture would be if Apple insists — realistically, the app
-holds the Spotify token itself, computes affinity on device, and posts only
-the derived artist-ID/score profile to the server, which then does the concert
-fan-out. That is a large change (it moves `internal/spotify` hydration into
-Swift, or into a foreground-only server call), it degrades background freshness
-substantially, and it is not something to design under submission pressure.
-Consider asking App Review for guidance via the pre-submission channels rather
-than betting a milestone on it.
+### 10.1.1 The decision, made 2026-08-31
+
+**Ship the architecture as built. Do not move tokens on-device pre-emptively.
+State the scope argument in review notes on the first submission.**
+
+Re-reading the guideline in full moved this from a coin-flip to a defensible
+position, because the sentence the plan quoted is the *last* sentence of a
+paragraph, and the paragraph names its own subject:
+
+> If your core app functionality is not related to a specific social network
+> (e.g. Facebook, WeChat, Weibo, X, etc.), you must provide access without a
+> login or via another mechanism. Pulling basic profile information, sharing
+> to the social network, or inviting friends to use the app are not considered
+> core app functionality. The app must also include a mechanism to revoke
+> social network credentials and disable data access between the app and
+> social network from within the app. **An app may not store credentials or
+> tokens to social networks off of the device** […]
+
+Every sentence is about social networks, and the enumerated examples are all
+social networks. Spotify is a music streaming service and is not among them.
+Guideline 4.8 corroborates that Apple has a category in mind for this app —
+its exemption for "a client for a specific third-party service" where "users
+are required to sign in to their mail, social media, or **other third-party
+account** directly to access their content" would be incoherent if every such
+client were forbidden from holding a token server-side.
+
+Quoted in isolation the sentence reads like a flat prohibition. Quoted with
+its paragraph it reads as scoped, and that is the form to put in review notes.
+
+**What this does not settle.** The clause is a reviewer judgment call, so the
+fallback below stays costed and ready. The point of deciding now is that no
+milestone depends on guessing right.
+
+### 10.1.2 The revoke clause, which this plan had missed
+
+The same paragraph carries a second requirement, and it is the actionable one:
+
+> The app must also include a mechanism to revoke social network credentials
+> and disable data access between the app and social network from within the
+> app.
+
+Today the *only* thing that removes a stored Spotify grant is
+`DELETE /me/account`. `handleLogout` deletes the session row and leaves
+`users.encrypted_refresh_token` exactly where it was — so a user who signs out
+has no way, from inside either client, to stop us holding their Spotify
+credential short of destroying their saved concerts and subscriptions too.
+
+Account deletion is arguably a mechanism that satisfies this: it revokes the
+credential and ends all data access, from within the app, without contacting
+support. But it is the maximal form of it, and "the only way to disconnect is
+to delete everything" is a bad answer to a reviewer who asks — as well as
+being worse for users than it needs to be.
+
+**A non-destructive disconnect is the recommended posture, and it is small.**
+The blast radius is genuinely contained: `encrypted_refresh_token` has exactly
+one consumer, `TokenService.AccessTokenFor` (`internal/auth/access.go`), and
+failing to produce an access token is a path that already exists and is already
+handled — it is what a revoked Spotify grant looks like. The work is a
+`db.DisconnectSpotify` that zeroes the token, drops the cached access token,
+and deletes the affinity profile, sessions and device tokens in one
+transaction; an explicit empty-token check in `AccessTokenFor` so the state
+reports itself rather than surfacing as a decrypt error that looks like
+corruption; an endpoint; and a Settings row in each client. Saves,
+subscriptions, location and email preferences survive, so signing back in
+restores the account.
+
+One thing such a flow must say plainly, because it is easy to overclaim:
+deleting our copy of the token stops *us* using it, but it does not revoke the
+grant at Spotify. That happens at
+[spotify.com/account/apps](https://www.spotify.com/account/apps), and the
+disconnect screen should link there rather than implying the connection is
+gone from both ends.
+
+### 10.1.3 The fallback, if a reviewer insists anyway
+
+Decided in advance so it is never designed under submission pressure. The app
+holds the Spotify token itself, hydrates the six signals on device, and posts
+only the derived artist-ID/score profile to the server, which still does the
+concert fan-out.
+
+What that actually costs, beyond "it is a large change":
+
+- `internal/spotify` hydration moves into Swift — six paginated sources with
+  their own page caps, the failure-tolerance rule that a dead source degrades
+  rather than destroys the profile, and the scoring weights. The Go
+  implementation would have to stay for the web client, so the scoring becomes
+  two implementations that must agree, which is the kind of duplication
+  `TestGoldenFixtures` exists to police.
+- Background freshness degrades to whatever the app can do in the background.
+  The nightly affinity refresh and the pre-warmed snapshot both depend on
+  using the grant while the app is closed, so the daily digest, instant
+  notifications and push all become best-effort behind an app launch.
+- The web client is unaffected — it is not an App Store product — which means
+  the two clients would stop sharing an affinity path. That is the real cost:
+  it breaks the "one backend, two clients" property in §1.1 that the whole
+  plan is built on.
+
+Worth asking App Review through the pre-submission channels before betting a
+milestone on either reading.
+
+### 10.1.4 Review-notes text, ready to paste
+
+> ConcertFinder is a client for the user's own Spotify listening data. Users
+> sign in to Spotify to access their own content — their followed artists,
+> saved music and listening history — which is the entire product, so we
+> understand Guideline 4.8's exemption for "a client for a specific
+> third-party service" to apply and have not added a separate login service.
+>
+> On Guideline 5.1.1(v): we store an encrypted Spotify refresh token on our
+> server, because the app's core feature is a nightly search for concerts by
+> artists the user listens to, which necessarily runs while the app is closed.
+> We understand the clause about storing tokens off-device to be scoped to
+> social networks — the paragraph's own examples are Facebook, WeChat, Weibo
+> and X — and Spotify is a music streaming service, not the social network
+> this app is a client for. We are happy to discuss this if you read it
+> differently.
+>
+> No Spotify credentials are stored on the device. The token is AES-256-GCM
+> encrypted at rest. Raw listening data is never persisted: it is held in
+> memory only and discarded once the derived affinity profile is built, which
+> itself expires after 24 hours. Users can disconnect Spotify and delete their
+> account from within the app, in Settings.
+>
+> Demo account credentials: [see the demo account section].
+
+The last paragraph's claim about disconnecting is only true once §10.1.2 is
+built. Do not paste it before then.
 
 ### 10.2 Guideline 4.8 and Sign in with Apple
 
