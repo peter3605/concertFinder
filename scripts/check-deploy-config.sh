@@ -120,4 +120,30 @@ if [ ! -x "$repo/scripts/render-env.sh" ]; then
 fi
 pass "render-env.sh is executable"
 
+# 9. prune-images.sh closes out every deploy, after verify-deploy.sh has
+#    already reported success. A syntax error there fails an SSM command for a
+#    deploy that actually worked, and a `set -euo pipefail` script that dies
+#    mid-way leaves the disk unreclaimed silently.
+if ! out=$(bash -n "$repo/scripts/prune-images.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/prune-images.sh has a syntax error"
+fi
+pass "prune-images.sh parses"
+
+if [ ! -x "$repo/scripts/prune-images.sh" ]; then
+    fail "scripts/prune-images.sh is not executable — run: chmod +x scripts/prune-images.sh"
+fi
+pass "prune-images.sh is executable"
+
+# 10. The compose file must pin the api image name, because prune-images.sh and
+#     the deploy's SHA tagging both address it by name. Without `image:`,
+#     compose derives it from the project directory, so a rename of
+#     /opt/concertfinder would silently orphan every rollback target.
+if ! awk '/^  api:/{f=1;next} /^  [a-z]/{f=0} f' "$rendered" | grep -q 'image: concertfinder-api'; then
+    fail "the api service does not pin 'image: concertfinder-api:latest' in docker-compose.prod.yml.
+      scripts/prune-images.sh and the deploy's SHA tagging address the image by
+      that name; without it compose derives the name from the directory."
+fi
+pass "api service pins its image name"
+
 printf '\n\033[32mDeployment config OK\033[0m\n'

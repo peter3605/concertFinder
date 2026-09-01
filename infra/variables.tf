@@ -58,6 +58,12 @@ variable "ses_verified_recipient" {
   type        = string
 }
 
+variable "alert_email" {
+  description = "Where CloudWatch alarm notifications go. Leave empty to reuse ses_verified_recipient, which is the same address CONTACT_EMAIL already uses. The subscription is confirmed by clicking a link in a mail AWS sends on the first apply; until that is done the topic accepts publishes and delivers nothing."
+  type        = string
+  default     = ""
+}
+
 variable "billing_alarm_threshold_usd" {
   description = "Estimated monthly AWS charges above which the billing alarm fires. Dropping RDS takes ~$14/mo off the bill, so this is lower than it was; bump it when the t4g.small trial ends on 2026-12-31."
   type        = number

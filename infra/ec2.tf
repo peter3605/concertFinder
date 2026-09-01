@@ -134,6 +134,53 @@ resource "aws_instance" "app" {
       swapon /swapfile
       grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
     fi
+
+    # The nightly backup timer. This used to exist only as copy-paste in
+    # docs/aws-deploy.md §7, which meant a rebuilt instance came up with no
+    # backups and nothing anywhere said so -- the failure is invisible until
+    # the night someone goes looking for a dump that was never taken. It
+    # belongs with the rest of the bootstrap for the same reason the swapfile
+    # does.
+    #
+    # Enabling the timer does not require /opt/concertfinder/scripts to exist
+    # yet: the clone in aws-deploy.md §3 lands well before the first 03:00
+    # firing, and a systemd timer does not validate its service's ExecStart
+    # until it triggers.
+    cat > /etc/systemd/system/concertfinder-backup.service <<'UNIT'
+    [Unit]
+    Description=Nightly pg_dump of the ConcertFinder database to S3
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    User=concertfinder
+    ExecStart=/opt/concertfinder/scripts/backup-db.sh
+    UNIT
+
+    cat > /etc/systemd/system/concertfinder-backup.timer <<'UNIT'
+    [Unit]
+    Description=Run the ConcertFinder database backup nightly
+
+    [Timer]
+    # 03:00 UTC -- clear of every DAILY_*_HOUR_UTC job (affinity 06, scan 07,
+    # digest 09, janitor 10), so the dump is not competing with a scan for the
+    # 0.25 CU Neon compute.
+    OnCalendar=*-*-* 03:00:00 UTC
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    UNIT
+
+    # The heredocs above are indented to match this file; systemd unit files
+    # tolerate leading whitespace on directives but not on section headers, so
+    # strip it rather than trusting that.
+    sed -i 's/^[[:space:]]*//' /etc/systemd/system/concertfinder-backup.service \
+      /etc/systemd/system/concertfinder-backup.timer
+
+    systemctl daemon-reload
+    systemctl enable --now concertfinder-backup.timer
   EOT
 
   tags = {
