@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -16,6 +17,17 @@ import (
 // tokenSkew is how long before real expiry we stop handing out a cached
 // access token, so a token can't expire mid-flight on a slow request.
 const tokenSkew = time.Minute
+
+// ErrSpotifyDisconnected is returned when the user has disconnected Spotify
+// from within the app (db.DisconnectSpotify), which zeroes the stored
+// credential. Distinct from a decrypt or refresh failure: nothing is broken
+// and no retry will help until the user signs in again, so callers should
+// treat it as a terminal, expected outcome rather than an error to alarm on.
+//
+// Returning it is also what keeps the zero-length credential away from
+// gcm.Open, which panics rather than errors on a wrong-length nonce — see
+// TestDecryptingAnEmptyCredentialPanics.
+var ErrSpotifyDisconnected = errors.New("spotify is not connected for this user")
 
 // cachedToken is one user's live access token.
 type cachedToken struct {
@@ -81,6 +93,17 @@ func (s *TokenService) AccessTokenFor(ctx context.Context, userID uuid.UUID) (st
 	user, err := db.GetUserByID(ctx, s.Pool, userID)
 	if err != nil {
 		return "", fmt.Errorf("load user: %w", err)
+	}
+	// Disconnected accounts hold a zero-length credential rather than a NULL
+	// one — the column is NOT NULL (see db.DisconnectSpotify).
+	//
+	// This check is not cosmetic. Falling through to DecryptToken does not
+	// return an error, it **panics**: gcm.Open panics whenever the nonce is
+	// not exactly NonceSize bytes, so the first background job or API call for
+	// a disconnected user would take down its goroutine. An ordinary,
+	// user-initiated state must not look like a crash.
+	if len(user.EncryptedRefreshToken) == 0 || len(user.RefreshTokenNonce) == 0 {
+		return "", ErrSpotifyDisconnected
 	}
 	rt, err := DecryptToken(s.EncKey, user.EncryptedRefreshToken, user.RefreshTokenNonce)
 	if err != nil {
