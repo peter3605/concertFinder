@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -355,7 +356,12 @@ func main() {
 				logger.Error("APNs client init failed", "err", err)
 				os.Exit(1)
 			}
-			logger.Info("push enabled", "environment", cfg.APNSEnvironment, "bundle", cfg.APNSBundleID)
+			// Log what the key is authorized for rather than the raw variable:
+			// they differ whenever APNS_ENVIRONMENT names both, and the list
+			// is what the worker filters devices on.
+			logger.Info("push enabled",
+				"environments", strings.Join(apnsClient.Environments(), ","),
+				"bundle", cfg.APNSBundleID)
 		}
 		river.AddWorker(workers, &jobs.SendPushWorker{Pool: pool, APNs: apnsClient})
 		river.AddWorker(workers, &jobs.JanitorWorker{Pool: pool})

@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/peterho/concertfinder/internal/push"
 )
 
 // Config holds runtime configuration sourced from process environment.
@@ -391,11 +393,13 @@ func (c Config) Validate() []error {
 	}
 	// Empty is not checked: Load always defaults it, so an empty value here
 	// means a hand-built Config (tests, half-configured checkouts) rather
-	// than a deployment that set it wrong.
-	if c.APNSEnvironment != "" && c.APNSEnvironment != "sandbox" && c.APNSEnvironment != "production" {
-		errs = append(errs, fmt.Errorf(
-			"APNS_ENVIRONMENT must be \"sandbox\" or \"production\" (got %q) — it selects the APNs host, and a token minted for one is rejected by the other",
-			c.APNSEnvironment))
+	// than a deployment that set it wrong. Parsing is push's, so the accepted
+	// spellings cannot drift from what the client will actually do with them.
+	if c.APNSEnvironment != "" {
+		if _, err := push.ParseEnvironments(c.APNSEnvironment); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"APNS_ENVIRONMENT names which environments the APNs key is authorized for: %w", err))
+		}
 	}
 
 	// The universal link must live on the domain the AASA file is served

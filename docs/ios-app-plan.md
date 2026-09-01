@@ -69,12 +69,21 @@ effectively permanent, since iOS caches `IOS_APP_ID` from the association file.
 | ~~Spotify logo asset~~ | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | Resolved 2026-08-31: the official full logo from Spotify's brand resource kit, in the asset catalogue as `SpotifyLogo`. See below. |
 | Signing | Xcode / App Store Connect | Team is available; no team is set in `project.yml`, so a device build needs one selected once. |
 
-The APNs key was created restricted to **Sandbox**, which matches the
-`development` entitlement and `apns_environment = "sandbox"`. A Sandbox-only
-key cannot send to the production host, so TestFlight needs a Sandbox &
-Production key — reissue before the first upload, alongside flipping
-`apns_environment`. Both halves must move together or push fails as
-`BadDeviceToken` with nothing in the logs to say why.
+The APNs key was created restricted to **Sandbox**, which is why
+`apns_environment = "sandbox"`. A Sandbox-only key cannot send to the
+production host, so TestFlight needs a **Sandbox & Production** key — reissue
+it before the first upload.
+
+*Amended 2026-08-31.* This used to say the reissue had to happen "alongside
+flipping `apns_environment`", with both halves moving together or push failing
+as `BadDeviceToken` with nothing in the logs. There is no longer a flip.
+`APNS_ENVIRONMENT` now names which environments the **key** is authorized for
+— `sandbox`, `production`, or `sandbox,production` — and the server picks the
+host per device from `user_devices.environment`, which the app has always
+reported by reading its own `aps-environment` entitlement. One key covers
+both, so a single deployment serves TestFlight and a developer's debug build
+at the same time, and nothing has to stay in step with anything. After the
+reissue, set `sandbox,production` once and leave it.
 
 **3. Server-side iOS configuration — applied and deployed 2026-08-26.** All
 eight parameters exist under `/concertfinder/`, `APNS_P8_KEY` holds the real
@@ -1074,7 +1083,7 @@ back on day two.
 | `APNS_TEAM_ID` | Apple Developer team ID | |
 | `APNS_BUNDLE_ID` | App bundle identifier | Also used in the AASA file. |
 | `APNS_P8_KEY` | The `.p8` private key | SSM SecureString, per `1ec3a4a`. Never log. |
-| `APNS_ENVIRONMENT` | `sandbox` \| `production` | Must match the build's entitlement. |
+| `APNS_ENVIRONMENT` | `sandbox`, `production`, or both, comma-separated | What the *key* is authorized for, not a host. Devices are routed individually. |
 | `IOS_APP_ID` | `<TeamID>.<BundleID>` | For `apple-app-site-association`. |
 | `MOBILE_CALLBACK_URL` | Universal link the callback redirects to | e.g. `https://<domain>/app/auth/callback`. |
 | `MIN_IOS_BUILD` | Minimum accepted client build | Returned by `/api/site-info`. |
