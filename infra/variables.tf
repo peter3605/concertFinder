@@ -102,13 +102,20 @@ variable "apns_key_id" {
 }
 
 variable "apns_environment" {
-  description = "Which APNs host to send to. Must match the build's aps-environment entitlement."
+  description = "Which APNs environments the .p8 auth key is authorized for. \"sandbox\", \"production\", or \"sandbox,production\" for a key issued as Sandbox & Production. Not a choice of host -- the server routes each device to its own."
   type        = string
   default     = "production"
 
   validation {
-    condition     = contains(["sandbox", "production"], var.apns_environment)
-    error_message = "apns_environment must be \"sandbox\" or \"production\" -- a token minted for one is rejected by the other."
+    # A list, because an auth key issued as "Sandbox & Production" can serve
+    # both and a deployment holding one should: that is what lets a single
+    # server reach TestFlight builds and a developer's debug build at once,
+    # instead of a flip that silently cut off whichever half was not selected.
+    condition = length(setsubtract(
+      [for e in split(",", var.apns_environment) : trimspace(e)],
+      ["sandbox", "production"]
+    )) == 0
+    error_message = "apns_environment must be \"sandbox\", \"production\", or \"sandbox,production\" -- it names what the key is authorized for, and a device in an unserved environment is skipped."
   }
 }
 
