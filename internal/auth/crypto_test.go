@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -54,4 +56,36 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	if _, err := DecryptToken(key, ct1, nonce1); err == nil {
 		t.Fatal("expected auth failure on tampered ciphertext")
 	}
+}
+
+// The reason AccessTokenFor checks for an empty credential itself instead of
+// letting DecryptToken report it.
+//
+// A disconnected account holds a zero-length token and nonce (the column is
+// NOT NULL, so db.DisconnectSpotify zeroes rather than NULLs). Handed those,
+// GCM does not return an error — it **panics**, because Open panics whenever
+// the nonce is not exactly NonceSize bytes. That is the whole reason the guard
+// in AccessTokenFor exists: without it the first background job or API call
+// for a disconnected user takes down its goroutine rather than reporting an
+// ordinary, user-initiated state.
+//
+// If this ever stops panicking the guard can be reconsidered. Pinning it here
+// means that change is a failing test rather than a silent one.
+func TestDecryptingAnEmptyCredentialPanics(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("DecryptToken no longer panics on an empty credential; AccessTokenFor's guard can be revisited")
+		}
+		if !strings.Contains(fmt.Sprint(r), "nonce") {
+			t.Errorf("panicked for an unexpected reason: %v", r)
+		}
+	}()
+
+	_, _ = DecryptToken(key, nil, nil)
 }

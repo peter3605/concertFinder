@@ -131,8 +131,8 @@ third-party tokens) and [§10.2](#102-guideline-48-and-sign-in-with-apple)
   Reading the guideline in full also turned up a requirement this plan had
   missed — the same paragraph demands a way to revoke the credential from
   inside the app, and today only account deletion does that. See
-  [§10.1.2](#1012-the-revoke-clause-which-this-plan-had-missed); it is small
-  and it is the one piece of this still to build.
+  [§10.1.2](#1012-the-revoke-clause-which-this-plan-had-missed---built-2026-08-31),
+  built 2026-08-31 as `DELETE /api/me/spotify-connection`.
 - **The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**
   The rate ledger models per-user limits, not Ticketmaster's 5000/day account
   total, so exceeding it degrades feeds silently. The web app is bounded by
@@ -898,7 +898,7 @@ its paragraph it reads as scoped, and that is the form to put in review notes.
 fallback below stays costed and ready. The point of deciding now is that no
 milestone depends on guessing right.
 
-### 10.1.2 The revoke clause, which this plan had missed
+### 10.1.2 The revoke clause, which this plan had missed — built 2026-08-31
 
 The same paragraph carries a second requirement, and it is the actionable one:
 
@@ -918,25 +918,40 @@ support. But it is the maximal form of it, and "the only way to disconnect is
 to delete everything" is a bad answer to a reviewer who asks — as well as
 being worse for users than it needs to be.
 
-**A non-destructive disconnect is the recommended posture, and it is small.**
-The blast radius is genuinely contained: `encrypted_refresh_token` has exactly
-one consumer, `TokenService.AccessTokenFor` (`internal/auth/access.go`), and
-failing to produce an access token is a path that already exists and is already
-handled — it is what a revoked Spotify grant looks like. The work is a
-`db.DisconnectSpotify` that zeroes the token, drops the cached access token,
-and deletes the affinity profile, sessions and device tokens in one
-transaction; an explicit empty-token check in `AccessTokenFor` so the state
-reports itself rather than surfacing as a decrypt error that looks like
-corruption; an endpoint; and a Settings row in each client. Saves,
+**Built.** `DELETE /api/me/spotify-connection` (`db.DisconnectSpotify`) zeroes
+the credential, drops the cached access token, and deletes the affinity
+profile, snapshots, sessions and device tokens in one transaction. Saves,
 subscriptions, location and email preferences survive, so signing back in
-restores the account.
+restores the account rather than starting an empty one. Both clients have a
+Settings entry, above the delete-account section and deliberately not styled
+destructive.
 
-One thing such a flow must say plainly, because it is easy to overclaim:
-deleting our copy of the token stops *us* using it, but it does not revoke the
-grant at Spotify. That happens at
-[spotify.com/account/apps](https://www.spotify.com/account/apps), and the
-disconnect screen should link there rather than implying the connection is
-gone from both ends.
+Two things found in the building that the estimate above did not anticipate:
+
+- **The snapshot delete is load-bearing, not tidiness.**
+  `FanoutSendDigestWorker` selects users on `digest_opt_in` and a non-empty
+  email, with no session or connection check at all. A disconnected user whose
+  `user_concert_snapshots` row survived would have kept receiving a nightly
+  digest built from the Spotify profile they had just revoked — no error, no
+  log. `TestDisconnectStopsTheNightlyDigest` fails if the delete is removed.
+- **The empty-credential check prevents a panic, not a confusing error.**
+  `gcm.Open` *panics* when the nonce is not exactly `NonceSize` bytes, so
+  without the guard in `AccessTokenFor` the first job or request for a
+  disconnected user would take down its goroutine.
+  `TestDecryptingAnEmptyCredentialPanics` pins that.
+
+One pre-existing defect surfaced alongside it: the iOS client's
+`deleteAccount()` sent **no request body**, while the handler decodes
+`confirm_name` unconditionally — so every in-app account deletion failed with
+400 "invalid body: EOF". Guideline 5.1.1(v) requires in-app account deletion
+that works, so the one path a reviewer is guaranteed to exercise was the
+broken one. Fixed in the same change.
+
+One thing the flow says plainly, because it is easy to overclaim: deleting our
+copy of the token stops *us* using it, but it does not revoke the grant at
+Spotify. That happens at
+[spotify.com/account/apps](https://www.spotify.com/account/apps), and both
+clients link there rather than implying the connection is gone from both ends.
 
 ### 10.1.3 The fallback, if a reviewer insists anyway
 
@@ -990,8 +1005,8 @@ milestone on either reading.
 >
 > Demo account credentials: [see the demo account section].
 
-The last paragraph's claim about disconnecting is only true once §10.1.2 is
-built. Do not paste it before then.
+The last paragraph's claim about disconnecting became true on 2026-08-31, when
+§10.1.2 shipped.
 
 ### 10.2 Guideline 4.8 and Sign in with Apple
 
