@@ -21,46 +21,73 @@ extension Color {
 /// "Powered by Spotify" attribution.
 ///
 /// Required on any surface showing Spotify-derived data — the feed, event
-/// cards, the artists screen, the affinity view. It lives here as one
-/// component precisely so a screen added later cannot forget it (plan §6).
+/// cards, the artists screen. It lives here as one component precisely so a
+/// screen added later cannot forget it (plan §6).
 ///
-/// ## Before submission: replace the placeholder mark
+/// ## The mark is Spotify's asset, and every number here comes from their guidelines
 ///
-/// This renders a typographic credit, not Spotify's logo. That is deliberate
-/// and it is **not finished work**: Spotify's Design Guidelines require the
-/// actual green mark, at or above a stated minimum size, with clear space
-/// around it, in one of the approved colourways, and the wordmark may not be
-/// recreated or substituted.
+/// The wordmark may not be recreated, so `SpotifyLogo` in the asset catalogue
+/// is the official file from Spotify's brand resource kit, unmodified. Four
+/// rules shape what is below, and none of them is a matter of taste:
 ///
-/// Drawing an approximation here would be worse than plain text — it would be
-/// a *wrong* logo that looks deliberate, which is a harder review conversation
-/// than an obvious placeholder. The asset has to come from Spotify's own brand
-/// resource kit; it cannot be reconstructed from a description.
+/// - **Full logo, not the icon.** Partner integrations use the icon+wordmark
+///   lockup; the bare icon is only allowed when it stands in as an app icon on
+///   a device's home screen, which is not this.
+/// - **Minimum 70pt wide** for the full logo (the icon alone has a separate,
+///   smaller 21pt floor that does not apply here). The old placeholder was
+///   16pt, under even that.
+/// - **Clear space of half the mark's height** on every side, to keep it away
+///   from competing elements.
+/// - **Colourway.** Spotify green is restricted to black or white
+///   backgrounds. Attribution sits on `systemGroupedBackground`, which is
+///   neither in either appearance, so the monochrome black and white variants
+///   are the compliant choice — carried by the asset catalogue's light/dark
+///   appearance slots rather than by tinting one file.
 ///
-/// To finish: add the official PNG/SVG to the asset catalogue as
-/// `spotify-logo`, then swap the `Image(systemName:)` below for it and keep
-/// `minimumLogoHeight` at whatever the current guidelines state. The size is
-/// pulled out as a named constant so the guideline value lives in one place
-/// rather than inside a layout.
+/// That last point is why `.foregroundStyle(.secondary)` applies to the label
+/// only. Applying it to the image would recolour the mark to a translucent
+/// grey, which is a modification of the logo and not one of the approved
+/// colourways — the muted look has to come from choosing the right asset, not
+/// from an opacity.
+///
+/// The label reads "Powered by" rather than "Powered by Spotify" because the
+/// full logo already contains the wordmark; the old text plus this asset would
+/// say Spotify twice.
 struct SpotifyAttribution: View {
-    /// Spotify's guidelines set a minimum rendered height for the mark.
-    /// Scaled so it holds at accessibility text sizes rather than being
-    /// dwarfed by the label beside it.
-    @ScaledMetric(relativeTo: .caption2) private var minimumLogoHeight: CGFloat = 16
+    /// Spotify's stated floor for the full logo. Scaled with the text so it
+    /// holds at accessibility sizes rather than being dwarfed by the label —
+    /// scaling up is fine, and the `@ScaledMetric` base is the minimum, so it
+    /// never scales below it.
+    @ScaledMetric(relativeTo: .caption2) private var logoWidth: CGFloat = 70
+
+    /// From the asset's own viewBox (823.46 × 225.25). Hard-coding the ratio
+    /// keeps the mark from being stretched if the frame is ever given both
+    /// dimensions.
+    private static let logoAspectRatio: CGFloat = 823.46 / 225.25
+
+    private var logoHeight: CGFloat { logoWidth / Self.logoAspectRatio }
+
+    /// Half the mark's height, per the guidelines' exclusion zone.
+    private var clearSpace: CGFloat { logoHeight / 2 }
 
     var body: some View {
-        HStack(spacing: 6) {
-            // PLACEHOLDER — see the note above. Replace with the official
-            // asset before App Store submission.
-            Image(systemName: "music.note")
+        HStack(spacing: clearSpace) {
+            Text("Powered by")
                 .font(.caption2)
-                .frame(minHeight: minimumLogoHeight)
-            Text("Powered by Spotify")
-                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Image("SpotifyLogo")
+                .resizable()
+                // .original, not .template: a template render would take the
+                // foreground colour and defeat the point of shipping the two
+                // approved colourways.
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: logoWidth, height: logoHeight)
         }
-        .foregroundStyle(.secondary)
-        // One element: the mark is decorative once the label says the same
-        // thing, so VoiceOver should not read it twice.
+        .padding(clearSpace)
+        // One element: the mark and the label say the same thing together, so
+        // VoiceOver should read the phrase once rather than announcing an
+        // image beside it.
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Powered by Spotify")
     }

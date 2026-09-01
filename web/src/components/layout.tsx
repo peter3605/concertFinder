@@ -9,6 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { SpotifyAttribution } from '@/components/spotify-attribution';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
@@ -112,7 +113,7 @@ export function Layout() {
         <Outlet />
       </main>
       <footer className="mx-auto max-w-6xl px-4 pb-8 text-xs text-muted-foreground">
-        <span>Powered by Spotify</span> · <NavLink to="/privacy" className="hover:underline">Privacy</NavLink> ·{' '}
+        <SpotifyAttribution /> · <NavLink to="/privacy" className="hover:underline">Privacy</NavLink> ·{' '}
         <NavLink to="/terms" className="hover:underline">Terms</NavLink>
       </footer>
     </div>
