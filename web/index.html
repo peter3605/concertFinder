@@ -4,6 +4,42 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ConcertFinder</title>
+    <meta
+      name="description"
+      content="ConcertFinder builds a personal concert feed from your Spotify listening — upcoming shows near you by the artists you already play."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- iOS "Add to Home Screen" reads this and ignores the manifest's icons,
+         so the raster is not redundant with the SVG above. -->
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <!-- Two values, not one: the browser picks by scheme, and a single dark
+         theme-color paints a dark bar above a light page for everyone whose
+         OS is set to light. -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0e0f11" media="(prefers-color-scheme: dark)" />
+
+    <!-- Absolute URLs on purpose. Scrapers resolve these against nothing —
+         a relative /og.png is fetched by some and dropped by others. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ConcertFinder" />
+    <meta property="og:title" content="ConcertFinder" />
+    <meta
+      property="og:description"
+      content="A personal concert feed built from your Spotify listening. Upcoming shows near you by the artists you already play."
+    />
+    <meta property="og:url" content="https://concertfinder.app/" />
+    <meta property="og:image" content="https://concertfinder.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="ConcertFinder — concerts near you, by the artists you already listen to." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ConcertFinder" />
+    <meta
+      name="twitter:description"
+      content="A personal concert feed built from your Spotify listening. Upcoming shows near you by the artists you already play."
+    />
+    <meta name="twitter:image" content="https://concertfinder.app/og.png" />
   </head>
   <body>
     <div id="root"></div>

@@ -198,8 +198,10 @@ final class AuthController: NSObject {
         await tokens.clear()
         try? await CachedProfile.clear()
         await SnapshotCache.shared.clear()
-        // A different account on this device gets its own first run.
+        // A different account on this device gets its own first run, and its
+        // own one-off hints.
         FirstRunTracker.reset()
+        HintStore.reset()
         state = .signedOut
     }
 

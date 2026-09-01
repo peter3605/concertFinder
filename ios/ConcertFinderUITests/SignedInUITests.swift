@@ -47,7 +47,17 @@ final class SignedInUITests: XCTestCase {
         }
         // A fresh first-run state each time, so the feed test is not silently
         // asserting against the first-run screen.
-        app.launchArguments += ["-cf.firstRunCompleted", "YES"]
+        //
+        // The other two matter for the same reason and one of them is worse:
+        // the soft prompt for notifications is a *sheet*, raised by the model
+        // the first time a scan settles with results in it — which is exactly
+        // what every test below waits for. Without this it covers the feed
+        // and each of them fails on a control it can no longer reach.
+        app.launchArguments += [
+            "-cf.firstRunCompleted", "YES",
+            "-cf.pushPromptOffered", "YES",
+            "-cf.hint.saveVersusSubscribe", "YES",
+        ]
         app.launch()
         return app
     }

@@ -62,6 +62,11 @@ type Act struct {
 	// HTTP handler, mirroring the fields they replace on Concert.
 	Saved      bool `json:"saved,omitempty"`
 	Subscribed bool `json:"subscribed,omitempty"`
+	// Reason is the one-line "why is this artist in my feed" string, applied
+	// per request from the user's affinity profile exactly like Saved and
+	// Subscribed. Never persisted: the profile has a 24h TTL of its own and a
+	// reason baked into a snapshot would outlive the signal it describes.
+	Reason string `json:"reason,omitempty"`
 	// Billing is "headliner", "support", or "" for unknown -- and unknown is
 	// the honest common case. See billing.go: this is inferred from position
 	// in Ticketmaster's attraction array, which Ticketmaster does not promise
@@ -125,6 +130,9 @@ type Concert struct {
 	// Subscribed mirrors Saved but for the user's per-artist subscription
 	// list (drives the "notify me instantly for this artist" feature).
 	Subscribed bool `json:"subscribed,omitempty"`
+	// Reason mirrors Saved: a per-request tag lifted onto the Act by
+	// GroupEvents. See Act.Reason.
+	Reason string `json:"reason,omitempty"`
 	// EventName, IsFestival and Billing are carried per row because the
 	// snapshot persists Concerts, not Events; GroupEvents lifts them onto the
 	// Event and its Acts at assembly time.

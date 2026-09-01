@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 // Three states: 'light' | 'dark' | 'system'. The last defers to the user's
 // OS preference at runtime via matchMedia. Choice is persisted in
 // localStorage under `cf-theme`.
-type ThemeChoice = 'light' | 'dark' | 'system';
+export type ThemeChoice = 'light' | 'dark' | 'system';
 
 type Ctx = {
   theme: ThemeChoice;

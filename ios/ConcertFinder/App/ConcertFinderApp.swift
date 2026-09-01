@@ -18,6 +18,7 @@ struct ConcertFinderApp: App {
                 .environment(container.saved)
                 .environment(container.artists)
                 .environment(container.location)
+                .environment(container.discover)
                 .environment(container.push)
                 .environment(container)
                 .task {
@@ -50,10 +51,17 @@ final class AppContainer {
     let saved: SavedModel
     let artists: ArtistsModel
     let location: LocationModel
+    let discover: DiscoverModel
     let push: PushRegistrar
 
     /// Set when a notification or universal link asks for a specific event.
     var pendingEventKey: String?
+
+    /// Which tab is showing. Here rather than in `MainTabView` because
+    /// screens inside one tab now send the user to another — the empty feed
+    /// points at Artists, a notification points at the feed — and view state
+    /// is not reachable from either.
+    var selectedTab: AppTab = .feed
 
     private let tokens = KeychainTokenStore()
 
@@ -75,6 +83,7 @@ final class AppContainer {
         self.saved = SavedModel(api: api)
         self.artists = ArtistsModel(api: api)
         self.location = LocationModel(api: api)
+        self.discover = DiscoverModel(api: api)
         self.push = PushRegistrar(api: api)
         // `[weak auth]` is what keeps this from being a cycle: the client
         // holds the bridge, the bridge would hold the controller, and the
@@ -103,6 +112,8 @@ final class AppContainer {
             self.saved.reset()
             self.artists.reset()
             self.location.reset()
+            self.discover.reset()
+            self.selectedTab = .feed
             // Awaited, and last: on the deliberate sign-out path this runs
             // while the session token is still valid, which is the only
             // moment the server will honour a deregistration.

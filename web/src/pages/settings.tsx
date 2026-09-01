@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { AlertTriangle, Mail, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import { mutatingFetch } from '@/lib/api';
+import { mutatingFetch, NETWORK_ERROR_MESSAGE, statusMessage } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { Me } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/use-document-title';
@@ -31,12 +32,14 @@ export default function SettingsPage() {
         body: JSON.stringify(patch),
       });
       if (!r.ok) {
-        setErr(await r.text());
+        // Never the response body: these are Go http.Error strings, and on a
+        // bad gateway they are the proxy's HTML.
+        setErr(statusMessage(r.status, { 400: "That setting didn't save. Reload and try again." }));
         return;
       }
       setMe({ ...me, ...patch });
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    } catch {
+      setErr(NETWORK_ERROR_MESSAGE);
     } finally {
       setSaving(false);
     }
@@ -105,8 +108,11 @@ export default function SettingsPage() {
           />
           {err && <p className="text-sm text-destructive">{err}</p>}
           <div>
+            {/* A route, not a document: <a href> made this a full page load,
+                tearing down the app and refetching the bundle to reach a page
+                the router already has. */}
             <Button variant="outline" asChild>
-              <a href="/subscribe">Manage subscribed artists</a>
+              <Link to="/subscribe">Manage subscribed artists</Link>
             </Button>
           </div>
         </CardContent>
@@ -141,15 +147,15 @@ function DisconnectSpotify() {
     try {
       const r = await mutatingFetch('/api/me/spotify-connection', { method: 'DELETE' });
       if (!r.ok) {
-        setErr(await r.text());
+        setErr(statusMessage(r.status));
         return;
       }
       // Every session is gone server-side and the cookie is cleared, so a
       // client-side route change would just render a signed-in shell with no
       // credentials. Full navigation rehydrates as anonymous.
       window.location.href = '/login';
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    } catch {
+      setErr(NETWORK_ERROR_MESSAGE);
     } finally {
       setBusy(false);
     }
@@ -229,14 +235,18 @@ function DangerZone({ displayName }: { displayName: string }) {
         body: JSON.stringify({ confirm_name: typed }),
       });
       if (!r.ok) {
-        setErr(await r.text());
+        setErr(
+          statusMessage(r.status, {
+            400: "That name didn't match your display name. Check it and try again.",
+          }),
+        );
         return;
       }
       // Session cookie is cleared by the server; force a fresh navigation
       // so the app rehydrates as anon.
       window.location.href = '/login';
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    } catch {
+      setErr(NETWORK_ERROR_MESSAGE);
     } finally {
       setBusy(false);
     }

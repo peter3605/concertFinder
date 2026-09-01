@@ -2,8 +2,14 @@ import SwiftUI
 
 struct FeedView: View {
     @Environment(FeedModel.self) private var model
+    @Environment(AppContainer.self) private var container
+    @Environment(AuthController.self) private var auth
+    @Environment(PushRegistrar.self) private var push
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingFilters = false
+    /// Read once, at construction: a hint the user dismissed must not come
+    /// back when the view is rebuilt.
+    @State private var showsIntroHint = !HintStore.isDismissed(.saveVersusSubscribe)
 
     var body: some View {
         @Bindable var model = model
@@ -58,6 +64,16 @@ struct FeedView: View {
                 }
             }
         }
+        // Outside the NavigationStack, and deliberately not stacked beside
+        // the filters sheet: two `.sheet(isPresented:)` on one view is a
+        // presentation conflict waiting for the day both are true.
+        //
+        // Raised by the model the first time a scan settles with results in
+        // it. Nothing here decides *when* — that rule is
+        // FeedModel.shouldOfferPushPrompt, where it can be tested.
+        .sheet(isPresented: $model.isShowingPushPrompt) {
+            PushPrimerView(onAccept: enablePush)
+        }
     }
 
     private var list: some View {
@@ -94,8 +110,45 @@ struct FeedView: View {
         }
     }
 
+    /// Introduces the bookmark and the bell as a pair.
+    ///
+    /// Both controls are individually legible and nothing said what the pair
+    /// was *for*: the bell is the retention action — it is about shows that
+    /// do not exist yet — and next to a bookmark it reads as a second way to
+    /// save. One sentence, once, dismissible for good.
+    @ViewBuilder
+    private var introHint: some View {
+        if showsIntroHint {
+            HStack(alignment: .top, spacing: Metrics.tight) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Two things you can do here")
+                        .font(.footnote.weight(.semibold))
+                    Text("Tap the bookmark to keep a show in Saved, or the bell to get alerted whenever that artist announces a new one near you.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    showsIntroHint = false
+                    HintStore.dismiss(.saveVersusSubscribe)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+            }
+            .padding(Metrics.gutter)
+            .background(Color(.tertiarySystemFill))
+            .clipShape(RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous))
+        }
+    }
+
     @ViewBuilder
     private var banners: some View {
+        introHint
         // Four models set `error` and this was the screen that rendered none
         // of it: a 500 or a decode failure left an empty list under "Nothing
         // coming up near you yet", which blames the user's city for our
@@ -197,10 +250,36 @@ struct FeedView: View {
             } else if !model.complete {
                 Button("Search again") { Task { await model.requestRescan() } }
                     .disabled(!model.canRescan)
+            } else if model.filters.activeCount == 0 {
+                // The primary action on a genuinely quiet city, because it is
+                // the most useful thing anyone can do from here: there is
+                // nothing on sale to save, and the whole point of a
+                // subscription is shows that do not exist yet. It was buried
+                // on another tab. Not offered when a filter is hiding the
+                // list — clearing that is the more useful action, and it is
+                // right below.
+                Button("Get alerts when an artist announces a show") {
+                    container.selectedTab = .artists
+                }
+                .buttonStyle(.borderedProminent)
             }
             if model.filters.activeCount > 0 {
                 Button("Clear filters") { model.filters = .empty }
             }
+        }
+    }
+
+    /// The accepted branch of the soft prompt.
+    ///
+    /// The profile is updated alongside the server so Settings does not open
+    /// showing the toggle off over a device that is registered — where the
+    /// user's next tap would turn off the notifications they just asked for.
+    @MainActor
+    private func enablePush() async {
+        guard await push.enable() else { return }
+        if case .signedIn(var me) = auth.state {
+            me.pushOptIn = true
+            auth.updateProfile(me)
         }
     }
 
@@ -245,4 +324,73 @@ struct FeedView: View {
 /// navigationDestination can discriminate by type.
 enum FeedRoute: Hashable {
     case location
+}
+
+/// The soft prompt in front of the system notification dialog.
+///
+/// It exists because the system dialog is a one-shot: iOS shows it once, a
+/// decline is permanent from the app's side, and Settings is the only way
+/// back. Asking on launch — before the user has seen a single concert — is
+/// the prompt people decline, so this one is raised at the moment it has been
+/// earned: the first scan finished and it found them shows.
+///
+/// Everything here is about being *declinable without cost*. "Not now" does
+/// not call `requestAuthorization`, so the one system prompt is still
+/// available from Settings later, and the copy says exactly what will be sent
+/// rather than asking for permission in the abstract.
+struct PushPrimerView: View {
+    var onAccept: @MainActor () async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var isRequesting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.loose) {
+            VStack(alignment: .leading, spacing: Metrics.tight) {
+                Image(systemName: "bell.badge")
+                    .font(.largeTitle)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+                Text("Want to hear about new shows?")
+                    .font(.title2.weight(.semibold))
+                Text("Tickets for the artists you listen to go on sale and sell out between one launch of an app and the next. We'll send you a notification when an artist you follow announces a show near you — and nothing else.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            VStack(spacing: Metrics.tight) {
+                Button {
+                    isRequesting = true
+                    Task {
+                        await onAccept()
+                        isRequesting = false
+                        dismiss()
+                    }
+                } label: {
+                    if isRequesting {
+                        ProgressView().frame(maxWidth: .infinity)
+                    } else {
+                        Text("Turn on notifications").frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(isRequesting)
+
+                Button("Not now") { dismiss() }
+                    .disabled(isRequesting)
+
+                Text("You can change this any time in Settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(Metrics.loose)
+        .background(Color.screenBackground)
+        .presentationDetents([.medium])
+    }
 }

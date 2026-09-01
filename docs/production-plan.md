@@ -586,7 +586,7 @@ Do P3-2's endpoint and P3-3's response field yourself first — both clients dep
 on them — then split the client work across two subagents.
 
 ### P3-1 — Ask for location before the first scan
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/http/auth.go` (`OnLoginSuccess`), `FirstRunView.swift`,
 `web/src/pages/concerts.tsx:80`, `web/src/components/location-bar.tsx`
@@ -603,7 +603,7 @@ pre-prompt card explaining why before triggering the browser geolocation dialog
 — a denial there is permanent, so it should never be a surprise.
 
 ### P3-2 — A signed-out "shows near you" view
-- [ ] Done
+- [x] Done
 
 **Files:** new `internal/http/discover.go`, `cmd/server/main.go`,
 `web/src/pages/login.tsx`, new `web/src/pages/discover.tsx`, `FirstRunView.swift`
@@ -626,7 +626,7 @@ you" rather than anything implying personalisation. If the cache is empty for
 that area, render nothing — no empty state, no error.
 
 ### P3-3 — Show why each artist is in the feed
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/http/concerts.go`, `internal/affinity`, `Models.swift`,
 `web/src/lib/types.ts`, `EventCard`/`event-card.tsx`
@@ -644,7 +644,7 @@ both clients. Do not persist anything new — the profile is already in the
 snapshot path, and `CLAUDE.md`'s no-raw-Spotify-persistence rule still holds.
 
 ### P3-4 — Prime push at the moment it is earned
-- [ ] Done
+- [x] Done
 
 **Files:** `FirstRunView.swift:164`, `ArtistsView.swift:146`,
 `PushRegistrar.swift`, `FeedModel.swift`
@@ -659,7 +659,7 @@ ships, the copy on both screens must not promise a notification the app cannot
 send.
 
 ### P3-5 — Introduce save versus subscribe
-- [ ] Done
+- [x] Done
 
 **Files:** `EventCard.swift`, `web/src/components/event-card.tsx:198,213`,
 `FeedView.swift` empty state
@@ -675,7 +675,7 @@ In the empty-feed state, surface "Get alerts when an artist announces a show" as
 the primary action, since it is the most useful thing a user can do there.
 
 ### P3-6 — Web: keep the filter bar mounted across loads
-- [ ] Done
+- [x] Done
 
 **Files:** `web/src/hooks/use-concerts.ts:72`, `web/src/pages/concerts.tsx:138`
 
@@ -689,7 +689,7 @@ choice.
 last-known facets throughout, with `aria-busy` on the list while stale.
 
 ### P3-7 — Web: the missing public surface
-- [ ] Done
+- [x] Done
 
 **Files:** `web/index.html`, new `web/public/`, `web/src/App.tsx:69`,
 `internal/http/spa/spa.go:56`, `web/vite.config.ts`
@@ -708,7 +708,7 @@ extension. Replace the `*` → `/` catch-all route with a real 404 page. Add
 dead weight on the feed's first paint. Drop the three unused Radix deps.
 
 ### P3-8 — iOS polish
-- [ ] Done
+- [x] Done
 
 Each is small and independent:
 - Settings toggles fire their handlers on programmatic writes — opening Settings
@@ -737,7 +737,7 @@ Each is small and independent:
   user cannot dismiss.
 
 ### P3-9 — Web polish
-- [ ] Done
+- [x] Done
 
 Each is small and independent:
 - Map errors by status instead of `setErr(await r.text())` in
@@ -979,6 +979,106 @@ _Append one line per judgement call, with the task ID._
   full request URL, `apikey=` included. `Client.scrubKey` removes the client's
   own key by exact match rather than by pattern. The new test fails without it.
 
+- **P3-1** — Only the *pre-warm* was removed. The SWR read path is untouched,
+  which is what makes this safe: a feed read on a missing snapshot still
+  enqueues the scan, so the scan simply starts when the user names a place
+  instead of before they have. `OnLoginSuccess` also now returns on a failed
+  location lookup rather than falling back to the deployment default — the
+  whole point is not to scan a city nobody asked for.
+- **P3-2** — The reader and the writer of `concert_cache` share one constant
+  (`concerts.CachePrefixTicketmaster`, threaded through `cacheKey`). A prefix
+  that agreed only by coincidence would return an empty list forever, and the
+  endpoint swallows its own failures by design, so there would be nothing in a
+  log to see.
+- **P3-2** — Freshness is `DiscoverCacheMaxAge` (7d), deliberately **not**
+  `CONCERT_CACHE_TTL_HOURS` (12h). That TTL decides when a *scan* refetches;
+  applying it here would empty the login page every afternoon. Seven days
+  matches the janitor's prune horizon, so this reads exactly the rows that
+  still exist, and every event in them is filtered against today anyway.
+- **P3-2** — `FromCachedTicketmaster` decodes **location-independently** and
+  `Near` filters per request. The decoded candidate set is a process-wide
+  5-minute cache, so filtering at decode time would serve the second visitor
+  the first visitor's city. The refresh also runs on a detached context with
+  its own 5s deadline: the result is shared, so one browser navigating away
+  mid-load must not cancel the read three others are waiting on. A failed load
+  sets a 30s backoff, or a database outage becomes one timeout per request,
+  serialised behind the cache mutex.
+- **P3-2** — Discover acts carry **no artist ID**. Every other ID in
+  `concerts` is Spotify's, and a Ticketmaster attraction ID in that field is a
+  save or a subscribe pointed at an artist that does not exist. Both clients
+  then drop the star and bell entirely rather than rendering dead ones.
+- **P3-3** — `spotify.ArtistSignals` lives in the existing affinity profile
+  blob. It is derived data — counts over signals already scored, naming no
+  track, album or playlist — so it stores no new Spotify Content, and an old
+  profile decodes with every field zero, which reads as "no reason to show"
+  rather than a wrong one.
+- **P3-3** — The handler calls `affinity.Service.ReasonsFor`, which wraps a
+  new `LoadCached`. `LoadOrCompute` on that path would turn the request the
+  frontend polls every 10s into a six-endpoint Spotify fan-out with a 60s
+  timeout; a missing profile costing one line on a card is the right trade.
+- **P3-3** — Deliberately **not** applied to `/me/saved-concerts`. A save
+  outlives the profile that produced it — that is why the saved list is read
+  from `user_saved_concerts` and not from the snapshot — so "#7 in your top
+  artists" there would be a claim about a profile that may no longer contain
+  the artist at all.
+- **P3-3** — The golden fixtures now carry `reason` on several acts and
+  deliberately not on one, and a new `discover.json` fixture pins the
+  signed-out shape. Both new response shapes are therefore covered by the
+  Go↔Swift contract check rather than by two independent readings of a doc.
+- **P3-1 (iOS)** — The gate is first-run only (`!FirstRunTracker.hasCompleted`
+  and `is_default`). An established user who never set a location must still
+  get a feed, and a failed `/me/location` leaves the flag false, i.e. it loads
+  — the safe direction. `continueWithoutLocation()` keeps the step from being
+  a dead end for someone who declines and does not know what to type.
+- **P3-8 (iOS)** — The Settings toggle guard is **not** an `isSyncing` flag as
+  the task worded it. SwiftUI delivers `.onChange` on the *next* update pass,
+  by which point a flag set and cleared inside the sync is already false. The
+  handler instead refuses a value that already equals the profile's — which is
+  exactly what a sync writes and what a tap never does. Stateless, and correct
+  on the failure path too, where the revert re-syncs.
+- **P3-4 (iOS)** — The prompt is recorded as offered on *showing*, not on
+  accepting: "once ever" has to mean the app asks once and takes silence for
+  an answer. `SignedInUITests` now suppress it (and the save/subscribe hint)
+  by launch argument, or the sheet would cover the feed at exactly the moment
+  those tests wait for.
+- **P3-3 (iOS)** — The reason line **replaces** the genres line on an act
+  rather than adding a third; a six-act festival card is otherwise most of a
+  screen. No reason falls back to genres exactly as before.
+- **P3-2 (web)** — The signed-out coordinate is hardcoded to New York City,
+  matching `.env.example`'s fallback. A visitor has no session, and prompting
+  for browser geolocation on the login page is exactly the unannounced dialog
+  P3-1 removes — worse there, because the one question the browser allows
+  would be spent before anyone has seen what the app does. NYC is also the
+  densest US market, which matters for an endpoint that can only return what
+  someone else's scan already cached.
+- **P3-6 (web)** — On a failure at the start of a new generation the existing
+  data is kept only while the backoff retries run; once they are exhausted the
+  error replaces it, because what is on screen answers a query the user has
+  since changed. `patchActs` carries `stale` through, so an optimistic star
+  does not make an in-flight fetch look landed.
+- **P3-9 (web)** — The poll's give-up state is a new `pollStopped` flag *and*
+  a forced `refreshing: false`: a spinner that merely stops is
+  indistinguishable from one that finished. Pausing on a hidden tab also makes
+  `MAX_REFRESH_POLLS` count *visible* polls, so a backgrounded tab no longer
+  burns its ten-minute ceiling while nobody is watching.
+- **P3-7 (web)** — The SPA's new 404 rule is "the path has a file extension",
+  not a list of filenames: every route in `App.tsx` is extension-free, so the
+  extension is the whole test and it covers `/robots.txt`, `/favicon.ico` and
+  `/sitemap.xml` without naming them. The cost — a future route with a dot in
+  it would 404 silently — is stated in the comment beside it. An unknown
+  extension-free path still answers 200; the new `NotFoundPage` is what tells
+  the user, because the handler cannot tell a typo from a route without
+  duplicating the route table.
+- **P3-7 (web)** — `Handler()` was split into `handlerFor(fs.FS)` so the
+  routing rules test against an `fstest.MapFS`. The rule that matters is what
+  happens to files that are *absent*, and `static/` holds one placeholder.
+- **P3-7 (web)** — `icon-192.png`/`icon-512.png` and an `apple-touch-icon`
+  link were added beyond the brief: a manifest whose only icon is an SVG is
+  not installable in Chrome and is ignored by iOS Add-to-Home-Screen, so the
+  manifest would have been decorative. `og.png` needed a square-wrapper
+  workaround because `qlmanage` top-aligns a non-square SVG in a square
+  thumbnail; the recipe is a comment in `og.svg` rather than tribal knowledge.
+
 ## Deferred
 
 _Append anything skipped, with the task ID and one sentence of why._
@@ -1029,6 +1129,18 @@ _Append anything skipped, with the task ID and one sentence of why._
   `github.com/peter3605/concertFinder`. `main.go` always passes a real
   User-Agent so the default is unreachable in production; left alone rather
   than fixed blind, since unlike the other two that repo may actually exist.
+
+- **P3-8 / `EventDetailView` from the Saved tab** — the detail view is now
+  driven off `FeedModel`, so a show opened from **Saved** that is not in the
+  loaded feed falls back to the pushed event and no longer flips its bookmark
+  optimistically. Routing that toggle through `SavedModel` is the real fix and
+  is larger than the bullet it came from.
+- **P3-2 / discover coverage follows other people's scans.** The endpoint can
+  only return what some signed-in user's scan already cached, so the section
+  is empty in any city nobody uses the app in — including, on a fresh
+  deployment, all of them. That is the correct trade for an endpoint that must
+  never reach an upstream API, but it means the login page's most convincing
+  element is the one that arrives last.
 
 ## Progress log
 
@@ -1115,3 +1227,53 @@ _One line per session: date, phases completed, anything the next session needs._
 
   Next: Phase 3, two subagents (iOS lane and web lane), after the main session
   does P3-2's endpoint and P3-3's response field itself.
+
+- **2026-09-01 — Phase 3 complete** (P3-1…P3-9), on branch
+  `production-hardening`. Main session did the shared backend first (P3-1's
+  server half, P3-2's endpoint, P3-3's response field), then three subagents:
+  iOS lane and web lane A concurrently, then web lane B (P3-7, P3-9) once
+  lane A's files were free.
+
+  New files: `internal/http/discover.go` + `discover_test.go`,
+  `internal/concerts/discover.go` + `discover_test.go`,
+  `internal/affinity/reason.go` + `reason_test.go`,
+  `internal/db/concert_cache_test.go`, `internal/http/spa/spa_test.go`,
+  `ios/ConcertFinder/Features/Feed/DiscoverModel.swift`,
+  `ios/ConcertFinderTests/FirstRunTests.swift`,
+  `ios/ConcertFinderTests/Fixtures/discover.json`,
+  `web/src/pages/{discover,not-found}.tsx`,
+  `web/src/components/{location-prompt,save-subscribe-hint,time-ago}.tsx`,
+  and `web/public/` (favicon, robots.txt, manifest, og.svg/og.png verified
+  1200x630, two PNG icons).
+
+  Verified, serially: `gofmt`, `go build`, `go vet`, `go test ./...` — green
+  both with a live Postgres and without one; `npm --prefix web install`
+  (lockfile regenerated after the three Radix removals), `npm run lint`,
+  `npm run build`; `xcodegen generate && xcodebuild test` on the iPhone 17
+  simulator — **TEST SUCCEEDED**, with `FirstRunTests` and the new decoding
+  tests confirmed present in the run rather than inferred from a green exit;
+  `./scripts/check-deploy-config.sh` (16 checks). Terraform untouched.
+  Nothing applied, nothing deployed.
+
+  Two corrections the main session made:
+  1. The iOS lane shipped a **compile error** — `SessionLifecycleTests`
+     referenced the suite's `static` fixtures unqualified from instance
+     methods. The agent had verified with `swiftc -parse`, which does not type
+     check. Fixed with `Self.`; the lesson is that only `xcodebuild` counts.
+  2. `internal/db/concert_cache_test.go` was added by the main session rather
+     than left to the discover handler's unit tests. `ScanCachedConcerts` is
+     the whole data path of a view that answers every failure with an empty
+     200, so a SQL error there is a permanently empty section with a green
+     build and nothing in a log — the exact shape Phase 2 went looking for.
+
+  `CLAUDE.md` gained two entries: what `GET /api/discover` cannot do (no
+  upstream call, no rate ledger, location-independent decode, no artist IDs,
+  empty-200 on every failure), and that the feed's `reason` line reads the
+  cached affinity profile and never computes one. The "When scans run" section
+  now records that login pre-warms only for a user who already has a location.
+
+  For a human, in addition to everything still listed in Phase 4: the
+  signed-out discover section is only as good as the shared `concert_cache`,
+  so it will look empty until real accounts have scanned real cities — worth
+  knowing before judging the login page, and worth checking again before App
+  Review sees it.

@@ -80,6 +80,22 @@ final class PushRegistrar {
         }
     }
 
+    /// Both halves of turning push on: the OS grant and the server-side
+    /// preference. Returns whether it ended up on.
+    ///
+    /// Settings does the same two steps around its toggle and has an
+    /// `APIClient` to hand; the soft prompt on the feed does not, and a grant
+    /// without the preference is a device registered to receive notifications
+    /// the sender will never select it for.
+    func enable() async -> Bool {
+        guard await requestAuthorizationAndRegister() else { return false }
+        // Best effort. A failure here leaves the grant in place and the
+        // preference off, which is the recoverable direction — the Settings
+        // toggle is still the way to fix it.
+        try? await api.updatePreferences(push: true)
+        return true
+    }
+
     /// Re-registers an existing grant on launch.
     ///
     /// APNs rotates tokens silently, so this runs on *every* launch rather

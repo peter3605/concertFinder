@@ -30,10 +30,16 @@ export type GeolocateOutcome =
  * configured fallback. A user who has picked a location must never be
  * re-prompted.
  *
- * Every failure path is non-fatal by design. This runs on first login, and the
- * app is fully usable without it: the user keeps the fallback location and can
- * set one by hand in the location bar exactly as before. A denied permission is
- * a legitimate answer, not an error to surface.
+ * Call it from LocationPrompt, not on mount. The browser dialog behind it is
+ * one-shot per origin, so it needs the explanation in front of it; the outcome
+ * kinds below exist so that card can tell "user said no" (offer the city
+ * field, and stop offering the button) apart from "device could not answer"
+ * (worth another try).
+ *
+ * Every failure path is non-fatal by design. The app is fully usable without
+ * it: the user keeps the fallback location and can set one by hand in the
+ * location bar exactly as before. A denied permission is a legitimate answer,
+ * not an error.
  */
 export async function detectAndSaveLocation(
   save: (loc: { latitude: number; longitude: number; radius_miles: number }) => Promise<Location>,

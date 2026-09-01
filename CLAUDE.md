@@ -210,6 +210,34 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   digests deliberately keep **text-only** attribution: remote images are
   blocked by default in most mail clients, so an `<img>` there would attribute
   nothing most of the time while the words always land.
+- **`GET /api/discover` is the one concert endpoint a stranger can call, and
+  what makes that safe is what it cannot do.** It is served entirely from
+  `concert_cache` (`db.ScanCachedConcerts` over the `tm:` prefix that
+  `concerts.CachePrefixTicketmaster` and `cacheKey` share): no upstream call,
+  no rate ledger, no affinity. An unauthenticated endpoint that can reach
+  Ticketmaster is a quota drain with a URL, and the account-wide allowance is
+  what decides whether signed-in users get a complete feed. Three further
+  properties are load-bearing. `FromCachedTicketmaster` decodes
+  **location-independently** and `Near` filters per request, because the
+  decoded candidate set is a process-wide cache and filtering at decode time
+  would hand the second visitor the first visitor's city. Acts carry **no
+  artist ID** — the IDs everywhere else in `concerts` are Spotify's, and a
+  Ticketmaster attraction ID in that field is a save or subscribe pointed at
+  an artist that does not exist. And every failure — an unreadable cache, an
+  undecodable payload, an empty area — answers `200` with `events: []`,
+  because the caller is the first screen a stranger sees and both clients
+  render nothing rather than an error there.
+- **The feed's `reason` line reads the affinity profile; it never computes
+  one.** `Act.reason` ("You follow them", "#7 in your top artists") comes from
+  `spotify.ArtistSignals`, a derived per-signal breakdown persisted in the
+  same 24h profile blob as the scores — no raw Spotify Content, nothing new
+  stored. The concerts handler calls `affinity.Service.ReasonsFor`, which
+  wraps `LoadCached`; calling `LoadOrCompute` there would turn the request the
+  frontend polls every 10s into a six-endpoint Spotify fan-out with a 60s
+  timeout. A missing or expired profile costs one line on a card, which is the
+  correct trade. `reason` is applied per request like `Saved` and
+  `Subscribed` and is never persisted in a snapshot, whose lifetime is
+  unrelated to the profile's.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 
@@ -361,7 +389,14 @@ of killing the loop or replacing already-loaded data with an error screen.
 Four triggers, all funnelling into the same `ScanConcerts` job, which river's
 args-level uniqueness collapses to one in flight per (user, location):
 
-1. **Login** — `OnLoginSuccess` pre-warms a snapshot.
+1. **Login** — `OnLoginSuccess` pre-warms a snapshot, but **only for a user
+   who already has a location of their own**. Without that check the pre-warm
+   scans `USER_LATITUDE`/`USER_LONGITUDE` — a city the new user has never
+   mentioned — for up to `ScanBudget`, reserving a chunk of a daily per-user
+   cap sized at roughly one scan; the moment they name a real place the result
+   is filed under a different `location_key` and never read. The user waited
+   through it to be handed nothing. Both clients ask for a location before the
+   first feed, and the SWR read enqueues the scan when the answer arrives.
 2. **A stale read** — the SWR handler, per the rules above.
 3. **The nightly fanout** — `FanoutScanConcerts`, one job per user with a
    session in the last 14 days, spread across 60min to avoid a thundering herd.

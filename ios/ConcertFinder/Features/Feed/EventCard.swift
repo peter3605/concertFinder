@@ -7,8 +7,12 @@ import SwiftUI
 /// card" would save the wrong artist.
 struct EventCard: View {
     let event: Event
-    var onToggleSave: (Act) -> Void
-    var onToggleSubscribe: (Act) -> Void
+    /// Both nil on the signed-out "popular shows near you" backdrop. Those
+    /// acts come from `/api/discover`, which carries no artist id and no
+    /// saved/subscribed state because it does not know who is asking — so
+    /// the controls are *absent* there rather than present and inert.
+    var onToggleSave: ((Act) -> Void)?
+    var onToggleSubscribe: ((Act) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.tight) {
@@ -17,14 +21,26 @@ struct EventCard: View {
             ForEach(event.acts) { act in
                 ActRow(
                     act: act,
-                    onToggleSave: { onToggleSave(act) },
-                    onToggleSubscribe: { onToggleSubscribe(act) }
+                    onToggleSave: saveAction(for: act),
+                    onToggleSubscribe: subscribeAction(for: act)
                 )
             }
         }
         .padding(Metrics.gutter)
         .background(Color.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous))
+    }
+
+    /// Absent callback in, absent control out — the per-act closures are what
+    /// carry "there is somebody to do this on behalf of".
+    private func saveAction(for act: Act) -> (() -> Void)? {
+        guard let onToggleSave else { return nil }
+        return { onToggleSave(act) }
+    }
+
+    private func subscribeAction(for act: Act) -> (() -> Void)? {
+        guard let onToggleSubscribe else { return nil }
+        return { onToggleSubscribe(act) }
     }
 
     private var header: some View {
@@ -96,8 +112,9 @@ struct BillingLabel: View {
 /// One artist on the bill, with its own save and subscribe controls.
 struct ActRow: View {
     let act: Act
-    var onToggleSave: () -> Void
-    var onToggleSubscribe: () -> Void
+    /// Nil where there is nobody to act on behalf of — see `EventCard`.
+    var onToggleSave: (() -> Void)?
+    var onToggleSubscribe: (() -> Void)?
 
     var body: some View {
         HStack(spacing: Metrics.tight) {
@@ -107,7 +124,22 @@ struct ActRow: View {
                         .font(.subheadline.weight(.medium))
                     BillingLabel(slot: act.billingSlot)
                 }
-                if let genres = act.artist.genres, !genres.isEmpty {
+                // Why this artist is here at all. This is the product's whole
+                // differentiator -- we read your listening and scored these
+                // artists -- and until it was on the card there was nothing
+                // separating the feed from a generic local-listings site.
+                //
+                // It takes the genres' line rather than adding a third: on a
+                // six-act festival card an extra caption per act is most of a
+                // screen, and the reason is the more useful of the two. An
+                // absent reason (an older profile, an artist we have nothing
+                // honest to say about, the signed-out backdrop) falls back to
+                // the genres exactly as before.
+                if let reason = act.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if let genres = act.artist.genres, !genres.isEmpty {
                     Text(genres.prefix(2).joined(separator: " · "))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -121,26 +153,30 @@ struct ActRow: View {
             // would not say which act it acts on. The label states the action
             // and the toggle state carries the current value, so VoiceOver
             // does not read a stale "on/off" alongside a changing verb.
-            Button(action: onToggleSubscribe) {
-                Image(systemName: act.isSubscribed ? "bell.fill" : "bell")
+            if let onToggleSubscribe {
+                Button(action: onToggleSubscribe) {
+                    Image(systemName: act.isSubscribed ? "bell.fill" : "bell")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(act.isSubscribed ? Color.accentColor : Color.secondary)
+                .accessibilityLabel("Alerts for \(act.artist.name)")
+                .accessibilityValue(act.isSubscribed ? "On" : "Off")
+                .accessibilityAddTraits(act.isSubscribed ? [.isButton, .isSelected] : .isButton)
+                .accessibilityHint(act.isSubscribed
+                                   ? "Double tap to stop alerts when this artist announces a show"
+                                   : "Double tap to get alerts when this artist announces a show")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(act.isSubscribed ? Color.accentColor : Color.secondary)
-            .accessibilityLabel("Alerts for \(act.artist.name)")
-            .accessibilityValue(act.isSubscribed ? "On" : "Off")
-            .accessibilityAddTraits(act.isSubscribed ? [.isButton, .isSelected] : .isButton)
-            .accessibilityHint(act.isSubscribed
-                               ? "Double tap to stop alerts when this artist announces a show"
-                               : "Double tap to get alerts when this artist announces a show")
 
-            Button(action: onToggleSave) {
-                Image(systemName: act.isSaved ? "bookmark.fill" : "bookmark")
+            if let onToggleSave {
+                Button(action: onToggleSave) {
+                    Image(systemName: act.isSaved ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(act.isSaved ? Color.accentColor : Color.secondary)
+                .accessibilityLabel("Save \(act.artist.name)")
+                .accessibilityValue(act.isSaved ? "Saved" : "Not saved")
+                .accessibilityAddTraits(act.isSaved ? [.isButton, .isSelected] : .isButton)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(act.isSaved ? Color.accentColor : Color.secondary)
-            .accessibilityLabel("Save \(act.artist.name)")
-            .accessibilityValue(act.isSaved ? "Saved" : "Not saved")
-            .accessibilityAddTraits(act.isSaved ? [.isButton, .isSelected] : .isButton)
         }
         // Without this the two icon buttons swallow taps meant for the row's
         // navigation link.
