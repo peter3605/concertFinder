@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { ActionError } from '@/components/action-error';
+import { SpotifyAttribution } from '@/components/spotify-attribution';
 import { mutatingFetch } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
 
@@ -193,7 +194,7 @@ export default function SubscribePage() {
           )}
           {results.length > 0 && (
             <p className="mt-3 text-xs text-muted-foreground">
-              Artist results powered by Spotify
+              <SpotifyAttribution label="Artist results powered by" />
             </p>
           )}
         </CardContent>
