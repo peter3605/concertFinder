@@ -83,6 +83,23 @@ jobs:
       - name: Go test
         run: go test ./...
 
+      # Known-vulnerability scan. `deploy` needs this job, so a finding blocks
+      # the deploy rather than merely annotating it — which is the point: this
+      # repo deploys on merge, so there is no later gate.
+      #
+      # govulncheck reports only vulnerabilities your code can actually reach,
+      # and it reports them against the toolchain in PATH — so the standard
+      # library half of any failure here is fixed by bumping `go-version`
+      # above, not by changing code. The floating '1.25' picks up each patch
+      # release, which is where the Go team lands security backports; that is
+      # what keeps this green without a standing chore.
+      #
+      # Not pinned to a govulncheck version: the tool is a scanner, its
+      # database is fetched at run time either way, and pinning it means the
+      # scan silently ages while looking like it still runs.
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       # The database-backed tests skip silently without TEST_DATABASE_URL, so
       # assert they actually ran rather than trusting a green suite.
       - name: Assert the database-backed tests were not skipped

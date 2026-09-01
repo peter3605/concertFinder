@@ -135,6 +135,36 @@ if [ ! -x "$repo/scripts/prune-images.sh" ]; then
 fi
 pass "prune-images.sh is executable"
 
+# 9a. restore-drill.sh is the far end of the same family, and the one with the
+#     longest fuse: it is not run by a deploy or by a timer, it is run by a
+#     human on the worst day of the quarter. Nothing else would ever discover a
+#     syntax error in it. Parsing it here costs nothing and is the only
+#     automated attention it will ever get.
+if ! out=$(bash -n "$repo/scripts/restore-drill.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/restore-drill.sh has a syntax error"
+fi
+pass "restore-drill.sh parses"
+
+if [ ! -x "$repo/scripts/restore-drill.sh" ]; then
+    fail "scripts/restore-drill.sh is not executable — run: chmod +x scripts/restore-drill.sh"
+fi
+pass "restore-drill.sh is executable"
+
+# 9b. The drill restores what backup-db.sh dumps, with the same tool, so the
+#     two must agree on the Postgres major version. pg_restore refuses an
+#     archive from a newer server, and the drill is exactly the moment that
+#     mismatch must not be discovered.
+backup_img=$(grep -o 'PG_IMAGE:-[^}]*' "$repo/scripts/backup-db.sh" | head -1 | cut -d- -f2-)
+drill_img=$(grep -o 'PG_IMAGE:-[^}]*' "$repo/scripts/restore-drill.sh" | head -1 | cut -d- -f2-)
+if [ "$backup_img" != "$drill_img" ]; then
+    fail "backup-db.sh pins PG_IMAGE=$backup_img but restore-drill.sh pins $drill_img.
+      pg_restore refuses an archive produced by a newer server, so a drill
+      against the real dumps would fail for a reason that has nothing to do
+      with the backups."
+fi
+pass "backup-db.sh and restore-drill.sh pin the same Postgres image ($backup_img)"
+
 # 10. The compose file must pin the api image name, because prune-images.sh and
 #     the deploy's SHA tagging both address it by name. Without `image:`,
 #     compose derives it from the project directory, so a rename of

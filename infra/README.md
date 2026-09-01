@@ -234,8 +234,21 @@ State is **local**, in `infra/terraform.tfstate` (gitignored). Contains
 plaintext SES SMTP creds and the break-glass private key, so back it up
 somewhere secure (1Password vault, encrypted external drive). It no longer
 contains a database password — that moved to the Neon console when RDS went
-away. If this ever grows to multiple contributors, migrate to an S3 backend +
-DynamoDB lock table.
+away.
+
+**The S3 backend is written and ready to adopt, and has not been applied.**
+`bootstrap/` creates the state bucket (versioned, encrypted, TLS-only, 90-day
+noncurrent expiry) and `backend.tf.example` is the block to copy in afterwards;
+the full procedure is in `docs/aws-deploy.md`, "Terraform state". It is not
+`backend.tf` already because a backend block makes `terraform init` demand a
+bucket that does not exist yet, which would break `validate` for everyone until
+someone ran the bootstrap.
+
+Locking is S3-native (`use_lockfile`, Terraform ≥ 1.11) rather than the
+DynamoDB table older guides describe — there is no table to create and none to
+pay for. Note this module's `required_version` floor is still 1.6, which
+predates that feature: bump it when you adopt the backend, or the lock is
+silently absent for anyone on an older CLI.
 
 ## Break-glass SSH
 
@@ -243,6 +256,15 @@ Terraform writes a private key to `infra/.secrets/concertfinder-breakglass.pem`
 (gitignored, mode 0600). Never used in normal operation — SSM is the primary
 admin channel. Only touch this if SSM Agent on the box has broken and you
 need to fix it before it can be replaced.
+
+**The key alone is not access.** Port 22 has no ingress rule, so that key has
+never been usable, and an incident is the wrong time to find that out. The
+lever is `ssh_ingress_cidrs` in `terraform.tfvars`: set it to your own `/32`,
+apply, do the work, set it back to `[]` and apply again. Empty is the default
+and the intended steady state, the variable refuses `0.0.0.0/0`, and the
+dynamic block produces no rule at all when the list is empty — so this is a
+lever, not a change in posture. `docs/aws-deploy.md`, "Break-glass access", has
+the commands.
 
 ## Common operations
 

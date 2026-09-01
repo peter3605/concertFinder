@@ -70,3 +70,17 @@ ses_dns_records_created = false
 # REPLACE_ME and render-env.sh fails the next deploy until you run
 # ./scripts/set-secrets.sh. That applies even if you never ship the app: mark
 # it unused with [-] once. Do not apply until you have the key in hand.
+
+# --- Break-glass SSH (docs/aws-deploy.md, "Break-glass access") --------------
+#
+# Leave this unset. Empty is the deployed posture: no port-22 rule at all, and
+# SSM Session Manager (`aws ssm start-session --target <id>`) is the admin
+# channel -- the same one the deploy already uses. The key pair in ec2.tf is
+# attached to the instance and unusable precisely because nothing opens the
+# port.
+#
+# Set it only while SSM itself is unavailable or its agent is wedged, scoped to
+# a single address, and set it back to [] and apply again afterwards. The
+# variable refuses 0.0.0.0/0.
+#
+# ssh_ingress_cidrs = ["203.0.113.4/32"]

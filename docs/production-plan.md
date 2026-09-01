@@ -769,36 +769,99 @@ Each is small and independent:
 Nothing here is code. Several have multi-week lead times, so they should already
 be moving while the phases above are implemented.
 
+**What the Phase 4 session did.** Four of these had a repo-side half that was
+holding the human half up: the scan and the config that make Dependabot and
+`govulncheck` real, a state backend that could not be adopted without a bucket,
+an SSH lever that did not exist, and a restore drill nobody had a command for.
+Those are now written, validated, and **not applied** — every item below is
+still a human's to tick. What changed is that most of them are now one command
+rather than an afternoon. Details under *Decisions taken*.
+
 - [ ] **Rotate the Ticketmaster API key, and the Songkick one too**, after P0-1
       ships. Assume both are in log history — Songkick's leaked on every
       unexpected status as well as on transport errors.
+      → `./scripts/set-secrets.sh`, then a deploy. **The deploy is not
+      optional**: Parameter Store is read once per deploy by `render-env.sh`, so
+      a rotated parameter changes nothing until `.env` is re-rendered. Procedure
+      and the safe ordering are in `docs/aws-deploy.md`, "Rotating a credential".
 - [ ] **Escrow `ENCRYPTION_KEY`** somewhere that is not SSM. Every backup of
       `users` is AES-GCM ciphertext; losing that one parameter makes them
       unrecoverable.
+      → `docs/aws-deploy.md`, "Escrowing `ENCRYPTION_KEY`", has the one-line
+      read. It also records why this key is *escrowed* rather than rotated:
+      nothing re-encrypts stored refresh tokens, so changing it does not
+      invalidate sessions, it breaks every existing user's Spotify connection
+      permanently.
 - [ ] **Do one timed restore drill** into a scratch Neon branch. The elapsed time
       is the real RTO. The backup has never been restored.
+      → `./scripts/restore-drill.sh --check` first — it answers "is there a
+      restore point at all" in seconds, which is a live question, not a
+      rhetorical one (see the P2-10 note in the Phase 2 log). Then
+      `./scripts/restore-drill.sh '<scratch-branch-url>'` for the timed drill:
+      it refuses a target that already holds users, asserts the four
+      irreplaceable tables came back with rows, and prints the RTO. Record the
+      number in `docs/aws-deploy.md`.
 - [ ] **Submit the Spotify Extended Quota Mode application.** Multi-week
       turnaround, approval not guaranteed, and nothing downstream shortens it.
       This is the long pole.
+      → Still entirely yours; it is a form about a product, not a repo change.
+      The answers it wants are already true and already written down: no raw
+      Spotify Content is persisted (only the derived affinity profile, 24h TTL),
+      no ML training or embeddings, "Powered by Spotify" with the logo on every
+      surface showing derived data, and a documented revoke path
+      (`DELETE /me/spotify-connection`). `CLAUDE.md`'s constraints section is the
+      source for all four.
 - [ ] **Reissue the APNs key as Sandbox & Production**, then set
       `APNS_ENVIRONMENT=sandbox,production` once. See `docs/ios-app-plan.md` §0.
 - [ ] **Build the allowlisted demo account** with plausible listening history and
       verify sign-in end to end on a clean device.
 - [ ] **Move Terraform state to an S3 backend with locking.** It is local and
       unlocked today, holding the SES SMTP secret and the break-glass key.
+      → **Written, not applied.** `infra/bootstrap/` creates the bucket
+      (versioned, SSE, public access blocked, TLS-only bucket policy, 90-day
+      noncurrent expiry, `prevent_destroy`); `infra/backend.tf.example` is the
+      block to copy in afterwards. Locking is S3-native `use_lockfile`, so there
+      is no DynamoDB table to create or pay for. Adoption is four commands in
+      `docs/aws-deploy.md`, "Terraform state" — **including deleting the local
+      `terraform.tfstate` afterwards**, which still contains the SMTP password
+      and the private key whether or not the backend is live.
 - [ ] **Add port-22 ingress to the security group, or document its absence** —
       the break-glass key pair is attached but unusable, and that is a thing to
       learn before an outage, not during one.
-- [ ] **Enable Dependabot** (gomod, npm, docker, actions) and add `govulncheck
+      → Both, which was the honest answer. `var.ssh_ingress_cidrs` (default
+      `[]`, refuses `0.0.0.0/0`) drives a `dynamic "ingress"` block that emits
+      no rule at all when empty, so the deployed posture is unchanged and the
+      emergency is a tfvars line plus an apply rather than a security-group
+      edit at 3am. Documented in `docs/aws-deploy.md`, "Break-glass access", and
+      `infra/README.md`. The security group's own `description` was deliberately
+      left stale: it is immutable in AWS, so editing that string forces a
+      replacement of the group and a re-attach of the instance.
+- [x] **Enable Dependabot** (gomod, npm, docker, actions) and add `govulncheck
       ./...` to the CI test job.
+      → Done, and it found things. `.github/dependabot.yml` covers all four
+      ecosystems, grouped and weekly because every merge here deploys.
+      `govulncheck` is a step in the `test` job, which `deploy` needs, so a
+      finding blocks the ship. It flagged three callable vulnerabilities on the
+      current tree — chi ×2 and x/text — which were fixed in the same commit by
+      bumping those two modules. The scan is clean under the toolchain CI
+      actually uses.
 - [ ] **App Store Connect**: privacy labels, screenshots, review notes. §9 and
       §10.1.4 of `docs/ios-app-plan.md` already have the text.
 - [ ] **Decide what launch means at ~20 concurrent users.** A public listing
       against Ticketmaster's 5000/day ceiling degrades everyone's feed silently.
       A waitlist with a per-day admission cap is the honest version and doubles
       as capacity control.
-
----
+      → Not decided here; it is a product call and the rules of engagement say
+      not to invent one. The arithmetic that constrains it, for whoever does:
+      the account ceiling is `RATE_CAP_TM_ACCOUNT_DAILY` (5000, matching
+      Ticketmaster's per-key limit), a cold scan costs roughly one call per
+      artist up to `spotify.MaxScoredArtists` (200), and `concert_cache`
+      (`DefaultCacheTTL`, 12h) is what makes the second user in a city nearly
+      free. So the ceiling is ~25 cold scans/day in the worst case and far more
+      in the realistic one — and `rate_ledger_account` means exceeding it
+      arrives as `retry_after`, a *visible* wait, rather than as upstream 403s
+      that look like artists with no shows. That guard is the thing that makes a
+      staged admission survivable; it is not a reason to skip staging it.
 
 ## Explicitly out of scope for this run
 
@@ -1079,6 +1142,69 @@ _Append one line per judgement call, with the task ID._
   workaround because `qlmanage` top-aligns a non-square SVG in a square
   thumbnail; the recipe is a comment in `og.svg` rather than tribal knowledge.
 
+- **P4 / govulncheck** — the scan found three callable vulnerabilities on the
+  current tree and they were fixed in this commit rather than filed:
+  `github.com/go-chi/chi/v5` v5.1.0 → v5.3.0 (GO-2026-5777, GO-2026-5775) and
+  `golang.org/x/text` v0.38.0 → v0.39.0 (GO-2026-5970, reached through
+  `pgxpool.NewWithConfig`). Dependency *upgrades*, not new dependencies, so rule
+  5 does not apply. `go build`, `go vet` and `go test ./...` are green on the
+  bumped versions.
+- **P4 / govulncheck toolchain** — the remaining findings on this laptop (17,
+  all standard library) are an artifact of the local Go being 1.26.1 against a
+  1.26.7 release line, not of this repo. Under `GOTOOLCHAIN=go1.25.14` — which
+  is what `setup-go: '1.25'` resolves to in CI — the scan reports **no
+  vulnerabilities**, so the new gate starts green. That is also why `go-version`
+  was left floating on the minor rather than pinned to a patch: the floating
+  form is what picks up the Go team's security backports, and stdlib findings
+  here are fixed by bumping the toolchain, not the code.
+- **P4 / Dependabot grouping** — one grouped PR per ecosystem per week, not the
+  per-dependency default. Every merge to `main` deploys, so an ungrouped
+  Dependabot is an ungrouped stream of container rebuilds on a 2 GB instance.
+  `ios/` is excluded: no SPM dependencies in `ios/project.yml`, and the app
+  ships through Xcode rather than this pipeline. The `docker` ecosystem is not
+  cosmetic — all three Dockerfile stages are pinned by **digest**, which is
+  reproducible and therefore frozen, so nothing else would ever move the Go
+  toolchain or the distroless base.
+- **P4 / state backend** — `infra/bootstrap/` is a separate root module with
+  permanently **local** state, because a backend cannot store its own state in a
+  bucket it has not yet created. That is safe there and not in `infra/`: the
+  bootstrap manages one bucket and holds no secret, while the root state holds
+  the SES SMTP password and the break-glass private key in cleartext. Locking is
+  S3-native `use_lockfile` rather than a DynamoDB table — no table to create, no
+  table to pay for — which needs Terraform ≥ 1.11 against a `required_version`
+  floor of 1.6; the floor is left alone until the backend is actually adopted
+  and both halves are noted in `backend.tf.example`.
+- **P4 / backend.tf.example, not backend.tf** — a live backend block makes
+  `terraform init` demand a bucket that does not exist, which would break
+  `terraform validate` (a verification lane) for everyone until someone ran the
+  bootstrap. Matching this repo's existing `terraform.tfvars.example`
+  convention.
+- **P4 / port 22** — the task offered "add ingress **or** document its absence"
+  and the answer is both: `var.ssh_ingress_cidrs` defaults to `[]` and drives a
+  `dynamic "ingress"` block that emits no rule when empty, so the deployed
+  posture is unchanged and a plan against the live account shows nothing. A
+  `validation` rejects `0.0.0.0/0` outright. The security group's own
+  `description` still says "SSH is deliberately closed" even though that is now
+  conditional: `description` is immutable in AWS, so editing it forces Terraform
+  to **replace** the group and re-attach the instance — an outage window in
+  exchange for a comment. A comment above the resource records why the string
+  was left alone.
+- **P4 / restore drill** — `scripts/restore-drill.sh` rather than a runbook
+  paragraph, because the two failures worth catching are both invisible to a
+  human following steps: a restore that produces an empty schema exits 0, and a
+  drill run against a mispasted production URL with `--clean --if-exists` is an
+  outage. The script asserts row counts on the four tables that do not rebuild
+  themselves and refuses a target that already holds users. It is added to
+  `check-deploy-config.sh` (parses, executable) for the same reason
+  `backup-db.sh` is — it never runs locally and nothing else would ever discover
+  a syntax error in it — plus one new check that it and `backup-db.sh` pin the
+  same `PG_IMAGE`, since `pg_restore` refuses an archive from a newer server and
+  the drill is precisely when that must not be found out. The preflight is 19
+  checks now, and the mismatch check was verified by inducing it.
+- **P4 / launch capacity** — not decided. The rules of engagement say a product
+  decision this file does not answer is skipped rather than invented; the
+  arithmetic that constrains it is recorded under the Phase 4 item instead.
+
 ## Deferred
 
 _Append anything skipped, with the task ID and one sentence of why._
@@ -1277,3 +1403,59 @@ _One line per session: date, phases completed, anything the next session needs._
   so it will look empty until real accounts have scanned real cities — worth
   knowing before judging the login page, and worth checking again before App
   Review sees it.
+
+- **2026-09-01 — Phase 4 prepared** (the repo-side half of P4), on branch
+  `production-hardening`. Phase 4 is a human checklist, so this session did the
+  four items that were blocked on something living in the repo and left the
+  rest ticked-by-a-human. Nothing was applied and nothing was deployed. No
+  subagents — the work is four small lanes that all end in the same docs.
+
+  New files: `.github/dependabot.yml`, `scripts/restore-drill.sh`,
+  `infra/bootstrap/main.tf`, `infra/backend.tf.example`.
+
+  What landed:
+  1. **Dependabot + `govulncheck`**, as specified. The scan is a step in the
+     `test` job, which `deploy` needs, so a finding blocks the ship rather than
+     annotating it. It found three *callable* vulnerabilities on the current
+     tree — chi ×2, x/text ×1 — fixed here by bumping both modules; full suite
+     green afterwards, with a live Postgres and without one.
+  2. **The S3 state backend**, written and not applied: `infra/bootstrap/`
+     creates the bucket, `infra/backend.tf.example` is the block to copy in.
+     Four commands in `docs/aws-deploy.md`, "Terraform state" — including
+     deleting the local `terraform.tfstate`, which holds the SES SMTP password
+     and the break-glass private key whether or not the backend is adopted.
+  3. **Port 22**: both halves of "add ingress or document its absence".
+     `var.ssh_ingress_cidrs` (default `[]`, refuses `0.0.0.0/0`) feeds a
+     `dynamic "ingress"` that emits no rule when empty, so a plan against the
+     live account shows nothing.
+  4. **`scripts/restore-drill.sh`**, which turns the never-done restore drill
+     into one command. `--check` alone answers whether a restore point exists,
+     which is the open question from Phase 2's P2-10 note.
+
+  Also documented, because each was a human task with no written procedure:
+  credential rotation (and that it does nothing until a deploy re-renders
+  `.env`), why `ENCRYPTION_KEY` is escrowed rather than rotated, restore
+  drills, and break-glass access. All in `docs/aws-deploy.md`.
+
+  Verified, serially: `gofmt`, `go build`, `go vet`, `go test ./...` — green
+  with a live Postgres (confirmed the `internal/db` tests ran rather than
+  skipped) and without one; `govulncheck` clean under `GOTOOLCHAIN=go1.25.14`,
+  which is what CI resolves; `./scripts/check-deploy-config.sh`, now 19 checks,
+  with the new `PG_IMAGE` agreement check verified by inducing a mismatch;
+  `terraform fmt -check` and `terraform validate` on both `infra/` and
+  `infra/bootstrap/`; all three workflow/Dependabot YAML files parsed. Web and
+  iOS were untouched, so those lanes were not run.
+
+  `CLAUDE.md` gained one entry: that `backup-db.sh` and `restore-drill.sh` must
+  pin the same Postgres image, and that the drill refuses a target holding
+  users. The CI line now names `govulncheck` and records that stdlib findings
+  are fixed by bumping the toolchain, not the code.
+
+  **For the human, in priority order.** The three oldest items are still
+  outstanding and two of them are getting older: rotate the Ticketmaster and
+  Songkick keys (P0-1 shipped four commits ago); confirm the nightly backup is
+  alive with `./scripts/restore-drill.sh --check` before assuming there is a
+  restore point at all; and click the SNS subscription confirmation links that
+  have been in `PendingConfirmation` since Phase 0. Then the long pole: the
+  Spotify Extended Quota Mode application, which nothing downstream shortens.
+
