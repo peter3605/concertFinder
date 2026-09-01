@@ -22,7 +22,12 @@ actor APIClient {
     private let baseURL: URL
     private let session: URLSession
     private let tokens: TokenStore
-    private weak var invalidationHandler: (any SessionInvalidationHandler)?
+    /// Strong. A weak reference here made the handler's lifetime a property of
+    /// whoever happened to hold it, and the answer was "nobody" — it was gone
+    /// before the first request and every 401 went unreported. The cycle this
+    /// would otherwise close (client → handler → controller → client) is
+    /// broken at the controller instead, where it is visible.
+    private var invalidationHandler: (any SessionInvalidationHandler)?
 
     /// Identifies the client on every request, e.g. "ios/1.0.0 (build 42)".
     /// The server logs it; when something breaks for app users only, this is

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/peterho/concertfinder/internal/concerts"
 )
 
@@ -102,5 +104,31 @@ func TestPushMaxAttemptsIsBounded(t *testing.T) {
 	}
 	if PushMaxAttempts <= 0 || PushMaxAttempts > 5 {
 		t.Fatalf("PushMaxAttempts = %d, want a small positive bound", PushMaxAttempts)
+	}
+}
+
+// An event with no acts is not a bad notification, it is a panic:
+// notificationFor indexes Acts[0], and a panic inside Work takes the
+// goroutine river is running the job on rather than failing the job, so every
+// event queued behind it in the same batch is lost silently. withActs is what
+// keeps that to a skipped event and a log line.
+func TestWithActsDropsEmptyEventsAndKeepsTheRest(t *testing.T) {
+	events := []concerts.Event{
+		{EventKey: "ek1", Acts: []concerts.Act{act("Turnstile", "dk1")}},
+		{EventKey: "ek2"},
+		{EventKey: "ek3", Acts: []concerts.Act{act("Ceremony", "dk3")}},
+	}
+
+	kept := withActs(events, uuid.New())
+
+	if len(kept) != 2 {
+		t.Fatalf("kept %d events, want 2", len(kept))
+	}
+	if kept[0].EventKey != "ek1" || kept[1].EventKey != "ek3" {
+		t.Errorf("kept = %q, %q; want ek1, ek3", kept[0].EventKey, kept[1].EventKey)
+	}
+	// The point of the guard: what survives can be handed to notificationFor.
+	for _, ev := range kept {
+		notificationFor(ev)
 	}
 }

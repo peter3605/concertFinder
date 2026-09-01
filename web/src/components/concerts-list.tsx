@@ -11,7 +11,18 @@ type Props = {
   onToggleSubscribe: (artistID: string, artistName: string, currentlySubscribed: boolean) => void;
   emptyMessage?: string;
   firstTimeMessage?: string;
+  // False for lists that are not built by a scan. /me/saved-concerts reads
+  // the saves table directly and never sends computed_at, so an empty saved
+  // list otherwise reads as a feed still being built.
+  awaitsFirstScan?: boolean;
 };
+
+// A scan that produces nothing before MAX_REFRESH_POLLS gives up leaves
+// refreshing:false with still no snapshot behind it. Requiring refreshing
+// here meant that state matched neither branch and the page rendered the
+// bare words "0 shows".
+const STALLED_MESSAGE =
+  'Still building your feed — this is taking longer than usual. Reload to keep waiting.';
 
 export function ConcertsList({
   data,
@@ -19,9 +30,10 @@ export function ConcertsList({
   onToggleSubscribe,
   emptyMessage = 'No matches. Try clearing filters or widening the radius.',
   firstTimeMessage = 'Setting up your feed for the first time — this takes a minute or two. New results will appear automatically.',
+  awaitsFirstScan = true,
 }: Props) {
-  const isFirstTime = data.count === 0 && !data.computed_at && data.refreshing;
-  const isEmpty = data.count === 0 && data.computed_at;
+  const isFirstTime = awaitsFirstScan && data.count === 0 && !data.computed_at;
+  const isEmpty = data.count === 0 && !isFirstTime;
   // A partial scan and a genuinely quiet area produce the same short list;
   // say which one this is rather than letting the user assume the worst.
   const isPartial = data.complete === false && !data.refreshing;
@@ -55,11 +67,11 @@ export function ConcertsList({
 
       {isFirstTime && (
         <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
-          {firstTimeMessage}
+          {data.refreshing ? firstTimeMessage : STALLED_MESSAGE}
         </p>
       )}
 
-      {isEmpty && !isFirstTime && (
+      {isEmpty && (
         <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
           {emptyMessage}
         </p>

@@ -70,13 +70,20 @@ struct MainTabView: View {
                 tabLayout
             }
         }
-        // A tapped notification names an event. Switching to the feed is the
-        // honest minimum — the event may not be in the current filtered view,
-        // and silently clearing the user's filters to reveal it would be a
-        // surprising thing to do to their screen.
+        // A tapped notification names an event, and the tap is a request to
+        // see *that* card. Switching tabs was as far as this went, so the
+        // notification opened a feed the user then had to scroll for.
+        //
+        // Clearing the key afterwards is the other half: `onChange` fires on a
+        // change, so leaving the previous key in place made a second
+        // notification about the same event a silent no-op.
         .onChange(of: container.pendingEventKey) { _, key in
-            guard key != nil else { return }
+            guard let key else { return }
             selection = .feed
+            Task {
+                await feed.openEvent(withKey: key)
+                container.pendingEventKey = nil
+            }
         }
     }
 

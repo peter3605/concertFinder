@@ -112,7 +112,7 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	}
 
 	var sent, retired int
-	for _, ev := range events {
+	for _, ev := range withActs(events, user.ID) {
 		n := notificationFor(ev)
 		for _, d := range devices {
 			err := w.APNs.Send(ctx, addressedTo(n, d))
@@ -200,6 +200,26 @@ func forEnvironment(devices []db.Device, served []string, userID uuid.UUID) []db
 	return kept
 }
 
+// withActs drops events carrying no acts. GroupEvents folds rows sharing an
+// event_key so everything it returns should have at least one, which makes
+// this defence rather than a case we expect -- but the failure it prevents is
+// out of proportion to the check. notificationFor indexes Acts[0] three
+// times, and a panic there does not fail the job: it takes down the goroutine
+// river runs Work on, losing the notifications for every event after this one
+// in the same batch, and the user is told nothing. Skipping costs one.
+func withActs(events []concerts.Event, userID uuid.UUID) []concerts.Event {
+	kept := make([]concerts.Event, 0, len(events))
+	for _, ev := range events {
+		if len(ev.Acts) == 0 {
+			slog.Warn("push: skipping event with no acts", "user", userID, "event", ev.EventKey)
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	return kept
+}
+
+// Callers must pass an event with at least one act; withActs guarantees it.
 func notificationFor(ev concerts.Event) push.Notification {
 	title := ev.Acts[0].Artist.Name
 	if len(ev.Acts) > 1 {
@@ -209,10 +229,7 @@ func notificationFor(ev concerts.Event) push.Notification {
 	if ev.City != "" {
 		body = fmt.Sprintf("%s, %s · %s", ev.Venue, ev.City, ev.Date.Format("Mon, Jan 2"))
 	}
-	var dedupKey string
-	if len(ev.Acts) > 0 {
-		dedupKey = ev.Acts[0].DedupKey
-	}
+	dedupKey := ev.Acts[0].DedupKey
 	return push.Notification{
 		// Collapse on the event so a re-push for the same show replaces an
 		// undelivered one rather than stacking.

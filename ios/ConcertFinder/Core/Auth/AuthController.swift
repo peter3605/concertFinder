@@ -34,7 +34,12 @@ final class AuthController: NSObject {
     /// a closure rather than a delegate so AuthController does not depend on
     /// the push layer.
     var onSignIn: (@MainActor (Me) -> Void)?
-    var onSignOut: (@MainActor () -> Void)?
+    /// Async and awaited rather than fire-and-forget: it deregisters the APNs
+    /// device, which is an authenticated call, and on the deliberate sign-out
+    /// path the very next line throws the token away. A `Task` here raced that
+    /// and the loser came back 401 — reported as a session expiry, which
+    /// stamps "your session expired" over a sign-out the user asked for.
+    var onSignOut: (@MainActor () async -> Void)?
 
     init(api: APIClient, tokens: KeychainTokenStore, baseURL: URL) {
         self.api = api
@@ -183,6 +188,10 @@ final class AuthController: NSObject {
     // MARK: - Sign out
 
     func signOut() async {
+        // First, while the token still exists: the handler clears the
+        // in-memory models and deregisters the device, and the second of
+        // those needs a session the lines below are about to destroy.
+        await onSignOut?()
         // Best effort: the local session must be cleared even if the network
         // call fails, or a user who taps "sign out" offline stays signed in.
         try? await api.logout()
@@ -192,14 +201,22 @@ final class AuthController: NSObject {
         // A different account on this device gets its own first run.
         FirstRunTracker.reset()
         state = .signedOut
-        onSignOut?()
     }
 
     /// Called by APIClient when any request 401s.
+    ///
+    /// The same teardown as `signOut`, minus the network calls the dead
+    /// session can no longer make. Skipping it left the previous account's
+    /// concerts, saves and artists on screen behind the login sheet, and
+    /// their snapshot on disk for the *next* account to render on launch.
     func handleSessionExpiry() {
         state = .signedOut
         authError = .unauthorized
-        onSignOut?()
+        Task {
+            await onSignOut?()
+            try? await CachedProfile.clear()
+            await SnapshotCache.shared.clear()
+        }
     }
 
     func updateProfile(_ me: Me) {

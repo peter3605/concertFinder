@@ -32,6 +32,13 @@ function formatDay(iso: string): string {
 // save and subscribe controls because both are per-artist.
 export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
   const [expanded, setExpanded] = useState(false);
+  // The server groups by event_key and every event it emits has at least one
+  // act, so this is defence rather than a case we expect. It is worth having
+  // because the alternative is not a bad card: `acts[0]` on an empty array is
+  // undefined, reading `.artist` off it throws during render, and React takes
+  // the whole SPA to the error boundary -- one malformed row would blank the
+  // entire feed rather than cost one card.
+  if (event.acts.length === 0) return null;
   const multi = event.acts.length > 1;
   const shown = expanded ? event.acts : event.acts.slice(0, VISIBLE_ACTS);
   const hidden = event.acts.length - shown.length;

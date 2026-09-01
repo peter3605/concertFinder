@@ -115,6 +115,16 @@ export const EMPTY_FILTERS: FiltersState = {
   weekday: 'all',
 };
 
+// Whether the user is looking at a deliberately narrowed list. The empty
+// state's wording and the Clear filters button both hinge on this, and an
+// empty list is the moment they must agree — telling someone "Nothing saved
+// yet" while a genre pill is still lit is the one answer that is false.
+export function hasActiveFilters(f: FiltersState): boolean {
+  return (
+    f.genre !== '' || f.venue !== '' || f.dateFrom !== '' || f.dateTo !== '' || f.weekday !== 'all'
+  );
+}
+
 export const SOURCE_LABELS: Record<string, string> = {
   ticketmaster: 'Ticketmaster',
   official: 'Official site',
