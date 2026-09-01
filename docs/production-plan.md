@@ -193,7 +193,7 @@ Every item is something a user hits and cannot recover from. Two subagents: iOS
 lane and web lane.
 
 ### P1-1 — iOS: the 401 handler is deallocated the moment it is installed
-- [ ] Done
+- [x] Done
 
 **Files:** `ios/ConcertFinder/Core/Networking/APIClient.swift:25`,
 `ios/ConcertFinder/App/ConcertFinderApp.swift:77`
@@ -213,7 +213,7 @@ chose under *Decisions taken*.
 asserts the handler fires.
 
 ### P1-2 — iOS: sign-out leaves the previous account's data on screen
-- [ ] Done
+- [x] Done
 
 **Files:** `ios/ConcertFinder/Core/Auth/AuthController.swift:185`, `FeedModel`,
 `SavedModel`, `ArtistsModel`, `LocationModel`, `ios/ConcertFinder/App/ConcertFinderApp.swift`
@@ -228,7 +228,7 @@ deregisters the APNs device — today only the Settings button does.
 model is empty.
 
 ### P1-3 — iOS: four models set `error` and one screen renders it
-- [ ] Done
+- [x] Done
 
 **Files:** `FeedView.swift`, `SavedView.swift`, `ArtistsView.swift`
 
@@ -243,7 +243,7 @@ copy when the load succeeded and returned nothing. Also fix the "pull to refresh
 advice on `ContentUnavailableView`, which is not scrollable — make it a button.
 
 ### P1-4 — iOS: first-run cards are dead
-- [ ] Done
+- [x] Done
 
 **Files:** `ios/ConcertFinder/Features/Feed/FeedView.swift:78,81`
 
@@ -255,7 +255,7 @@ destination — taps do nothing and log a purple runtime warning.
 enclosing `Group` (around line 25) so every branch is covered.
 
 ### P1-5 — iOS: push deep links never open the event
-- [ ] Done
+- [x] Done
 
 **Files:** `ios/ConcertFinder/App/RootView.swift:77`, `FeedModel.swift`
 
@@ -271,7 +271,7 @@ first if it is absent, append the event to the path, then set
 land on the feed and show an `InfoBanner` saying the show is no longer listed.
 
 ### P1-6 — iOS: setting a location does not update the feed
-- [ ] Done
+- [x] Done
 
 **Files:** `ios/ConcertFinder/Features/Location/LocationModel.swift`,
 `FeedModel.swift`, `FeedView.swift`
@@ -287,7 +287,7 @@ banner.
 after a successful save from either path.
 
 ### P1-7 — iOS: pull-to-refresh spends quota and swallows the throttle
-- [ ] Done
+- [x] Done
 
 **Files:** `FeedView.swift:29`, `FeedModel.swift:165`
 
@@ -300,7 +300,7 @@ rescan to an explicit toolbar button that disables itself until `retryAfter` and
 shows the reason in a banner when refused.
 
 ### P1-8 — Web: an expired session is an unrecoverable dead end
-- [ ] Done
+- [x] Done
 
 **Files:** `web/src/lib/api.ts`, `web/src/lib/auth.tsx:33`,
 `web/src/hooks/use-concerts.ts:24`, all callers
@@ -317,7 +317,7 @@ returning. `RequireAuth` already redirects on `anon`.
 **Done when:** no `fetch(` calls remain outside `api.ts`.
 
 ### P1-9 — Web: a filter matching nothing hides the filter bar and lies
-- [ ] Done
+- [x] Done
 
 **Files:** `web/src/pages/saved.tsx:31,50`
 
@@ -330,7 +330,7 @@ the empty copy by whether any filter is active: "No saved shows match these
 filters" versus "Nothing saved yet."
 
 ### P1-10 — Web: a cold start over ten minutes renders a blank page
-- [ ] Done
+- [x] Done
 
 **Files:** `web/src/components/concerts-list.tsx:23`,
 `web/src/hooks/use-concerts.ts:96`
@@ -344,7 +344,7 @@ a snapshot, neither holds and the user sees the literal string "0 shows".
 building your feed — this is taking longer than usual. Reload to keep waiting."
 
 ### P1-11 — Web: optimistic mutations have no `catch`
-- [ ] Done
+- [x] Done
 
 **Files:** `web/src/hooks/use-concerts.ts:190,216`,
 `web/src/pages/subscribe.tsx:84,100`
@@ -359,7 +359,7 @@ exist. Add an in-flight guard keyed by `dedup_key` / `artistID` so a double-clic
 cannot land POST and DELETE out of order.
 
 ### P1-12 — Guard both unchecked first-act indexings
-- [ ] Done
+- [x] Done
 
 **Files:** `internal/jobs/push.go:204,228`,
 `web/src/components/event-card.tsx:39`
@@ -841,10 +841,59 @@ _Append one line per judgement call, with the task ID._
 - **P0-4** — `BACKUP_HEARTBEAT_URL` is optional and unset by default; the
   monitor to point it at is an account someone has to create, which is a Phase 4
   human task. Documented in `.env.example` and `docs/aws-deploy.md` §7.
+- **P1-1** — `APIClient.invalidationHandler` was made **strong**, not left
+  weak. Weak made the handler's lifetime a property of whoever happened to hold
+  it, and the answer had been "nobody" — a failure with no symptom other than
+  401s going unreported forever. Strong makes the client's own retention
+  sufficient, so a future call site that forgets to keep a reference cannot
+  reintroduce it. The cycle (client → bridge → controller → client) is broken at
+  the `[weak auth]` capture in `AppContainer.init`, where it is visible.
+- **P1-2** — `AuthController.onSignOut` changed from `(@MainActor () -> Void)?`
+  to `(@MainActor () async -> Void)?`, and `signOut()` now awaits it **before**
+  clearing the token. Deregistering the APNs device is an authenticated call, so
+  a fire-and-forget `Task` raced the token clear and the loser 401'd — stamping
+  "your session expired" over a sign-out the user asked for.
+- **P1-2** — `PushRegistrar.deregister()` nils `deviceToken` *before* the
+  request rather than after. On the expiry path that request 401s and re-enters
+  the sign-out handler; a still-set token made that a second identical request.
+  Clearing first is also what terminates the re-entry.
+- **P1-6** — `onLocationChanged` fires from `saveRadius()` as well as the two
+  paths the task named. The radius is applied upstream at fetch time, so a wider
+  one is a different result set rather than a different filter over the same one
+  — the same defect, same fix. A latent bug was fixed alongside: `location =
+  try? await api.setLocation(...)` wiped the saved location to `nil` on any
+  failure, which the view reads as "you haven't set a location".
+- **P1-8** — Public endpoints are exempted from the 401 sign-out per call site,
+  via an explicit `apiFetch(url, init, { publicEndpoint: true })`, not by URL
+  matching inside `apiFetch`. A path list in the wrapper would silently
+  misclassify any endpoint added later. Two call sites use it: `/api/site-info`
+  (privacy + terms, both linked from the login screen) and `/api/auth/me`, whose
+  401 *is* the signed-out answer and which would otherwise re-enter the
+  provider's own state update from inside its first fetch.
+- **P1-10** — `ConcertsList` gained an `awaitsFirstScan` prop (default `true`,
+  `false` on the saved page). `/api/me/saved-concerts` never sends
+  `computed_at` — `internal/http/saved_concerts.go` leaves `ComputedAt` nil and
+  hardcodes `Refreshing: false` — so the new `isFirstTime` would have told a
+  user with zero saves that their feed was still being built, contradicting
+  P1-9's "Nothing saved yet." on the same screen.
+- **P1-12** — The worker's guard is a `withActs` helper rather than an inline
+  `continue`, mirroring `forEnvironment` in the same file, so it is testable
+  without a database or an APNs client. `notificationFor`'s inconsistent inner
+  `len(ev.Acts) > 0` check (which guarded the dedup key while two other
+  indexings went unguarded) is gone in favour of a stated precondition.
 
 ## Deferred
 
 _Append anything skipped, with the task ID and one sentence of why._
+
+- **P1-7** — `FeedModel.canRescan` reads `Date()` in a computed property, so the
+  toolbar button does not re-enable at the exact instant `retryAfter` lapses; it
+  re-enables on the next model change (a poll, a pull, a filter change, a return
+  to the tab). A timer would close the gap and was judged gold-plating.
+- **P1-3/P1-5** — The error, throttle and missing-event banners render inside
+  `list`, so they are not visible when the feed is completely empty. The empty
+  state carries its own error copy and Try again button instead, which covers
+  the same ground on that screen.
 
 ## Progress log
 
@@ -861,3 +910,19 @@ _One line per session: date, phases completed, anything the next session needs._
   sit in `PendingConfirmation` until someone clicks the link on the first apply.
   Next: Phase 1, two subagents (iOS lane P1-1…P1-7, web lane P1-8…P1-11), with
   P1-12 done by the main session afterwards.
+- **2026-09-01 — Phase 1 complete** (P1-1…P1-12), on branch
+  `production-hardening`. Two subagents, iOS lane and web lane, with P1-12 done
+  by the main session. New file: `ios/ConcertFinderTests/SessionLifecycleTests.swift`
+  (covers P1-1, P1-2, P1-5, P1-6, P1-7). Also added
+  `TestWithActsDropsEmptyEventsAndKeepsTheRest` to `internal/jobs/push_test.go`.
+  Verified, serially: `go build/vet/test`, `npm --prefix web run lint && npm
+  --prefix web run build`, and `xcodegen generate && xcodebuild test` on the
+  iPhone 17 simulator — TEST SUCCEEDED, and the new suite confirmed present in
+  the xcresult rather than assumed from a green exit. `check-deploy-config.sh`
+  and terraform were not run: Phase 1 touched neither lane. Nothing applied,
+  nothing deployed.
+
+  Two things Phase 2 or 3 may want to pick up, both found while doing Phase 1
+  and both recorded above rather than acted on: `/api/me/saved-concerts` diverges
+  from `/me/concerts` by never sending `computed_at` (see the P1-10 decision),
+  and `FeedModel.canRescan` is time-dependent without a timer (see *Deferred*).

@@ -109,8 +109,12 @@ final class PushRegistrar {
     /// deletion, while the session still authorises the call.
     func deregister() async {
         guard let token = deviceToken else { return }
-        try? await api.deregisterDevice(token: token)
+        // Cleared before the call, not after. On the session-expiry path this
+        // request 401s, which re-enters the sign-out handler, which lands back
+        // here — and with the token still set that is a second identical
+        // request against a session already known to be gone.
         deviceToken = nil
+        try? await api.deregisterDevice(token: token)
     }
 }
 

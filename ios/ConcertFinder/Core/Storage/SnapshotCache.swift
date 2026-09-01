@@ -131,6 +131,13 @@ enum FilterStore {
         guard let data = try? JSONEncoder().encode(filters) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
+
+    /// Sign-out. Filters are a view onto one account's facets — a venue and a
+    /// genre the next account may have no shows in — so leaving the blob
+    /// behind hands them an empty feed they did not filter.
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 }
 
 /// Whether this account has ever been through a completed first scan.

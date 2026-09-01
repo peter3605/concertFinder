@@ -6,7 +6,7 @@ import { ConcertsList } from '@/components/concerts-list';
 import { LocationBar } from '@/components/location-bar';
 import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
-import { formatRetry, mutatingFetch } from '@/lib/api';
+import { apiFetch, formatRetry, mutatingFetch } from '@/lib/api';
 import { detectAndSaveLocation } from '@/lib/geolocate';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import { EMPTY_FILTERS, type FiltersState, type Location } from '@/lib/types';
@@ -67,7 +67,7 @@ export default function ConcertsPage() {
     (async () => {
       let loc: Location | null = null;
       try {
-        const r = await fetch('/api/me/location', { credentials: 'same-origin' });
+        const r = await apiFetch('/api/me/location');
         loc = r.ok ? ((await r.json()) as Location) : null;
       } catch {
         loc = null;

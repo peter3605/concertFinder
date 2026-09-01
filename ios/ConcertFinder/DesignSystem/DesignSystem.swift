@@ -127,20 +127,35 @@ struct InfoBanner: View {
         case incomplete
         case quotaExhausted(until: Date?)
         case offline(since: Date?)
+        /// A request failed. The models all set `error` and, until this
+        /// existed, only one screen rendered any of it.
+        case error(String)
+        /// A manual rescan was refused. `reason` is the server's own wording,
+        /// which is the half that says whether the wait is fifteen minutes or
+        /// the rest of the UTC day.
+        case throttled(reason: String?, until: Date?)
+        /// A notification's event key matched nothing in the feed.
+        case missingEvent
 
         var icon: String {
             switch self {
-            case .incomplete: "exclamationmark.triangle"
-            case .quotaExhausted: "clock"
-            case .offline: "wifi.slash"
+            case .incomplete: return "exclamationmark.triangle"
+            case .quotaExhausted: return "clock"
+            case .offline: return "wifi.slash"
+            case .error: return "exclamationmark.triangle"
+            case .throttled: return "clock"
+            case .missingEvent: return "questionmark.circle"
             }
         }
 
         var title: String {
             switch self {
-            case .incomplete: "Partial results"
-            case .quotaExhausted: "Daily limit reached"
-            case .offline: "Offline"
+            case .incomplete: return "Partial results"
+            case .quotaExhausted: return "Daily limit reached"
+            case .offline: return "Offline"
+            case .error: return "Couldn't refresh"
+            case .throttled: return "Not just yet"
+            case .missingEvent: return "Show not in your feed"
             }
         }
 
@@ -149,19 +164,29 @@ struct InfoBanner: View {
             case .incomplete:
                 // The distinction this flag exists to preserve: a quiet week
                 // and a truncated scan look identical without saying so.
-                "We couldn't check every artist in your profile this time, so there may be more shows than you see here."
+                return "We couldn't check every artist in your profile this time, so there may be more shows than you see here."
             case .quotaExhausted(let until):
                 if let until {
-                    "We've used today's search allowance. New results after \(until.formatted(date: .omitted, time: .shortened))."
-                } else {
-                    "We've used today's search allowance. Check back tomorrow."
+                    return "We've used today's search allowance. New results after \(until.formatted(date: .omitted, time: .shortened))."
                 }
+                return "We've used today's search allowance. Check back tomorrow."
             case .offline(let since):
                 if let since {
-                    "Showing concerts from \(since.relativeDescription)."
-                } else {
-                    "Showing the last concerts we loaded."
+                    return "Showing concerts from \(since.relativeDescription)."
                 }
+                return "Showing the last concerts we loaded."
+            case .error(let message):
+                return message
+            case .throttled(let reason, let until):
+                let lead = reason ?? "We checked for you a moment ago."
+                if let until {
+                    return "\(lead) You can search again after \(until.formatted(date: .omitted, time: .shortened))."
+                }
+                return "\(lead) Try again in a few minutes."
+            case .missingEvent:
+                // Both causes, because the app cannot tell them apart and
+                // guessing one would be wrong half the time.
+                return "That show isn't in your feed right now — it may have passed, or your filters may be hiding it."
             }
         }
     }

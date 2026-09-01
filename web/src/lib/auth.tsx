@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
-import { mutatingFetch } from './api';
+import { apiFetch, mutatingFetch, setSessionExpiredHandler } from './api';
 import type { Me } from './types';
 
 type AuthState =
@@ -12,13 +12,17 @@ type Ctx = {
   auth: AuthState;
   setMe: (m: Me) => void;
   logout: () => Promise<void>;
+  // The reactive counterpart to logout: the session is already gone, so
+  // there is nothing to POST to and a request would only 401 in turn.
+  signOut: () => void;
 };
 
 const AuthCtx = createContext<Ctx | null>(null);
 
 async function fetchMe(): Promise<AuthState> {
   try {
-    const r = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    // publicEndpoint: a 401 here is the signed-out answer, not an expiry.
+    const r = await apiFetch('/api/auth/me', {}, { publicEndpoint: true });
     if (r.status === 401) return { kind: 'anon' };
     if (!r.ok) return { kind: 'error', message: `HTTP ${r.status}` };
     return { kind: 'signed_in', me: (await r.json()) as Me };
@@ -41,12 +45,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMe = useCallback((m: Me) => setAuth({ kind: 'signed_in', me: m }), []);
+  const signOut = useCallback(() => setAuth({ kind: 'anon' }), []);
   const logout = useCallback(async () => {
     await mutatingFetch('/api/auth/logout', { method: 'POST' });
     setAuth({ kind: 'anon' });
   }, []);
 
-  return <AuthCtx.Provider value={{ auth, setMe, logout }}>{children}</AuthCtx.Provider>;
+  // Registered in an effect, and cleared on unmount, so api.ts can only ever
+  // reach a mounted provider. RequireAuth turns the resulting 'anon' into the
+  // redirect to /login for free.
+  useEffect(() => {
+    setSessionExpiredHandler(signOut);
+    return () => setSessionExpiredHandler(null);
+  }, [signOut]);
+
+  return <AuthCtx.Provider value={{ auth, setMe, logout, signOut }}>{children}</AuthCtx.Provider>;
 }
 
 export function useAuth() {

@@ -4,7 +4,7 @@ import { FilterBar } from '@/components/filter-bar';
 import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
 import { useDocumentTitle } from '@/lib/use-document-title';
-import { EMPTY_FILTERS, type FiltersState } from '@/lib/types';
+import { EMPTY_FILTERS, hasActiveFilters, type FiltersState } from '@/lib/types';
 
 export default function SavedPage() {
   useDocumentTitle('Saved');
@@ -28,7 +28,10 @@ export default function SavedPage() {
         </p>
       </div>
       <ActionError message={actionError} onDismiss={dismissActionError} />
-      {state.kind === 'loaded' && state.data.events.length > 0 && (
+      {/* Gated on the load, not on the results: hiding the bar when a filter
+          matches nothing took away the only control that could undo it, and
+          left "Nothing saved yet" claiming the saves themselves were gone. */}
+      {state.kind === 'loaded' && (
         <FilterBar
           filters={filters}
           facets={state.data.facets.genres}
@@ -47,7 +50,12 @@ export default function SavedPage() {
           data={state.data}
           onToggleSave={toggleSaved}
           onToggleSubscribe={toggleSubscribed}
-          emptyMessage="Nothing saved yet. Star a concert from the main list to add it here."
+          awaitsFirstScan={false}
+          emptyMessage={
+            hasActiveFilters(filters)
+              ? 'No saved shows match these filters.'
+              : 'Nothing saved yet. Star a concert from the main list to add it here.'
+          }
         />
       )}
     </div>

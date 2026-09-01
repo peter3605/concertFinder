@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { mutatingFetch } from '@/lib/api';
+import { apiFetch, mutatingFetch } from '@/lib/api';
 import type { Act, ConcertsResponse, FiltersState } from '@/lib/types';
 
 type State =
@@ -20,7 +20,7 @@ function buildQuery(f: FiltersState): string {
 
 async function fetchFeed(endpoint: string, query: string): Promise<State> {
   try {
-    const r = await fetch(`${endpoint}${query}`, { credentials: 'same-origin' });
+    const r = await apiFetch(`${endpoint}${query}`);
     if (!r.ok) return { kind: 'error', message: `HTTP ${r.status}` };
     return { kind: 'loaded', data: (await r.json()) as ConcertsResponse };
   } catch (e) {
@@ -65,6 +65,13 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
   const [actionError, setActionError] = useState<string | null>(null);
   const generation = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A double-click on one control must not put a POST and a DELETE in flight
+  // together: whichever response the server handles last decides the stored
+  // state, and that is not necessarily the last click. Each set is keyed by
+  // what its request addresses — a dedup_key for a save, an artist for a
+  // subscription — which is also the unit the optimistic patch rewrites.
+  const savePending = useRef(new Set<string>());
+  const subscribePending = useRef(new Set<string>());
 
   useEffect(() => {
     const myGen = ++generation.current;
@@ -184,23 +191,33 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
   }
 
   async function toggleSaved(dedupKey: string, currentlySaved: boolean) {
+    if (savePending.current.has(dedupKey)) return;
+    savePending.current.add(dedupKey);
     setActionError(null);
     const next = !currentlySaved;
     patchConcert(dedupKey, { saved: next });
-    const r = next
-      ? await mutatingFetch('/api/me/saved-concerts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dedup_key: dedupKey }),
-        })
-      : await mutatingFetch(`/api/me/saved-concerts/${encodeURIComponent(dedupKey)}`, {
-          method: 'DELETE',
-        });
-    if (!r.ok) {
+    try {
+      // A rejected fetch (dropped connection, offline tab) and a refused
+      // request are the same failure to the user, so both land in the catch
+      // and get the same rollback. Without it the star stayed lit until a
+      // later poll silently un-lit it.
+      const r = next
+        ? await mutatingFetch('/api/me/saved-concerts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dedup_key: dedupKey }),
+          })
+        : await mutatingFetch(`/api/me/saved-concerts/${encodeURIComponent(dedupKey)}`, {
+            method: 'DELETE',
+          });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch {
       patchConcert(dedupKey, { saved: currentlySaved });
       setActionError(
         next ? "Couldn't save that show. Try again." : "Couldn't remove that show. Try again.",
       );
+    } finally {
+      savePending.current.delete(dedupKey);
     }
   }
 
@@ -210,22 +227,30 @@ export function useConcerts(filters: FiltersState, opts: Options = {}) {
     currentlySubscribed: boolean,
   ) {
     if (!artistID) return;
+    if (subscribePending.current.has(artistID)) return;
+    subscribePending.current.add(artistID);
     setActionError(null);
     const next = !currentlySubscribed;
+    // The rollback is as wide as the patch: an artist can be on several
+    // bills, so one failed click has to un-flip every bell it lit.
     patchArtistSubscription(artistID, next);
     const url = `/api/me/subscribed-artists/${encodeURIComponent(artistID)}`;
-    const r = await mutatingFetch(url, {
-      method: next ? 'POST' : 'DELETE',
-      headers: next ? { 'Content-Type': 'application/json' } : undefined,
-      body: next ? JSON.stringify({ display_name: artistName }) : undefined,
-    });
-    if (!r.ok) {
+    try {
+      const r = await mutatingFetch(url, {
+        method: next ? 'POST' : 'DELETE',
+        headers: next ? { 'Content-Type': 'application/json' } : undefined,
+        body: next ? JSON.stringify({ display_name: artistName }) : undefined,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch {
       patchArtistSubscription(artistID, currentlySubscribed);
       setActionError(
         next
           ? `Couldn't subscribe to ${artistName}. Try again.`
           : `Couldn't unsubscribe from ${artistName}. Try again.`,
       );
+    } finally {
+      subscribePending.current.delete(artistID);
     }
   }
 

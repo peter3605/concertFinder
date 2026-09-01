@@ -49,6 +49,14 @@ final class SavedModel {
         }
         events.removeAll { $0.acts.isEmpty }
     }
+
+    /// Sign-out. Saves belong to an account, and the next one on this device
+    /// must not open the tab onto someone else's.
+    func reset() {
+        events = []
+        isLoading = false
+        error = nil
+    }
 }
 
 struct SavedView: View {
@@ -61,11 +69,7 @@ struct SavedView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if model.events.isEmpty {
-                    ContentUnavailableView {
-                        Label("Nothing saved", systemImage: "bookmark")
-                    } description: {
-                        Text("Tap the bookmark on any show to keep it here.")
-                    }
+                    emptyState
                 } else {
                     list
                 }
@@ -78,9 +82,35 @@ struct SavedView: View {
         }
     }
 
+    /// A failed load and an account with no saves both produce an empty list.
+    /// Telling the second story over the first says the user's saves are gone.
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label(model.error == nil ? "Nothing saved" : "We couldn't load your saved shows",
+                  systemImage: model.error == nil ? "bookmark" : "exclamationmark.triangle")
+        } description: {
+            if let error = model.error {
+                Text(error.userMessage)
+            } else {
+                Text("Tap the bookmark on any show to keep it here.")
+            }
+        } actions: {
+            // The view does not scroll, so a pull gesture is not available
+            // here at all — the retry has to be a button.
+            if model.error != nil {
+                Button("Try again") { Task { await model.load() } }
+            }
+        }
+    }
+
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Metrics.cardSpacing) {
+                // An unsave that failed rolls the row back; without this the
+                // rollback is the only sign anything went wrong.
+                if let error = model.error {
+                    InfoBanner(kind: .error(error.userMessage))
+                }
                 ForEach(model.events) { event in
                     NavigationLink(value: event) {
                         SavedCard(event: event) { act in
