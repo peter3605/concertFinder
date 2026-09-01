@@ -41,6 +41,12 @@ variable "ec2_instance_type" {
 # because Neon's free-plan restore window is far shorter than the 7-day RDS
 # retention it replaces.
 
+variable "subnet_id" {
+  description = "Subnet the app instance lives in, e.g. subnet-0123456789abcdef0. Set this to the subnet the CURRENT instance is already in. Leave empty and it falls back to the first ID of the default VPC's subnet list, which is a *set* — an unordered one, so the value at index 0 can change with no change to this config, and a changed subnet_id forces Terraform to REPLACE the instance: /opt/concertfinder, the rendered .env and the docker volumes all go with it. Find the value with: aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder --query 'Reservations[].Instances[].SubnetId' --output text"
+  type        = string
+  default     = ""
+}
+
 variable "backup_retention_days" {
   description = "How long nightly pg_dump artifacts live in S3 before the lifecycle rule expires them. Covers the gap left by Neon's short free-plan restore history."
   type        = number

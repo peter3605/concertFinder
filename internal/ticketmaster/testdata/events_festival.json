@@ -1,0 +1,181 @@
+{
+  "_embedded": {
+    "events": [
+      {
+        "name": "Test Marked Festival",
+        "type": "event",
+        "id": "vvG1zZ9festmark",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9festmark",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-07-17", "localTime": "12:00:00", "dateTime": "2026-07-17T17:00:00Z" },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" },
+            "subGenre": { "id": "KZazBEonSMnZfZ7v6F1", "name": "Alternative Rock" },
+            "type": { "id": "KZAyXgnZfZ7v7nI", "name": "Group" },
+            "subType": { "id": "KZFzBErXgnZfZ7vAd7", "name": "Festival" },
+            "family": false
+          }
+        ],
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Park",
+              "type": "venue",
+              "id": "KovZpZAtestPK",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Ordinary Club Show",
+        "type": "event",
+        "id": "vvG1zZ9ordinary",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9ordinary",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-07-18", "localTime": "20:00:00", "dateTime": "2026-07-19T01:00:00Z" },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" },
+            "subGenre": { "id": "KZazBEonSMnZfZ7v6F1", "name": "Indie Rock" },
+            "type": { "id": "KZAyXgnZfZ7v7nI", "name": "Group" },
+            "subType": { "id": "KZFzBErXgnZfZ7v7lJ", "name": "Undefined" },
+            "family": false
+          }
+        ],
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestCL",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Something Something Festival",
+        "type": "event",
+        "id": "vvG1zZ9namedfest",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9namedfest",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-07-19", "localTime": "12:00:00", "dateTime": "2026-07-19T17:00:00Z" },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" },
+            "subGenre": { "id": "KZazBEonSMnZfZ7v6F1", "name": "Alternative Rock" },
+            "type": { "id": "KZAyXgnZfZ7v7nI", "name": "Group" },
+            "subType": { "id": "KZFzBErXgnZfZ7v7lJ", "name": "Undefined" },
+            "family": false
+          }
+        ],
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Park",
+              "type": "venue",
+              "id": "KovZpZAtestPK",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Secondary Classification Festival",
+        "type": "event",
+        "id": "vvG1zZ9secondary",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9secondary",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-07-20", "localTime": "12:00:00", "dateTime": "2026-07-20T17:00:00Z" },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" },
+            "subType": { "id": "KZFzBErXgnZfZ7v7lJ", "name": "Undefined" },
+            "family": false
+          },
+          {
+            "primary": false,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAev", "name": "Pop" },
+            "subType": { "id": "KZFzBErXgnZfZ7vAd7", "name": "festival" },
+            "family": false
+          }
+        ],
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Park",
+              "type": "venue",
+              "id": "KovZpZAtestPK",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Unclassified Show",
+        "type": "event",
+        "id": "vvG1zZ9noclass",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9noclass",
+        "locale": "en-us",
+        "dates": {
+          "start": { "localDate": "2026-07-21", "localTime": "20:00:00", "dateTime": "2026-07-22T01:00:00Z" },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestCL",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "page": { "size": 100, "totalElements": 5, "totalPages": 1, "number": 0 }
+}

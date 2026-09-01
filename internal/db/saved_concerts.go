@@ -7,15 +7,38 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// SaveConcert marks a concert (by dedup_key) as saved for this user. Idempotent.
-func SaveConcert(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, dedupKey string) error {
+// SaveConcert marks a concert (by dedup_key) as saved for this user.
+// Idempotent. Returns false when the user already holds maxSaved rows and
+// this key is not among them.
+//
+// The ceiling is enforced in the same statement as the insert rather than by
+// a count the handler reads first: a save is one POST with a caller-supplied
+// key, so a client in a loop would sit inside the window between the two
+// round trips and write past the cap indefinitely.
+//
+// Re-saving something already saved still succeeds at the cap. Refusing it
+// would make an idempotent call start failing once the list filled up, which
+// the UI reads as "the star didn't stick".
+func SaveConcert(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, dedupKey string, maxSaved int) (bool, error) {
 	const q = `
-INSERT INTO user_saved_concerts (user_id, dedup_key, saved_at)
-VALUES ($1, $2, now())
-ON CONFLICT (user_id, dedup_key) DO NOTHING
+WITH inserted AS (
+  INSERT INTO user_saved_concerts (user_id, dedup_key, saved_at)
+  -- Casts because the parameters first appear inside an INSERT ... SELECT,
+  -- where Postgres resolves their types from the SELECT rather than from the
+  -- target columns.
+  SELECT $1::uuid, $2::text, now()
+  WHERE (SELECT count(*) FROM user_saved_concerts WHERE user_id = $1) < $3::int
+  ON CONFLICT (user_id, dedup_key) DO NOTHING
+  RETURNING 1
+)
+SELECT EXISTS (SELECT 1 FROM inserted)
+    OR EXISTS (SELECT 1 FROM user_saved_concerts WHERE user_id = $1 AND dedup_key = $2)
 `
-	_, err := pool.Exec(ctx, q, userID, dedupKey)
-	return err
+	var ok bool
+	if err := pool.QueryRow(ctx, q, userID, dedupKey, maxSaved).Scan(&ok); err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 // UnsaveConcert removes a saved concert. Idempotent — missing rows are not an error.

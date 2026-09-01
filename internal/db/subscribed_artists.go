@@ -15,16 +15,38 @@ type SubscribedArtist struct {
 }
 
 // SubscribeArtist adds an artist. Idempotent — a repeat call refreshes the
-// display_name in case the artist got renamed.
-func SubscribeArtist(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, spotifyArtistID, displayName string) error {
+// display_name in case the artist got renamed. Returns false when the user
+// already holds maxSubscribed artists and this one is not among them.
+//
+// The cap is part of the insert for the same reason as SaveConcert's:
+// checking it in the handler leaves a window between the count and the write
+// that a client in a loop lives inside. The OR EXISTS in the WHERE is what
+// keeps the rename path working at the cap — a full list must still be able
+// to correct a name it already holds.
+func SubscribeArtist(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, spotifyArtistID, displayName string, maxSubscribed int) (bool, error) {
 	const q = `
-INSERT INTO user_subscribed_artists (user_id, spotify_artist_id, display_name, subscribed_at)
-VALUES ($1, $2, NULLIF($3, ''), now())
-ON CONFLICT (user_id, spotify_artist_id) DO UPDATE
-  SET display_name = COALESCE(EXCLUDED.display_name, user_subscribed_artists.display_name)
+WITH written AS (
+  INSERT INTO user_subscribed_artists (user_id, spotify_artist_id, display_name, subscribed_at)
+  -- Casts because the parameters first appear inside an INSERT ... SELECT,
+  -- where Postgres resolves their types from the SELECT rather than from the
+  -- target columns.
+  SELECT $1::uuid, $2::text, NULLIF($3::text, ''), now()
+  WHERE (SELECT count(*) FROM user_subscribed_artists WHERE user_id = $1) < $4::int
+     OR EXISTS (
+       SELECT 1 FROM user_subscribed_artists
+        WHERE user_id = $1 AND spotify_artist_id = $2
+     )
+  ON CONFLICT (user_id, spotify_artist_id) DO UPDATE
+    SET display_name = COALESCE(EXCLUDED.display_name, user_subscribed_artists.display_name)
+  RETURNING 1
+)
+SELECT EXISTS (SELECT 1 FROM written)
 `
-	_, err := pool.Exec(ctx, q, userID, spotifyArtistID, displayName)
-	return err
+	var ok bool
+	if err := pool.QueryRow(ctx, q, userID, spotifyArtistID, displayName, maxSubscribed).Scan(&ok); err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 // ListSubscribedArtists returns the full list, ordered by display_name (or

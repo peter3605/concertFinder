@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -17,10 +18,18 @@ import (
 // Variables are defined in docs/design.md Appendix A plus a Phase 1 hardcoded
 // location (§10.1: location picker is Phase 2).
 type Config struct {
-	SpotifyClientID     string
-	SpotifyRedirectURI  string
-	TicketmasterAPIKey  string
-	DatabaseURL         string
+	SpotifyClientID    string
+	SpotifyRedirectURI string
+	TicketmasterAPIKey string
+	DatabaseURL        string
+	// DBMaxConns sizes the pgx pool. pgx's own default is max(4, NumCPU) --
+	// four on a t4g.small -- and that pool is shared by river's notifier (one
+	// connection held open forever), its elector, producer and completer, five
+	// job workers and every HTTP request. Running out is not an error: callers
+	// block inside Acquire until their context expires, so it shows up as slow
+	// requests and scans that spend their budget queueing. 0 = package default
+	// (db.DefaultMaxConns).
+	DBMaxConns          int
 	EncryptionKey       string
 	SessionCookieDomain string
 	ListenAddr          string
@@ -221,6 +230,7 @@ func Load() (*Config, error) {
 	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
+	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
 
 	c.EmailDeliveryMode = strings.ToLower(strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_MODE")))
 	if c.EmailDeliveryMode == "" {
@@ -319,6 +329,23 @@ func (c Config) Validate() []error {
 		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must be hex-encoded: %w", err))
 	case len(key) != 32:
 		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must decode to 32 bytes, got %d", len(key)))
+	}
+
+	// USER_LATITUDE/USER_LONGITUDE are the fallback location every user is
+	// served until they pick one, so they are also half of a snapshot identity
+	// and of the scan job built from it. A garbage value does not fail: it
+	// formats into a perfectly valid location_key and buys a five-minute scan
+	// of nowhere, on every login, for every user who has not set a location.
+	// Note Load parses these with the error discarded, so an unparseable
+	// value arrives here as 0,0 — off the coast of Ghana, but in range, and
+	// not something this can distinguish from someone who meant it.
+	if math.IsNaN(c.UserLatitude) || math.IsInf(c.UserLatitude, 0) ||
+		c.UserLatitude < -90 || c.UserLatitude > 90 {
+		errs = append(errs, fmt.Errorf("USER_LATITUDE must be between -90 and 90, got %v", c.UserLatitude))
+	}
+	if math.IsNaN(c.UserLongitude) || math.IsInf(c.UserLongitude, 0) ||
+		c.UserLongitude < -180 || c.UserLongitude > 180 {
+		errs = append(errs, fmt.Errorf("USER_LONGITUDE must be between -180 and 180, got %v", c.UserLongitude))
 	}
 
 	if u := c.SpotifyRedirectURI; u != "" && !strings.HasSuffix(strings.TrimRight(u, "/"), SpotifyCallbackPath) {

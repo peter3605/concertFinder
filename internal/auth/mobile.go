@@ -21,9 +21,11 @@ type mobileExchangeRequest struct {
 	Verifier string `json:"verifier"`
 }
 
-// mobileExchangeResponse hands the app its session. SessionToken is the
-// session ID — the same value the browser gets in cf_session — which the app
-// stores in the Keychain and sends as Authorization: Bearer.
+// mobileExchangeResponse hands the app its session. SessionToken is the same
+// kind of value the browser gets in cf_session, minted here and returned
+// exactly once; the app stores it in the Keychain and sends it as
+// Authorization: Bearer. This response is the only place it ever exists
+// outside the device — the database holds only its sha256.
 type mobileExchangeResponse struct {
 	SessionToken string         `json:"session_token"`
 	ExpiresAt    time.Time      `json:"expires_at"`
@@ -83,16 +85,33 @@ func (d *Deps) handleMobileExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	su, err := db.GetSessionUser(r.Context(), d.Pool, c.SessionID)
+	// The escrowed session row exists but carries no token_hash, so nothing
+	// can authenticate as it yet. Minting the credential here rather than at
+	// /callback is what keeps it out of the database: mobile_auth_codes names
+	// the row, never the token.
+	token, err := RandomString(32)
 	if err != nil {
+		slog.Error("mobile exchange: token mint failed", "err", err)
+		writeAuthError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	su, ok, err := db.ClaimSessionToken(r.Context(), d.Pool, c.SessionID, HashSessionToken(token))
+	if err != nil {
+		slog.Error("mobile exchange: claim session failed", "err", err)
+		writeAuthError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !ok {
 		// The session was deleted between mint and redeem — logged out
-		// elsewhere, or the account was deleted.
+		// elsewhere, or the account was deleted — or its token was already
+		// claimed, which the DELETE ... RETURNING above should have made
+		// unreachable and which is a replay if it ever is not.
 		writeAuthError(w, http.StatusBadRequest, "invalid or expired code")
 		return
 	}
 
 	writeJSONResponse(w, http.StatusOK, mobileExchangeResponse{
-		SessionToken: su.Session.ID,
+		SessionToken: token,
 		ExpiresAt:    su.Session.ExpiresAt,
 		User:         userPayload(su.User),
 	})

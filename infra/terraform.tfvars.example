@@ -16,6 +16,21 @@ ses_dns_records_created = false
 # pasted into /opt/concertfinder/.env as DATABASE_URL — see docs/aws-deploy.md
 # §1. This Terraform owns only the S3 bucket its nightly dump lands in.
 
+# The subnet the app instance lives in. SET THIS on an existing deployment, to
+# the subnet the instance is already in:
+#
+#   aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder \
+#     --query 'Reservations[].Instances[].SubnetId' --output text
+#
+# Unset, it falls back to the first ID of the default VPC's subnet list. That
+# list is a set, so it has no defined order: the value at index 0 can change
+# with nothing in the config changing, and a changed subnet forces Terraform to
+# REPLACE the instance -- taking /opt/concertfinder, the rendered .env and the
+# caddy certificate volumes with it. `prevent_destroy` on the instance now
+# turns that into an error rather than a rebuild, but the error is a stuck
+# plan; pinning the value is what avoids it.
+# subnet_id = "subnet-0123456789abcdef0"
+
 # Where CloudWatch alarm mail goes. Unset, it reuses ses_verified_recipient
 # above -- the same address CONTACT_EMAIL already uses. Set it only if alerts
 # should go somewhere other than the operator's own inbox.

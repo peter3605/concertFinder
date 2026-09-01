@@ -131,6 +131,27 @@ func PruneExpiredNegativeMBURLs(ctx context.Context, pool *pgxpool.Pool) (int64,
 	return tag.RowsAffected(), err
 }
 
+// PruneExpiredNegativeResolutions deletes "Ticketmaster had no attraction for
+// this artist" rows once they are past their TTL. Same story as the two
+// resolver caches: needsTMResolution already re-asks about an expired negative,
+// so this is about the rows, of which one accumulates for every artist anyone's
+// profile has ever contained — against a 0.5 GB storage cap.
+//
+// The TTL is a parameter rather than a constant here because it lives in
+// internal/concerts (NegativeResolutionTTL) and that package imports this one.
+//
+// A positive resolution has a non-NULL ticketmaster_attraction_id and this
+// clause cannot reach it, which is the property that matters: positives are
+// kept forever on purpose. Rows storing an empty string rather than NULL — no
+// writer produces one, but the column has always allowed it — are left alone
+// for the same reason, since deleting on emptiness is one COALESCE away from
+// deleting the hits.
+func PruneExpiredNegativeResolutions(ctx context.Context, pool *pgxpool.Pool, ttl time.Duration) (int64, error) {
+	const q = `DELETE FROM artist_resolutions WHERE ticketmaster_attraction_id IS NULL AND resolved_at <= $1`
+	tag, err := pool.Exec(ctx, q, time.Now().Add(-ttl))
+	return tag.RowsAffected(), err
+}
+
 // PruneExpiredNegativeGeo is PruneExpiredNegativeMBURLs for venue_geo_cache:
 // drops the Nominatim misses whose TTL has passed, keeps every hit.
 func PruneExpiredNegativeGeo(ctx context.Context, pool *pgxpool.Pool) (int64, error) {

@@ -146,4 +146,107 @@ if ! awk '/^  api:/{f=1;next} /^  [a-z]/{f=0} f' "$rendered" | grep -q 'image: c
 fi
 pass "api service pins its image name"
 
+# 11. The rendered .env has two consumers with two different parsers, and only
+#     one of them is exercised by a deploy. docker compose reads it as an
+#     env_file; scripts/backup-db.sh does `set -a; . "$ENV_FILE"`, handing it to
+#     bash. A value holding a space, a `$`, a backtick or a `;` is fine for the
+#     first and is a syntax error or a command substitution for the second — so
+#     the site stays healthy and the 03:00 backup nobody watches is the only
+#     thing that dies. This drives the real render-env.sh against a stub
+#     Parameter Store and then sources the result the way backup-db.sh does.
+envwork="$work/render"
+mkdir -p "$envwork/bin"
+
+# Stand-in for `aws ssm get-parameters-by-path --output text`, which emits one
+# NAME<TAB>VALUE line per parameter. The arguments are ignored on purpose: what
+# is under test is what render-env.sh does with a value, not how it asks for
+# one.
+cat > "$envwork/bin/aws" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\t%s\n' /concertfinder/NASTY "$CF_TEST_VALUE"
+STUB
+chmod +x "$envwork/bin/aws"
+
+# One value carrying every character class that breaks `. file`: a space, a
+# `$`, a backtick, a `;` and a double quote. Deliberately no single quote —
+# that one is refused at render time rather than encoded, and is checked
+# separately below.
+nasty="sp ace \$HOME \`id\` ;semi \"dq\""
+
+rendered_env="$envwork/.env"
+if ! out=$(PATH="$envwork/bin:$PATH" AWS_REGION=us-east-1 \
+        CF_TEST_VALUE="$nasty" \
+        PARAM_PATH=/concertfinder ENV_FILE="$rendered_env" \
+        OWNER="$(id -un)" GROUP="$(id -gn)" \
+        "$repo/scripts/render-env.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "render-env.sh failed against a stub parameter store"
+fi
+
+# Sourced inside a command substitution, so the subshell is thrown away: if the
+# quoting is wrong the value's backtick runs `id` in there and nowhere else.
+# Both failure directions are caught — a value that will not parse at all, and
+# one that parses into something other than what was stored.
+srcerr="$envwork/source.err"
+if ! got=$(set -a; . "$rendered_env" 2>"$srcerr"; set +a; printf '%s' "${NASTY-}"); then
+    sed 's/^/    /' "$srcerr" >&2
+    fail "the .env render-env.sh writes cannot be sourced — scripts/backup-db.sh
+      does exactly this, so the nightly backup would die here while the app,
+      which uses compose's separate parser, stayed healthy."
+fi
+if [ "$got" != "$nasty" ]; then
+    printf '    stored:  %s\n    sourced: %s\n' "$nasty" "$got" >&2
+    fail "a value did not survive being sourced from the rendered .env —
+      render-env.sh must single-quote values."
+fi
+pass 'rendered .env values survive `set -a; . .env`'
+
+# 12. The other consumer. Quoting for bash is only half the job: compose has
+#     its own parser, and it is stricter than bash in a way that is easy to
+#     miss. The shell's '\'' escape idiom — close, escape, reopen — is a hard
+#     parse error for compose ("unexpected character"), so an encoding chosen
+#     by reasoning about bash alone takes the whole deploy down. This asserts
+#     against the parser that actually reads the file in production.
+cat > "$envwork/docker-compose.yml" <<'COMPOSE'
+services:
+  probe:
+    image: alpine
+    env_file:
+      - path: .env
+        required: true
+COMPOSE
+if ! composed=$( (cd "$envwork" && docker compose config) 2>"$envwork/compose.err"); then
+    sed 's/^/    /' "$envwork/compose.err" >&2
+    fail "compose cannot parse the .env render-env.sh writes — this is the
+      deploy failing outright, on the instance, after the old containers are
+      already down."
+fi
+# The second failure mode, and the quiet one: compose parses the line but keeps
+# the quotes, so every secret reaches the container wrapped in them. Compose
+# rewrites `$` as `$$` on output, so the value is not compared byte-for-byte
+# here; a retained leading quote is the signature and is enough.
+if printf '%s' "$composed" | grep -q "NASTY: \"\\?'sp ace"; then
+    fail "compose kept the surrounding single quotes — every value would reach
+      the container quoted. render-env.sh's quoting and compose's parser
+      disagree."
+fi
+pass "compose parses the rendered .env and strips the quoting"
+
+# 13. The one value single quotes cannot carry. No encoding satisfies both
+#     parsers (the '\'' idiom breaks compose; double-quoting with backslash
+#     escapes diverges from bash on the backtick, in the direction where bash
+#     runs the command substitution), so render-env.sh refuses. Assert it
+#     refuses loudly rather than emitting something one of the two will
+#     mis-read.
+if PATH="$envwork/bin:$PATH" AWS_REGION=us-east-1 \
+        CF_TEST_VALUE="has 'a' quote" \
+        PARAM_PATH=/concertfinder ENV_FILE="$envwork/.env.sq" \
+        OWNER="$(id -un)" GROUP="$(id -gn)" \
+        "$repo/scripts/render-env.sh" >/dev/null 2>&1; then
+    fail "render-env.sh accepted a value containing a single quote. There is no
+      encoding for it that both compose and \`. \$ENV_FILE\` read the same way,
+      so it has to fail here, by name, not on the instance mid-deploy."
+fi
+pass "render-env.sh refuses a value it cannot encode for both parsers"
+
 printf '\n\033[32mDeployment config OK\033[0m\n'

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/peterho/concertfinder/internal/concerts"
+	"github.com/peterho/concertfinder/internal/db"
 )
 
 // One scan per (user, location) may be in flight. The previous
@@ -130,6 +132,63 @@ func TestNextQuotaReset(t *testing.T) {
 					got.Format(time.RFC3339), c.now.Format(time.RFC3339))
 			}
 		})
+	}
+}
+
+// recordingStore is a concertStore that keeps what it was handed, including
+// the state of the context it was called on — which is the thing under test.
+type recordingStore struct {
+	rows        []db.ConcertRow
+	snapshots   []db.ConcertSnapshot
+	rowsCtxErr  error
+	snapCtxErr  error
+	snapHasTime bool
+}
+
+func (s *recordingStore) UpsertConcerts(ctx context.Context, rows []db.ConcertRow) error {
+	s.rowsCtxErr = ctx.Err()
+	s.rows = rows
+	return nil
+}
+
+func (s *recordingStore) UpsertConcertSnapshot(ctx context.Context, snap db.ConcertSnapshot) error {
+	s.snapCtxErr = ctx.Err()
+	_, s.snapHasTime = ctx.Deadline()
+	s.snapshots = append(s.snapshots, snap)
+	return nil
+}
+
+// The scan whose results are most worth keeping is the cold one that spent its
+// whole ScanBudget, and that scan reaches the writes with its own context
+// already expired. Persisting on it failed both statements, so river retried
+// the entire fan-out and spent the quota again for a snapshot it had already
+// computed.
+func TestPersistScanWritesOnAnExpiredScanContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the scan budget ran out before there was anything to write
+
+	store := &recordingStore{}
+	snap := db.ConcertSnapshot{LocationKey: "39.2904,-76.6122,50", DedupKeys: []string{"dk1"}}
+	if err := persistScan(ctx, store, []db.ConcertRow{{DedupKey: "dk1"}}, snap); err != nil {
+		t.Fatalf("persistScan: %v", err)
+	}
+
+	if store.rowsCtxErr != nil {
+		t.Errorf("UpsertConcerts ran on a dead context (%v); the scan's results are lost", store.rowsCtxErr)
+	}
+	if store.snapCtxErr != nil {
+		t.Errorf("UpsertConcertSnapshot ran on a dead context (%v); the snapshot is lost", store.snapCtxErr)
+	}
+	if len(store.rows) != 1 {
+		t.Errorf("wrote %d concert rows, want 1 — the snapshot's keys would dangle", len(store.rows))
+	}
+	if len(store.snapshots) != 1 || store.snapshots[0].LocationKey != snap.LocationKey {
+		t.Fatalf("snapshot not written: %+v", store.snapshots)
+	}
+	// Detached, not unbounded: a write that hangs would otherwise hold a river
+	// worker slot open with nothing to end it.
+	if !store.snapHasTime {
+		t.Error("persist context has no deadline; a hung write would never be given up on")
 	}
 }
 

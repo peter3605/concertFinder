@@ -128,7 +128,7 @@ func (c *Client) doGETRetry(ctx context.Context, rawURL string) ([]byte, int, er
 			}
 			continue
 		default:
-			return body, resp.StatusCode, fmt.Errorf("tm %s: %d: %s", path, resp.StatusCode, truncate(body))
+			return body, resp.StatusCode, fmt.Errorf("tm %s: %d: %s", path, resp.StatusCode, c.scrubKey(truncate(body)))
 		}
 	}
 	if lastErr == nil {
@@ -168,6 +168,26 @@ func sleepFor(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// scrubKey removes the API key from a string built out of an upstream response
+// body, which is the one path P0-1's URL redaction does not cover.
+//
+// Ticketmaster's own error bodies do not echo the request, but this error is
+// raised for any unexpected 4xx, and a 4xx does not always come from
+// Ticketmaster: a WAF, a caching proxy or a corporate gateway in front of it
+// answers with an HTML error page, and those routinely quote the full request
+// URL they refused — query string included. The body is then interpolated into
+// an error that internal/concerts/search.go logs verbatim.
+//
+// Matching the client's own key exactly, rather than a `apikey=\w+` pattern,
+// means this cannot half-match a key containing an unexpected character or
+// miss one the upstream URL-encoded differently than we sent it.
+func (c *Client) scrubKey(s string) string {
+	if c.APIKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.APIKey, "REDACTED")
 }
 
 func truncate(b []byte) string {

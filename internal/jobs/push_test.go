@@ -1,7 +1,10 @@
 package jobs
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/peterho/concertfinder/internal/concerts"
+	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/push"
 )
 
 func act(name, dedup string) concerts.Act {
@@ -91,6 +96,94 @@ func TestNotificationPayloadStaysSmall(t *testing.T) {
 	}
 	if len(body) > 4096 {
 		t.Fatalf("payload is %d bytes, over the APNs 4KB cap", len(body))
+	}
+}
+
+// stubAPNs answers per device token, so one round can mix a delivery, a dead
+// token and a transient rejection the way a real one does.
+type stubAPNs struct {
+	errs map[string]error
+	sent []push.Notification
+}
+
+func (s *stubAPNs) Send(_ context.Context, n push.Notification) error {
+	s.sent = append(s.sent, n)
+	return s.errs[n.DeviceToken]
+}
+
+func oneEvent(dedup ...string) []concerts.Event {
+	acts := make([]concerts.Act, 0, len(dedup))
+	for i, dk := range dedup {
+		acts = append(acts, act("Artist "+string(rune('A'+i)), dk))
+	}
+	return []concerts.Event{{
+		EventKey: "ek1",
+		Date:     time.Date(2026, 9, 12, 20, 0, 0, 0, time.UTC),
+		Venue:    "9:30 Club",
+		City:     "Washington",
+		Acts:     acts,
+	}}
+}
+
+// The failure this exists to stop: the ledger was written before the sends, so
+// a rejection APNs would have accepted a moment later burned the key anyway.
+// River's retry then found it already recorded and pushed nothing, and the
+// user was never told about the show — no error, no log, nothing to notice.
+func TestSendRoundHoldsBackKeysAfterATransientFailure(t *testing.T) {
+	dev := db.Device{DeviceToken: "a-token", Environment: push.EnvSandbox}
+	sender := &stubAPNs{errs: map[string]error{"a-token": errors.New("connection reset")}}
+
+	res := sendRound(context.Background(), sender, oneEvent("dk1", "dk2"), []db.Device{dev}, uuid.New(),
+		func(db.Device) { t.Error("retired a device over a transient error; it would never be pushed to again") })
+
+	if len(res.Delivered) != 0 {
+		t.Errorf("Delivered = %v, want none — recording these keys is what loses the notification", res.Delivered)
+	}
+	if res.Transient != 1 {
+		t.Errorf("Transient = %d, want 1 so the job fails and river retries", res.Transient)
+	}
+}
+
+// A token APNs calls dead never succeeds, so its keys are recorded: the
+// alternative is a job that fails forever over a device that no longer exists.
+func TestSendRoundRecordsKeysRefusedForADeadToken(t *testing.T) {
+	dev := db.Device{DeviceToken: "a-token", Environment: push.EnvSandbox}
+	sender := &stubAPNs{errs: map[string]error{
+		"a-token": &push.Error{StatusCode: http.StatusGone, Reason: "Unregistered"},
+	}}
+	var retired []string
+
+	res := sendRound(context.Background(), sender, oneEvent("dk1", "dk2"), []db.Device{dev}, uuid.New(),
+		func(d db.Device) { retired = append(retired, d.DeviceToken) })
+
+	if len(res.Delivered) != 2 {
+		t.Errorf("Delivered = %v, want both keys", res.Delivered)
+	}
+	if res.Transient != 0 {
+		t.Errorf("Transient = %d, want 0 — no retry improves a dead token", res.Transient)
+	}
+	if len(retired) != 1 || retired[0] != "a-token" {
+		t.Errorf("retired = %v, want the dead token", retired)
+	}
+}
+
+// Every act on a bill travels together. Recording the acts that happened to
+// land while the event as a whole must be re-sent would leave the retry
+// pushing a card missing half its lineup.
+func TestSendRoundHoldsBackAWholeEventWhenOneDeviceFails(t *testing.T) {
+	devices := []db.Device{
+		{DeviceToken: "ok-token", Environment: push.EnvSandbox},
+		{DeviceToken: "bad-token", Environment: push.EnvSandbox},
+	}
+	sender := &stubAPNs{errs: map[string]error{"bad-token": errors.New("i/o timeout")}}
+
+	res := sendRound(context.Background(), sender, oneEvent("dk1", "dk2"), devices, uuid.New(), func(db.Device) {})
+
+	if res.Sent != 1 {
+		t.Errorf("Sent = %d, want 1 (the healthy device did receive it)", res.Sent)
+	}
+	if len(res.Delivered) != 0 {
+		t.Errorf("Delivered = %v, want none while the event is still owed to a device", res.Delivered)
 	}
 }
 

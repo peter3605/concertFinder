@@ -70,6 +70,17 @@ it and the config comes up empty, failing on `DATABASE_URL`.
 so it can't collide with a local Postgres). If you changed that mapping, change
 this to match.
 
+`DB_MAX_CONNS` (optional, default 20) sizes the pgx pool. It is set in code
+rather than in the connection string because pgx's own default is
+`max(4, NumCPU)` — four on the production instance — and that pool is shared by
+river's LISTEN/NOTIFY notifier, which holds one connection open indefinitely,
+its elector, producer and completer, five job workers, and every HTTP request.
+Exhaustion never raises: callers block inside `Acquire` until their own context
+expires, so it reads as slow requests and scans that spend their budget waiting
+for a connection. The server logs `db pool` every 60s with `empty_acquires` and
+`empty_acquire_wait`, which are the two numbers that distinguish a saturated
+pool from a slow query.
+
 Then open https://127.0.0.1:3000 and click "Log in with Spotify". The first
 `/api/me/concerts` request returns an empty list with `refreshing: true` while
 a background scan runs — the frontend polls every 10s and fills in when the

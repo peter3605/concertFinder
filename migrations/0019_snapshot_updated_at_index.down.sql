@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS user_concert_snapshots_updated_at_idx;

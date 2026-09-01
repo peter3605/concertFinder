@@ -100,24 +100,75 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	// pushes for it reads as spam. One notification per event.
 	events := concerts.GroupEvents(fresh)
 
-	sendKeys := make([]string, 0, len(fresh))
-	for _, c := range fresh {
-		sendKeys = append(sendKeys, c.DedupKey)
+	res := sendRound(ctx, w.APNs, withActs(events, user.ID), devices, user.ID, func(d db.Device) {
+		if derr := db.DisableDevice(ctx, w.Pool, user.ID, d.DeviceToken); derr != nil {
+			slog.Warn("push: disable device failed", "err", derr, "user", user.ID)
+		}
+	})
+	// Record after the round, and only what the round actually placed with
+	// APNs. Recording first burned the keys whether or not anything was sent:
+	// a transient rejection was logged, Work returned nil, and river's retry
+	// found every key already in the ledger and pushed nothing. The user was
+	// simply never told about those shows, and nothing anywhere said so.
+	//
+	// The trade this reverses is a crash between send and record, which now
+	// costs a duplicate rather than a lost notification — the milder of the
+	// two, and CollapseID means a repeat of an undelivered push replaces it
+	// rather than stacking.
+	if len(res.Delivered) > 0 {
+		if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelPush, res.Delivered); err != nil {
+			return err
+		}
 	}
-	// Record before sending, matching the digest's at-most-once trade-off:
-	// a crash between the two costs a notification, whereas recording after
-	// would re-push the whole set on every retry.
-	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelPush, sendKeys); err != nil {
-		return err
+	slog.Info("push sent", "user", user.ID, "events", len(events),
+		"deliveries", res.Sent, "devices_retired", res.Retired, "transient_failures", res.Transient)
+	if res.Transient > 0 {
+		// The keys behind these are deliberately unrecorded, so the retry
+		// re-sends exactly them and nothing that already landed.
+		return fmt.Errorf("push: %d send(s) failed transiently", res.Transient)
 	}
+	return nil
+}
 
-	var sent, retired int
-	for _, ev := range withActs(events, user.ID) {
+// sendResult is one round of sends, summarized for the caller that owns the
+// database.
+type sendResult struct {
+	// Delivered is the dedup keys the ledger may now record: every act of
+	// every event APNs either accepted or refused for a token that is dead.
+	// A dead token will never succeed, so recording it is right — re-trying
+	// it forever is not.
+	Delivered []string
+	Sent      int
+	Retired   int
+	// Transient counts rejections a retry could still fix. Any at all keeps
+	// that event's keys out of Delivered and fails the job.
+	Transient int
+}
+
+// pushSender is the slice of push.Client sendRound uses. An interface so the
+// round's bookkeeping — which is the half that decides whether a user ever
+// hears about a show — is testable without an APNs host.
+type pushSender interface {
+	Send(ctx context.Context, n push.Notification) error
+}
+
+// sendRound delivers one notification per event to every device and reports
+// what may be recorded as sent. retire is called for each device APNs says is
+// permanently dead; the write itself stays with the caller.
+//
+// An event is all-or-nothing: one transient rejection on one device holds back
+// every act on that bill, so the retry re-sends the whole card rather than
+// half of it. The cost is a duplicate on devices that did receive it, which
+// CollapseID absorbs.
+func sendRound(ctx context.Context, sender pushSender, events []concerts.Event, devices []db.Device, userID uuid.UUID, retire func(db.Device)) sendResult {
+	var res sendResult
+	for _, ev := range events {
 		n := notificationFor(ev)
+		failed := false
 		for _, d := range devices {
-			err := w.APNs.Send(ctx, addressedTo(n, d))
+			err := sender.Send(ctx, addressedTo(n, d))
 			if err == nil {
-				sent++
+				res.Sent++
 				continue
 			}
 			var apnsErr *push.Error
@@ -127,19 +178,23 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 				// to its own host, and a host the key is not authorized for
 				// is refused before the request. So reaching here really does
 				// mean the token is dead.
-				if derr := db.DisableDevice(ctx, w.Pool, user.ID, d.DeviceToken); derr != nil {
-					slog.Warn("push: disable device failed", "err", derr, "user", user.ID)
-				}
-				retired++
+				retire(d)
+				res.Retired++
 				continue
 			}
-			// Transient: let river retry the job. The ledger already
-			// records these keys, so a retry re-pushes nothing.
-			slog.Warn("push: send failed", "err", err, "user", user.ID)
+			// Transient: let river retry the job.
+			slog.Warn("push: send failed", "err", err, "user", userID)
+			res.Transient++
+			failed = true
+		}
+		if failed {
+			continue
+		}
+		for _, a := range ev.Acts {
+			res.Delivered = append(res.Delivered, a.DedupKey)
 		}
 	}
-	slog.Info("push sent", "user", user.ID, "events", len(events), "deliveries", sent, "devices_retired", retired)
-	return nil
+	return res
 }
 
 // addressedTo stamps a rendered notification with one device's address.
