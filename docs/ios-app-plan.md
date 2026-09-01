@@ -66,7 +66,7 @@ effectively permanent, since iOS caches `IOS_APP_ID` from the association file.
 | Placeholder | Where | Note |
 |---|---|---|
 | ~~Bundle identifier~~ | `ios/project.yml` | Resolved: `com.concertfinder.ph`. |
-| Spotify logo asset | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | A typographic placeholder. The real mark must come from Spotify's brand kit — it may not be recreated. |
+| ~~Spotify logo asset~~ | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | Resolved 2026-08-31: the official full logo from Spotify's brand resource kit, in the asset catalogue as `SpotifyLogo`. See below. |
 | Signing | Xcode / App Store Connect | Team is available; no team is set in `project.yml`, so a device build needs one selected once. |
 
 The APNs key was created restricted to **Sandbox**, which matches the

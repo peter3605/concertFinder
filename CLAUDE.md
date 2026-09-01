@@ -113,7 +113,25 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
 - **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
-- **Display "Powered by Spotify"** attribution on any UI surface showing Spotify-derived data.
+- **Display "Powered by Spotify"** attribution on any UI surface showing
+  Spotify-derived data, **with Spotify's logo** — their guidelines require the
+  mark, not just the words. One component per client owns it
+  (`SpotifyAttribution` in `DesignSystem.swift` and
+  `web/src/components/spotify-attribution.tsx`), so a screen added later
+  inherits the rules instead of restating them. Four of those rules are load-
+  bearing and easy to undo by accident: the **full logo**, not the bare icon
+  (the icon alone is only for standing in as an app icon on a home screen); a
+  **70px minimum width** for that lockup (the 21px floor quoted for the icon is
+  a different measurement); **clear space of half the mark's height**; and the
+  **colourway** — green is restricted to black or white backgrounds, and ours
+  are grouped-background greys, so the black and white variants are what ship.
+  The wordmark may not be recreated or recoloured, which is why the label says
+  only "Powered by" (the logo supplies the name) and why the muted look comes
+  from picking the right asset rather than tinting one — a `.secondary`
+  foreground or a `template` render is a modification of the logo. The email
+  digests deliberately keep **text-only** attribution: remote images are
+  blocked by default in most mail clients, so an `<img>` there would attribute
+  nothing most of the time while the words always land.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 
