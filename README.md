@@ -82,6 +82,7 @@ independently.
 | [`docs/design.md`](docs/design.md) | **Authoritative** on architecture, schema, API choices, and phased scope. Read before implementing anything non-trivial. |
 | [`docs/local-dev.md`](docs/local-dev.md) | First-time local setup, running, resetting the database. |
 | [`docs/aws-deploy.md`](docs/aws-deploy.md) | Provisioning and deploying to AWS; the manual fallback to Terraform. |
+| [`docs/launch-runbook.md`](docs/launch-runbook.md) | The human tasks left before launch, in order, with the commands. Backups, key rotation, the Spotify quota application, APNs, App Store. |
 | [`infra/README.md`](infra/README.md) | Terraform config — the authoritative path for standing up infrastructure. |
 | [`CLAUDE.md`](CLAUDE.md) | Constraints that are easy to violate, and why. Worth reading before changing serving, jobs, or quota code. |
 
