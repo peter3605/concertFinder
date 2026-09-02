@@ -769,6 +769,10 @@ Each is small and independent:
 Nothing here is code. Several have multi-week lead times, so they should already
 be moving while the phases above are implemented.
 
+**`docs/launch-runbook.md` is these items in the order to do them, with the
+commands.** This section stays the checklist and the record; that file is the
+walkthrough. Tick boxes here.
+
 **What the Phase 4 session did.** Four of these had a repo-side half that was
 holding the human half up: the scan and the config that make Dependabot and
 `govulncheck` real, a state backend that could not be adopted without a bucket,
