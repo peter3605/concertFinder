@@ -24,7 +24,10 @@ the Cloudflare dashboard. See "DNS records" below.
   bootstrapped via user_data. Elastic IP attached.
 - **Security groups** — `ec2-sg` open on 80/443 to the internet, all outbound.
   There is no `rds-sg`: the database is Neon, reached outbound over the public
-  internet on 5432 with TLS. Port 22 is deliberately closed — access is via SSM.
+  internet on 5432 with TLS. Port 22 is closed — access is via SSM — unless
+  `ssh_ingress_cidrs` is set for break-glass; empty is the default and the
+  intended steady state, and the dynamic block emits no rule at all when the
+  list is empty. See "Break-glass SSH" below.
 - **S3** a private, versioned backup bucket for the nightly `pg_dump`
   (`scripts/backup-db.sh`), with a lifecycle rule expiring dumps after
   `backup_retention_days`. The instance role gets `s3:PutObject` and nothing
@@ -37,14 +40,19 @@ the Cloudflare dashboard. See "DNS records" below.
 - **SES** verified domain identity, DKIM, custom MAIL FROM subdomain, and a
   sandbox-verified recipient (for initial testing). The DNS records these
   need are emitted as the `dns_records` output, not created.
-- **CloudWatch** two alarms: EC2 status check failed, and estimated monthly
-  billing over threshold. Neither is wired to an SNS topic — alarm state is
-  visible in the console only, so nothing pages you. There is deliberately no
-  database alarm: Neon publishes no CloudWatch metrics, so its storage and
-  compute-hour headroom can only be alerted on from the Neon console.
+- **CloudWatch** three alarms, all publishing to an SNS topic with an email
+  subscription on `alert_email`: EC2 status check failed, EC2 *system* status
+  check (whose action is `ec2:recover`, so it fixes rather than reports), and
+  estimated monthly billing over threshold. **An email subscription stays in
+  `PendingConfirmation` until someone clicks the link AWS sends on the first
+  apply, and Terraform reports the resource created either way** — confirm it
+  once rather than assuming a green apply means the alarms reach anyone. There
+  is deliberately no database alarm: Neon publishes no CloudWatch metrics, so
+  its storage and compute-hour headroom can only be alerted on from the Neon
+  console.
 
 Deliberately not included (see design §11.3 for triggers to add them):
-ALB, ECS Fargate, CloudFront/S3, Secrets Manager, SNS topics on alarms.
+ALB, ECS Fargate, CloudFront/S3, Secrets Manager.
 
 ## Prerequisites
 

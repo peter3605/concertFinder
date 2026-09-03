@@ -314,8 +314,12 @@ The actual Ticketmaster + fallback fan-out happens inside `ScanConcertsWorker`
 - `ScanBudget = 5 * time.Minute` per job. Fallback resolver + venue geocoder
   are rate-limited (MB and Nominatim are both 1 req/sec/IP).
 - **The fallback chain gets its own scan-wide deadline**
-  (`SearchDeps.FallbackBudget`, default 60s, env
-  `PHASE2_FALLBACK_BUDGET_SECONDS`). Its lookups are globally serialized at
+  (`SearchDeps.FallbackBudget`, `concerts.DefaultFallbackBudget` = 120s, env
+  `PHASE2_FALLBACK_BUDGET_SECONDS`; zero means the default, negative disables
+  the chain). It was 60s until Bandsintown was removed: a measured 200-artist
+  scan logged `artists_not_escalated=34` at that figure, and with Ticketmaster
+  as the only primary those artists are simply absent from the feed rather
+  than merely missing a third chance. Its lookups are globally serialized at
   1 req/sec, so cost scales with the number of *escalating artists* and
   parallelism buys nothing: a cold 200-artist profile measured ~250s of
   MusicBrainz + ~86s of Nominatim against a 300s `ScanBudget`. The deadline
