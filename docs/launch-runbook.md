@@ -29,9 +29,16 @@ export AWS_PROFILE=budgetr
 ### 1. Find out whether the backup is alive
 
 First, because everything else assumes there is a restore point and there may
-not be one. P2-10 found `APNS_P8_KEY` is written to `.env` unquoted and contains
-spaces; `backup-db.sh` *sources* that file, so on any deployment with APNs
-configured the nightly dump may have been failing since the day APNs was set up.
+not be one. Two independent reasons it may never have run:
+
+- The systemd timer is installed by `ec2.tf`'s `user_data`, which is new in
+  `production-hardening` and **has not been applied** — and `user_data` does
+  not re-run on an existing instance regardless. Unless someone installed the
+  units by hand from `docs/aws-deploy.md` §7, nothing is scheduled.
+- Even where it is scheduled, P2-10 found `APNS_P8_KEY` is written to `.env`
+  unquoted and contains spaces, and `backup-db.sh` *sources* that file — so on
+  any deployment with APNs configured the dump has been failing since the day
+  APNs was set up.
 
 ```bash
 ./scripts/restore-drill.sh --check
@@ -52,15 +59,24 @@ A shell syntax error in that journal is the unquoted-`.env` bug. The fix is
 already on `production-hardening`, which makes merging that branch the most
 load-bearing thing in this document.
 
-### 2. Confirm the alarm emails
+### 2. Apply the Terraform, then confirm the alarm emails
 
-The SNS subscriptions have sat in `PendingConfirmation` since Phase 0. Until
-someone clicks the link AWS mailed on the first apply, the EC2 status-check and
-billing alarms fire into nothing — and Terraform reported them created either
-way.
+**These do not exist yet.** The SNS topics, the third alarm, the `ec2:recover`
+action and the backup systemd units are all in `production-hardening` and have
+never been applied — the implementation run was forbidden from applying
+anything. Merging the PR deploys the *code*; the infrastructure half is this
+separate step, and until it runs the alarms reach nobody.
 
 ```bash
 cd infra
+terraform plan          # read it: this is the first apply since Phase 0
+terraform apply
+```
+
+Then confirm the email subscription, which is the half an apply cannot do for
+you:
+
+```bash
 for t in alerts_topic_arn billing_alerts_topic_arn; do
   aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw $t)" \
     --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output text
@@ -68,9 +84,17 @@ done
 cd ..
 ```
 
-**Done when** neither line says `PendingConfirmation`. If they do, search mail
-for "AWS Notification - Subscription Confirmation" — it may be months old, and
-the SNS console can re-send it with *Request confirmation*.
+**Done when** neither line says `PendingConfirmation`. AWS mails a confirmation
+link on the first apply and **Terraform reports the subscription created either
+way**, so an unclicked link is an alarm that fires into nothing with a green
+apply behind it. The SNS console re-sends with *Request confirmation*.
+
+**Two things about this apply.** `APNS_P8_KEY` is already set, so the ordering
+trap in §8 does not bite here — but re-read it before applying if that ever
+changes. And `user_data` **does not re-run**: the backup units it now installs
+land on the *next* instance, not this one, so if `systemctl list-timers
+concertfinder-backup` on the box comes back empty, install them by hand from
+`docs/aws-deploy.md` §7. That is very likely the answer to §1.
 
 ### 3. Rotate the Ticketmaster and Songkick keys
 
@@ -326,3 +350,9 @@ wants to exist before Extended Quota Mode lands, not after.
 
 §1, then §5. The first says whether there are backups at all. The second is the
 only item where waiting costs weeks that cannot be recovered.
+
+And note the shape of the dependency the first few steps share: merging PR #28
+ships code, `terraform apply` ships infrastructure, and they are separate
+actions with separate failure modes. The hardening branch fixes the `.env`
+quoting that breaks the backup script; the apply installs the timer that runs
+it. Neither alone gives you a working nightly backup.
