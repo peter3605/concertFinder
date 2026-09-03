@@ -13,7 +13,7 @@
 # own architecture instead, and the build host is arm64 (t4g.small) — pinning a
 # per-arch digest would fail the build outright on a mismatched host, or worse,
 # silently build for the wrong one.
-FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS web
+FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
