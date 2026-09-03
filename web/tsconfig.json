@@ -18,9 +18,10 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    "baseUrl": ".",
+    // TypeScript 7 removed `baseUrl`. Path patterns now resolve relative to
+    // this file, so the mapping has to lead with `./` to mean the same thing.
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"],
