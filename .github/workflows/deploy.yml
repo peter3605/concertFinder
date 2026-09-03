@@ -24,14 +24,39 @@ on:
 permissions:
   contents: read
 
+# Deploys and PR checks get *separate* groups, and the split is load-bearing.
+#
 # Two deploys must never interleave on one instance: they share a git checkout
 # under /opt/concertfinder, one .env, and one docker daemon, so a second run's
-# `git reset --hard` can land under the first run's build. cancel-in-progress is
-# false on purpose — cancelling a deploy mid-way leaves the instance in whatever
-# state the SSM command reached, which is worse than queueing behind it.
+# `git reset --hard` can land under the first run's build. That is what
+# `deploy-prod` serializes, and cancel-in-progress stays false for it —
+# cancelling a deploy mid-way leaves the instance in whatever state the SSM
+# command reached, which is worse than queueing behind it.
+#
+# PR checks used to share that group, which cost real work twice in one
+# afternoon. GitHub keeps at most **one** pending run per group and cancels the
+# older pending one, and it does not care that the two kinds of run mean
+# different things:
+#
+#   - Three Dependabot PRs opened a minute apart cancelled each other. They
+#     reported "no checks reported" and merged looking clean, having been
+#     checked by nothing.
+#   - Four merges to main landed within a minute. The first deploy ran; the
+#     rest queued. Then an unrelated PR run entered the same group and evicted
+#     the pending deploy for the tip of main. Every workflow was green, no job
+#     failed, and main sat three commits ahead of what was actually serving.
+#
+# Both halves are silent, which is the reason for the comment: a cancelled run
+# is not a red run, and nothing downstream notices.
+#
+# Pushes and workflow_dispatch keep the single serialized group, so a manual
+# deploy still queues behind an automatic one. Pull requests get a group per
+# ref and *do* cancel in progress: superseding a check run for a branch that
+# has moved on is the behaviour you want, and those runs never deploy
+# (`deploy` is guarded on `github.event_name != 'pull_request'`).
 concurrency:
-  group: deploy-prod
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('deploy-pr-{0}', github.ref) || 'deploy-prod' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   AWS_REGION: us-east-1
