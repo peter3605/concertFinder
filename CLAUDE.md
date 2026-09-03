@@ -580,6 +580,22 @@ only `header_up` is reverse_proxy-only. The CSP is deliberately *only*
 `frame-ancestors` — restricting script/style sources needs testing against the
 Vite bundle, and a wrong one breaks the SPA on first load.
 
+**PR checks and deploys must not share a concurrency group.** GitHub keeps at
+most *one* pending run per group and cancels the older pending one, and it
+does not distinguish a check from a deploy. While both lived in `deploy-prod`
+this cost work twice in one afternoon, silently both times: three Dependabot
+PRs opened a minute apart cancelled each other's checks and then merged
+reporting "no checks reported", having been verified by nothing; and four
+merges landing within a minute queued three deploys behind the first, after
+which an unrelated PR run entered the same group and evicted the pending
+deploy for the tip of `main` — every workflow green, no job failed, `main`
+three commits ahead of what was serving. A cancelled run is not a red run, so
+nothing downstream notices either half. The group is now an expression:
+`pull_request` gets `deploy-pr-<ref>` with `cancel-in-progress: true`
+(superseding a check for a branch that moved on is correct, and those runs
+never deploy), while pushes and `workflow_dispatch` keep the serialized
+`deploy-prod` with `cancel-in-progress: false` for the reasons above.
+
 **A deploy must prove the site serves, not that containers started.**
 `/api/healthz` pings Postgres — every route needs the database, so a check that
 skips it reports green while everything 500s — but for a while nothing ever
