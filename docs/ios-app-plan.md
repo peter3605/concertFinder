@@ -143,11 +143,14 @@ third-party tokens) and [§10.2](#102-guideline-48-and-sign-in-with-apple)
   [§10.1.2](#1012-the-revoke-clause-which-this-plan-had-missed---built-2026-08-31),
   built 2026-08-31 as `DELETE /api/me/spotify-connection`.
 - ~~**The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**~~
-  **Built 2026-09-01** (production-hardening, P2-5): `rate_ledger_account`,
-  migration 0017, keyed `(source, day)` with no `user_id`, with
-  `RATE_CAP_TM_ACCOUNT_DAILY` / `RATE_CAP_SONGKICK_ACCOUNT_DAILY` defaulting to
-  5000. Exhaustion now surfaces as a dated `retry_after` instead of upstream
-  403s that look exactly like artists with no shows.
+  **Built 2026-08-30** (`d23eedf`): `rate_ledger_account`, migration 0017,
+  keyed `(source, day)` with no `user_id`, with `RATE_CAP_TM_ACCOUNT_DAILY` /
+  `RATE_CAP_SONGKICK_ACCOUNT_DAILY` defaulting to 5000. Exhaustion surfaces as
+  a dated `retry_after` instead of upstream 403s that look exactly like artists
+  with no shows. Hardened 2026-09-01 (P2-5): the account write used to fail
+  *open*, so a Postgres blip during the nightly fanout granted an unlimited
+  block — on the one cap the upstream actually enforces. It now grants
+  `min(granted, 50)` and logs at ERROR.
 
   **The decision it was standing in for is still open**, and it is a product
   one: how many people to admit per day. A visible ceiling is not a bigger
