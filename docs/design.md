@@ -791,26 +791,33 @@ In a multi-user deployment, a single heavy user must not exhaust Ticketmaster's 
   table, bucketed by UTC day.
 - Quota is taken out per scan as a reservation block on the context, not one
   DB round trip per call; unspent permits are handed back at the end.
-- Caps: `RATE_CAP_TM_PER_USER_DAILY` (250), `RATE_CAP_SONGKICK_PER_USER_DAILY`
+- Caps: `RATE_CAP_TM_PER_USER_DAILY` (500), `RATE_CAP_SONGKICK_PER_USER_DAILY`
   (100). 0 disables the cap for that source.
 - On user cap exceeded: degrade gracefully (serve cached results, surface a
   "refresh limited" message), do not fail entirely.
 
-**The cap must exceed the artist count, not just fit under the shared
-ceiling.** A scan needs roughly one call per artist per source once
-`concert_cache` lapses, so a cap below `MaxScoredArtists` (200) means a user
-can *never* cover their own profile: every scan spends the allowance partway
-through and reports itself incomplete. This shipped as TM=100 against 200
-artists, and presented as a concert list quietly holding half the shows it
-should. `main.go` warns at startup when a cap drops below the artist count.
+**The cap must exceed the cost of a *cold* scan, not the artist count, and not
+just fit under the shared ceiling.** Ticketmaster resolution is two-stage
+(§5.2) and only the positive resolution is cached forever, so a warm scan costs
+~1 call per artist and a first-ever scan costs ~2 —
+`MaxScoredArtists` × `ticketmaster.CallsPerArtistColdScan` = 400. A cap below
+that means a new user can *never* cover their own profile: the scan spends the
+allowance partway through and reports itself incomplete.
+
+This has been undersized twice in the same direction. TM=100 was below even the
+warm number. TM=250 cleared it, looked generous, and the first real scan died at
+exactly 250/250 having covered ~125 artists — a snapshot with 65 shows and
+`complete = false`. Checking against the artist count alone is what let it pass,
+so `main.go` and `internal/config`'s test both measure against the cold cost.
 
 **Every outbound call spends quota, including attraction resolution** — not
 just the events query. A source that runs out returns `errRateCapped`, which
 must not be read as "no results" (§5.4).
 
-**Sizing trade-off.** Ticketmaster's account-wide budget is 5,000/day, so 250
-per user supports roughly 20 concurrently active users rather than 50, and the
-500 that `.env.example` ships supports roughly 10.
+**Sizing trade-off.** Ticketmaster's account-wide budget is 5,000/day, so the
+500 per user a cold scan requires supports roughly 10 concurrently active users
+rather than 50. Halving it to 250 would double that and hand every new user a
+half-empty first feed, which is the trade the paragraph above refuses.
 
 **The account ceiling is a second ledger, not a bigger per-user cap** (added
 Phase 3, migration 0017). Per-user caps multiply: ten users at 500 is the whole
@@ -1147,7 +1154,7 @@ The single-instance architecture is a deliberate free-tier / low-ops choice, not
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | Spotify Web API changes invalidate an endpoint we depend on | Medium | Verified all endpoints against current spec; monitor changelog; concentrate API contact in `/internal/spotify` package for blast-radius containment. |
-| Ticketmaster rate limit insufficient at scale | Medium | Per-user accounting in Phase 3 (§8.3); apply for higher tier; aggressive `concert_cache` TTL. At 250/user against a 5,000/day account budget this binds at ~20 active users. |
+| Ticketmaster rate limit insufficient at scale | Medium | Per-user *and* account accounting in Phase 3 (§8.3); apply for higher tier; aggressive `concert_cache` TTL. At the 500/user a cold scan costs, against a 5,000/day account budget, this binds at ~10 active users — visibly, as a dated `retry_after`. |
 | ~~Bandsintown restricts public API for high volume~~ | **Realized** | The public API 403'd every request and the partnership request went unanswered. Source removed (§5.3). Ticketmaster is now the only primary, so a Ticketmaster outage is a total outage. |
 | A dead source is indistinguishable from an empty one | High | The Bandsintown failure ran for months because "403" and "this artist has no shows" both rendered as an empty list. Sources must surface transport failure distinctly from a negative result — the same rule that keeps `errRateCapped` out of the empty-result path (§5.4). |
 | Spotify Extended Quota Mode application is rejected or delayed | Low | Phase 1 and 2 do not require it. Begin application early in Phase 2. |
@@ -1227,7 +1234,7 @@ environments.
 |---|---|---|
 | `SNAPSHOT_STALE_AFTER_HOURS` | `6` | Staleness threshold for the SWR read (§6.0) |
 | `CONCERT_CACHE_TTL_HOURS` | `12` | Upstream response cache; bounded on both sides (§7.3) |
-| `RATE_CAP_TM_PER_USER_DAILY` | `250` | Must exceed the 200-artist scan (§8.3). `.env.example` ships `500` |
+| `RATE_CAP_TM_PER_USER_DAILY` | `500` | Must exceed a cold scan: 200 artists × 2 calls (§8.3) |
 | `RATE_CAP_SONGKICK_PER_USER_DAILY` | `100` | 0 disables the cap |
 | `RATE_CAP_TM_ACCOUNT_DAILY` | `5000` | Account-wide ceiling; matches Ticketmaster's per-key limit. 0 disables it |
 | `RATE_CAP_SONGKICK_ACCOUNT_DAILY` | `5000` | As above, for Songkick |
