@@ -214,13 +214,19 @@ func main() {
 				)
 			}
 		}
-		// A cap below the artist count means a user can never cover their own
-		// profile: every scan runs out of quota partway and reports itself
-		// incomplete. Worth saying out loud rather than leaving to be
-		// rediscovered from a thin concert list.
-		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < spotify.MaxScoredArtists {
-			logger.Warn("TM per-user daily cap is below the per-scan artist count; scans will be capped short",
-				"cap", cfg.RateCapTMPerUserDaily, "artists", spotify.MaxScoredArtists)
+		// A cap below the cost of a COLD scan means a new user can never cover
+		// their own profile: the scan runs out of quota partway and reports
+		// itself incomplete. Measured against artists x CallsPerArtistColdScan
+		// rather than against the artist count, because the artist count is
+		// the warm cost and checking it is what let a 250 cap look fine while
+		// covering 125 of 200 artists. Worth saying out loud rather than
+		// leaving to be rediscovered from a thin concert list.
+		coldScanCost := spotify.MaxScoredArtists * ticketmaster.CallsPerArtistColdScan
+		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < coldScanCost {
+			logger.Warn("TM per-user daily cap is below the cost of a cold scan; a new user's first scan will be capped short",
+				"cap", cfg.RateCapTMPerUserDaily,
+				"cold_scan_cost", coldScanCost,
+				"artists", spotify.MaxScoredArtists)
 		}
 
 		var fallbackChain concerts.Fallbacker

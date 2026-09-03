@@ -121,12 +121,15 @@ These come from third-party terms and have real consequences:
 Two upstream quotas bound how many people this can serve today, and neither is
 fixed by scaling the infrastructure:
 
-- **Ticketmaster** — an account-wide budget of 5000 calls/day. At the shipped
-  `RATE_CAP_TM_PER_USER_DAILY=500` (`.env.example`) that is ~10 concurrently
-  active users; at the code default of 250 it is ~20. The ledger models both
-  halves — per user *and* per account (`RATE_CAP_TM_ACCOUNT_DAILY`, default
-  5000) — so exhausting the account ceiling surfaces as a dated `retry_after`
-  rather than as upstream 403s that look exactly like artists with no shows.
+- **Ticketmaster** — an account-wide budget of 5000 calls/day against
+  `RATE_CAP_TM_PER_USER_DAILY=500` works out to roughly **10 concurrently
+  active users**. 500 is what a *cold* scan costs: 200 artists × 2 calls,
+  because TM resolution is two-stage and only the second stage is cached
+  forever. Halving it would double the user count and hand every new user a
+  half-empty first feed. The ledger models both limits — per user *and* per
+  account (`RATE_CAP_TM_ACCOUNT_DAILY`, default 5000) — so exhausting the
+  shared ceiling surfaces as a dated `retry_after` rather than as upstream
+  403s that look exactly like artists with no shows.
 - **Spotify** — the app runs in Development Mode, which caps authorized users.
   Lifting it requires an approved Extended Quota Mode application, which has
   not been started (design §9.1, §10.2).

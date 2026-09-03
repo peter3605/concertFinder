@@ -78,18 +78,27 @@ type Config struct {
 	// Per-user daily caps on outbound API calls (design §8.3). 0 disables
 	// enforcement for that source.
 	//
-	// These must be sized against spotify.MaxScoredArtists (200), not picked
-	// for the shared-account ceiling alone. A scan needs roughly one call per
-	// artist per source once the concert cache lapses; the previous TM cap of
-	// 100 was below that, so a single user could never cover their own
-	// profile in a day and every scan reported itself incomplete. 250 covers
-	// 200 artists plus resolution calls and leaves headroom.
+	// Size these against a COLD scan, which is
+	// spotify.MaxScoredArtists (200) x ticketmaster.CallsPerArtistColdScan
+	// (2) = 400, not against the artist count alone. Ticketmaster resolution
+	// is two-stage, so a warm cache costs ~1 call per artist and a first-ever
+	// scan costs ~2.
 	//
-	// The trade-off is real: TM's account-wide budget is 5000/day, so 250
-	// per user supports ~20 concurrently active users rather than ~50. With
-	// DefaultCacheTTL at 12h a user costs far less than their cap on a
-	// typical day, but the ceiling is worth revisiting before onboarding a
-	// crowd — the ledger enforces per-user limits, not the account total.
+	// This has now been undersized twice, in the same direction, for two
+	// different reasons. 100 was below even the warm number, so no user could
+	// ever cover their profile. 250 cleared the warm number and looked
+	// generous — and the first real scan died at exactly 250/250 having
+	// covered ~125 artists, writing a snapshot with 65 shows and
+	// complete=false. Neither failure raises an error; both present as a
+	// concert list quietly holding a fraction of the shows it should.
+	//
+	// The trade-off is real and is the reason this is not simply set higher:
+	// TM's account-wide budget is 5000/day, so 500 per user is ~10
+	// concurrently active users where 250 would be ~20. What makes 500 the
+	// right side of that trade is RateCapTMAccountDaily below — exceeding the
+	// shared ceiling is now a dated retry_after rather than upstream 403s
+	// that arrive looking exactly like artists with no shows. A visible limit
+	// for ten users beats a silent half-empty feed for twenty.
 	RateCapTMPerUserDaily       int
 	RateCapSongkickPerUserDaily int
 	// Account-wide daily ceilings. These are the numbers the upstream
@@ -223,7 +232,9 @@ func Load() (*Config, error) {
 	c.DailyJanitorHourUTC = hourEnv("DAILY_JANITOR_HOUR_UTC", 10)
 	// Defaults sized so one full scan of a 200-artist profile fits inside a
 	// day's allowance for each source; see the field comments.
-	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
+	// 500 = MaxScoredArtists (200) x CallsPerArtistColdScan (2), rounded up
+	// for headroom. Matches what .env.example ships; see the field comment.
+	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 500)
 	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 100)
 	// Defaults are the documented upstream allowances, so an operator who
 	// sets nothing is bounded by the real limit rather than by nothing.

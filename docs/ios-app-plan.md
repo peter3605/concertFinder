@@ -430,8 +430,10 @@ Start the application now; it is the longest pole in this plan.
 ### 3.3 Upstream quota, against an open download button
 
 Ticketmaster's account-wide budget is 5000 calls/day. `internal/config`
-defaults `RATE_CAP_TM_PER_USER_DAILY` to 250 (≈20 concurrently active users);
-`.env.example` ships 500, with a comment acknowledging that halves it to ≈10.
+defaults `RATE_CAP_TM_PER_USER_DAILY` to 500 (≈10 concurrently active users),
+matching `.env.example`. *Amended 2026-09-02: the default was 250 (≈20) when
+this was written, which the two files disagreed about; 500 is what a cold scan
+costs and both now say so.*
 Either way, the rate ledger enforces **per-user limits only** — it does not
 model the account total, so exceeding it degrades feeds silently rather than
 erroring.

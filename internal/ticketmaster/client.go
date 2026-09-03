@@ -15,6 +15,20 @@ import (
 
 const APIBase = "https://app.ticketmaster.com/discovery/v2"
 
+// CallsPerArtistColdScan is what one artist costs on a scan that finds nothing
+// cached: resolution (name -> attractionId) plus the events query. A warm
+// scan costs one, because positive resolutions are cached in
+// `artist_resolutions` and never expire.
+//
+// It exists as a named constant because sizing a per-user daily cap from the
+// warm number is a specific, repeatable mistake: RATE_CAP_TM_PER_USER_DAILY
+// shipped at 250 against 200 artists — comfortably above the artist count, and
+// still only enough for 125 of them — and the very first real scan died at
+// exactly 250/250, writing a snapshot with 65 shows and complete=false. Cap
+// checks should measure against MaxScoredArtists * CallsPerArtistColdScan,
+// which is the cost of the scan that actually matters: a new user's first one.
+const CallsPerArtistColdScan = 2
+
 const (
 	maxRetries       = 3
 	maxRetryAfter    = 30 * time.Second

@@ -5,6 +5,7 @@ import (
 
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/spotify"
+	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
 // loadDefaults runs Load() with only the required vars set, so the assertions
@@ -33,23 +34,31 @@ func loadDefaults(t *testing.T) *Config {
 	return cfg
 }
 
-// A per-user daily cap below the number of artists in a scan means the user
-// can never cover their own profile: once the concert cache lapses, every
-// scan spends the whole allowance partway through and reports itself
-// incomplete. This shipped as TM=100 against 200 artists and showed up as a
-// concert list that quietly held half the shows it should have.
-func TestDailyCapsCoverAFullScan(t *testing.T) {
+// A per-user daily cap below the cost of a COLD scan means a new user can
+// never cover their own profile: the scan spends the whole allowance partway
+// through and reports itself incomplete. Neither failure this has had raises
+// an error — both present as a concert list quietly holding a fraction of the
+// shows it should.
+//
+// Measured against artists x CallsPerArtistColdScan, not against the artist
+// count. That distinction is the entire point of this test now: the earlier
+// version compared against MaxScoredArtists alone, which is the WARM cost, so
+// it passed a 250 cap that covered 125 of 200 artists. Ticketmaster
+// resolution is two-stage and a first-ever scan pays for both stages.
+func TestDailyCapsCoverAColdScan(t *testing.T) {
 	cfg := loadDefaults(t)
+	coldScanCost := spotify.MaxScoredArtists * ticketmaster.CallsPerArtistColdScan
 	for _, c := range []struct {
 		name string
 		cap  int
 	}{
 		{"ticketmaster", cfg.RateCapTMPerUserDaily},
 	} {
-		if c.cap > 0 && c.cap < spotify.MaxScoredArtists {
-			t.Errorf("%s daily cap %d is below MaxScoredArtists (%d): a single "+
-				"user could never cover their profile in a day",
-				c.name, c.cap, spotify.MaxScoredArtists)
+		if c.cap > 0 && c.cap < coldScanCost {
+			t.Errorf("%s daily cap %d is below the cold-scan cost (%d artists x %d calls = %d): "+
+				"a new user could never cover their profile on their first day",
+				c.name, c.cap, spotify.MaxScoredArtists,
+				ticketmaster.CallsPerArtistColdScan, coldScanCost)
 		}
 	}
 }
