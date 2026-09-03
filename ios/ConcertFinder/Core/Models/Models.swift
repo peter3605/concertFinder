@@ -52,6 +52,14 @@ struct Act: Codable, Hashable, Identifiable, Sendable {
     /// answer for everything found through the Phase 2 fallback chain, and
     /// must render as nothing rather than as "Support".
     var billing: String?
+    /// Why this artist is in the feed — one short line derived from the
+    /// strongest signal in the user's affinity profile ("You follow them",
+    /// "#7 in your top artists"). Absent in three ways that all happen, so it
+    /// must render as nothing rather than as a placeholder: the server omits
+    /// it when it has nothing honest to say about an artist, a profile
+    /// computed by an older build carries none at all, and `/api/discover`
+    /// has no user to say it about.
+    var reason: String?
 
     var id: String { dedupKey }
     var isSaved: Bool { saved ?? false }
@@ -163,6 +171,20 @@ struct ConcertsResponse: Codable, Sendable {
 }
 
 struct SavedConcertsResponse: Codable, Sendable {
+    let count: Int
+    let events: [Event]
+}
+
+/// `GET /api/discover` — "popular shows near you", with no session.
+///
+/// The `Event` shape is the feed's, deliberately, so both clients reuse their
+/// models and their card. What it does **not** carry is the point: no facets,
+/// no `computed_at`, no `refreshing`, no `complete`, and acts with no artist
+/// id, no `saved`, no `subscribed` and no `reason`. This response knows
+/// nothing about who is asking, so nothing rendering it may imply that it
+/// does — the label is "popular shows near you", never "your" anything.
+struct DiscoverResponse: Codable, Sendable {
+    let location: UserLocation
     let count: Int
     let events: [Event]
 }

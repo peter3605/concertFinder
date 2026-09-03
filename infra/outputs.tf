@@ -111,3 +111,17 @@ output "breakglass_private_key_path" {
   description = "Local path to the SSH private key. Only used if SSM ever becomes unreachable."
   value       = local_sensitive_file.breakglass_private_key.filename
 }
+
+# The alarm topics. An email subscription sits in "PendingConfirmation" until
+# the recipient clicks the link AWS mails on creation, and Terraform reports
+# the resource created either way — so a green apply proves the topic exists,
+# not that anything will ever arrive. Check these in the SNS console once.
+output "alerts_topic_arn" {
+  description = "SNS topic for the EC2 status-check alarms. Confirm the email subscription once, by hand."
+  value       = aws_sns_topic.alerts.arn
+}
+
+output "billing_alerts_topic_arn" {
+  description = "SNS topic for the billing alarm. Separate because the EstimatedCharges metric is only published in us-east-1, and an alarm can only publish to a topic in its own region."
+  value       = aws_sns_topic.billing_alerts.arn
+}

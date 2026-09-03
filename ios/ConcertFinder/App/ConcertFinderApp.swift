@@ -18,6 +18,7 @@ struct ConcertFinderApp: App {
                 .environment(container.saved)
                 .environment(container.artists)
                 .environment(container.location)
+                .environment(container.discover)
                 .environment(container.push)
                 .environment(container)
                 .task {
@@ -50,35 +51,83 @@ final class AppContainer {
     let saved: SavedModel
     let artists: ArtistsModel
     let location: LocationModel
+    let discover: DiscoverModel
     let push: PushRegistrar
 
     /// Set when a notification or universal link asks for a specific event.
     var pendingEventKey: String?
 
+    /// Which tab is showing. Here rather than in `MainTabView` because
+    /// screens inside one tab now send the user to another — the empty feed
+    /// points at Artists, a notification points at the feed — and view state
+    /// is not reachable from either.
+    var selectedTab: AppTab = .feed
+
     private let tokens = KeychainTokenStore()
+
+    /// Held for the app's lifetime on purpose. This used to be constructed
+    /// inline in `start()`, where nothing retained it: it was deallocated
+    /// before the first request, so a 401 cleared the Keychain and left
+    /// `auth.state` on `.signedIn` forever — the user kept a signed-in shell
+    /// over an API that would answer nothing.
+    private let invalidationBridge: SessionInvalidationBridge
 
     init() {
         let baseURL = Self.resolveBaseURL()
         let api = APIClient(baseURL: baseURL, tokens: tokens)
         self.api = api
         self.baseURL = baseURL
-        self.auth = AuthController(api: api, tokens: tokens, baseURL: baseURL)
+        let auth = AuthController(api: api, tokens: tokens, baseURL: baseURL)
+        self.auth = auth
         self.feed = FeedModel(api: api)
         self.saved = SavedModel(api: api)
         self.artists = ArtistsModel(api: api)
         self.location = LocationModel(api: api)
+        self.discover = DiscoverModel(api: api)
         self.push = PushRegistrar(api: api)
+        // `[weak auth]` is what keeps this from being a cycle: the client
+        // holds the bridge, the bridge would hold the controller, and the
+        // controller holds the client.
+        self.invalidationBridge = SessionInvalidationBridge { [weak auth] in
+            auth?.handleSessionExpiry()
+        }
     }
 
     func start() async {
         await seedUITestSessionIfRequested()
         // One place decides what a 401 means, so no screen has to.
-        let auth = self.auth
-        await api.setInvalidationHandler(SessionInvalidationBridge { @MainActor in
-            auth.handleSessionExpiry()
-        })
+        await api.setInvalidationHandler(invalidationBridge)
         self.auth.onSignIn = { [weak self] _ in
             Task { await self?.push.refreshRegistrationIfAuthorized() }
+        }
+        // Everything that must be undone when the session ends, by either
+        // route. Assigned here rather than in Settings because expiry is the
+        // path nobody taps: before this, a 401 left the previous account's
+        // feed on screen and its device still registered for push.
+        self.auth.onSignOut = { [weak self] in
+            guard let self else { return }
+            // Synchronous first. The sign-out has already flipped the UI, and
+            // a frame of the previous account's concerts is the whole defect.
+            self.feed.reset()
+            self.saved.reset()
+            self.artists.reset()
+            self.location.reset()
+            self.discover.reset()
+            self.selectedTab = .feed
+            // Awaited, and last: on the deliberate sign-out path this runs
+            // while the session token is still valid, which is the only
+            // moment the server will honour a deregistration.
+            await self.push.deregister()
+        }
+        self.location.onLocationChanged = { [weak self] in
+            guard let self else { return }
+            Task {
+                // The banner's own state first, then the results it describes
+                // — otherwise "set your location" outlives the location the
+                // user just set.
+                await self.feed.refreshLocationState()
+                await self.feed.load()
+            }
         }
         await self.auth.restore()
         if case .signedIn = self.auth.state {

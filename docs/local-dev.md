@@ -70,6 +70,17 @@ it and the config comes up empty, failing on `DATABASE_URL`.
 so it can't collide with a local Postgres). If you changed that mapping, change
 this to match.
 
+`DB_MAX_CONNS` (optional, default 20) sizes the pgx pool. It is set in code
+rather than in the connection string because pgx's own default is
+`max(4, NumCPU)` — four on the production instance — and that pool is shared by
+river's LISTEN/NOTIFY notifier, which holds one connection open indefinitely,
+its elector, producer and completer, five job workers, and every HTTP request.
+Exhaustion never raises: callers block inside `Acquire` until their own context
+expires, so it reads as slow requests and scans that spend their budget waiting
+for a connection. The server logs `db pool` every 60s with `empty_acquires` and
+`empty_acquire_wait`, which are the two numbers that distinguish a saturated
+pool from a slow query.
+
 Then open https://127.0.0.1:3000 and click "Log in with Spotify". The first
 `/api/me/concerts` request returns an empty list with `refreshing: true` while
 a background scan runs — the frontend polls every 10s and fills in when the
@@ -84,8 +95,18 @@ go build ./... && go vet ./... && go test ./...
 npm --prefix web run lint && npm --prefix web run build
 ```
 
-If you touched `Caddyfile`, `docker-compose.prod.yml`, `docker-compose.yml`, or
-`scripts/verify-deploy.sh`, also run:
+CI also runs `govulncheck ./...` in the same job the deploy depends on, so a
+known-vulnerable dependency blocks the ship rather than annotating it. It
+reports against whichever toolchain is in PATH, so a standard-library finding
+locally usually means your Go is behind, not that the tree is:
+
+```
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+```
+
+If you touched `Caddyfile`, either compose file, or any of the scripts that
+only ever run on the instance — `verify-deploy.sh`, `render-env.sh`,
+`backup-db.sh`, `prune-images.sh`, `restore-drill.sh` — also run:
 
 ```
 ./scripts/check-deploy-config.sh          # requires docker
@@ -95,7 +116,10 @@ Those files are the only ones in the repo that never execute during local
 development — `docker-compose.yml` has no Caddy service and `go run` reads none
 of them — so nothing else catches a defect in them until it is already in
 production, where the symptom is a Caddy crash loop with a healthy-looking api
-container beside it. CI runs the same script in the `deploy-config` job.
+container beside it. The script parses each one and asserts its executable bit.
+`restore-drill.sh` is the extreme case: nothing runs it on a schedule, so its
+only automated attention is this check and the day it is needed is the worst
+day to find a typo. CI runs the same script in the `deploy-config` job.
 
 ## Resetting the local database
 

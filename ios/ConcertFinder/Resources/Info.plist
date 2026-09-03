@@ -63,5 +63,11 @@
 	     at a local server without a code change. -->
 	<key>CFAPIBaseURL</key>
 	<string>$(CF_API_BASE_URL)</string>
+	<!-- The App Store listing's numeric ID, assigned on first submission and
+	     therefore empty today. UpdateRequiredView hides its "Open App Store"
+	     button while this is empty rather than sending the user to a store
+	     page that does not exist, on a screen it does not let them dismiss. -->
+	<key>CFAppStoreAppID</key>
+	<string>$(CF_APP_STORE_APP_ID)</string>
 </dict>
 </plist>

@@ -70,7 +70,45 @@ while IFS=$'\t' read -r name value; do
         missing+=("$key")
         continue
     fi
-    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    # Single-quote the value. This file has two consumers with two different
+    # parsers: docker compose reads it as an env_file, and scripts/backup-db.sh
+    # does `set -a; . "$ENV_FILE"` -- i.e. it hands it to bash. Written bare, a
+    # value holding a space, a `$`, a backtick or a `;` is fine for compose and
+    # is a syntax error or a command substitution for bash, so the failure is
+    # invisible in the worst way: the app stays perfectly healthy and only the
+    # nightly backup, which nobody watches, dies. Compose strips surrounding
+    # single quotes, so quoting satisfies both.
+    #
+    # A value containing a single quote itself is REFUSED rather than escaped,
+    # because no single encoding satisfies both parsers -- verified against
+    # `docker compose config`, not assumed:
+    #
+    #   - The shell's '\'' idiom (close, escape, reopen) is a parse error for
+    #     compose: "unexpected character \" in variable name".
+    #   - Double-quoting with backslash escapes agrees with bash on \, " and $,
+    #     and diverges on the backtick -- compose keeps the backslash literal
+    #     while bash strips it and runs the command substitution. That is the
+    #     dangerous direction to be wrong in.
+    #
+    # So single quotes are the encoding, and the one value they cannot carry
+    # fails here, by name, before anything is written -- rather than on the
+    # instance mid-deploy, or silently in the backup at 3am.
+    #
+    # APNS_P8_KEY's `\n` sequences survive unchanged: they are two literal
+    # characters by the time they get here (set-secrets.sh escapes the PEM
+    # because this read loop and compose's env_file are both line-oriented),
+    # single quotes keep them literal, and push.parseP8 unescapes them before
+    # pem.Decode.
+    case "$value" in
+        *"'"*)
+            # The value is never echoed: these are secrets.
+            echo "ERROR: value of $key contains a single quote, which cannot be" >&2
+            echo "  encoded safely for both docker compose and 'set -a; . \$ENV_FILE'." >&2
+            echo "  Re-issue that secret without one and re-run put-parameter." >&2
+            exit 1
+            ;;
+    esac
+    printf "%s='%s'\n" "$key" "$value" >> "$tmp"
     count=$((count + 1))
 done <<< "$raw"
 

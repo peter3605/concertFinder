@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"github.com/peterho/concertfinder/internal/affinity"
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
@@ -33,6 +34,12 @@ type ConcertsHandler struct {
 	FallbackLocation   concerts.Location
 	SnapshotStaleAfter time.Duration
 	SnapshotCache      *SnapshotCache // nil = cache disabled
+	// Affinity supplies the per-act "why is this in my feed" line. Read-only
+	// here — the handler calls ReasonsFor, never LoadOrCompute, so a missing
+	// or expired profile costs one line on a card and never a Spotify
+	// fan-out on a request the frontend polls every 10s. nil disables the
+	// annotation entirely.
+	Affinity *affinity.Service
 }
 
 type concertsResponse struct {
@@ -80,9 +87,10 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		loc        = h.FallbackLocation
 		saved      map[string]struct{}
 		subscribed map[string]struct{}
+		reasons    map[string]string
 	)
 	var pre sync.WaitGroup
-	pre.Add(3)
+	pre.Add(4)
 	go func() {
 		defer pre.Done()
 		userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID)
@@ -116,7 +124,33 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 		subscribed = s
 	}()
+	go func() {
+		defer pre.Done()
+		if h.Affinity == nil {
+			return
+		}
+		rs, err := h.Affinity.ReasonsFor(r.Context(), u.ID)
+		if err != nil {
+			slog.Warn("concerts: affinity reasons lookup failed", "err", err, "user", u.ID)
+			return
+		}
+		reasons = rs
+	}()
 	pre.Wait()
+
+	if !validCoords(loc.Latitude, loc.Longitude) {
+		// Defence in depth rather than a reachable state: PUT /me/location
+		// validates what it stores and config.Validate rejects a bad
+		// USER_LATITUDE/USER_LONGITUDE at startup. It is here because the
+		// consequence of a bad pair reaching this point is not an error — it
+		// is a valid-looking location_key, a snapshot filed under it, and a
+		// five-minute scan job, all of which look completely normal from the
+		// outside.
+		slog.Error("concerts: refusing to scan an out-of-range location",
+			"user", u.ID, "lat", loc.Latitude, "lng", loc.Longitude)
+		http.Error(w, "your saved location is invalid; set it again", http.StatusInternalServerError)
+		return
+	}
 
 	locKey := jobs.LocationKey(loc)
 
@@ -216,6 +250,12 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if _, ok := subscribed[filtered[i].Artist.ID]; ok {
 			filtered[i].Subscribed = true
 		}
+		// Absent for an artist scored before signals were recorded, or one
+		// whose only contribution has no wording. A missing reason renders
+		// as nothing on both clients, never as a placeholder.
+		if reason, ok := reasons[filtered[i].Artist.ID]; ok {
+			filtered[i].Reason = reason
+		}
 	}
 
 	// Group last, after filtering and tagging: an act carries its own saved
@@ -282,6 +322,14 @@ func (h *ConcertsHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 			Longitude:   userLoc.Longitude,
 			RadiusMiles: userLoc.RadiusMiles,
 		}
+	}
+	// Same guard as Get, and for the same reason: this path enqueues the very
+	// job the coordinate identifies.
+	if !validCoords(loc.Latitude, loc.Longitude) {
+		slog.Error("refresh: refusing to scan an out-of-range location",
+			"user", u.ID, "lat", loc.Latitude, "lng", loc.Longitude)
+		http.Error(w, "your saved location is invalid; set it again", http.StatusInternalServerError)
+		return
 	}
 	locKey := jobs.LocationKey(loc)
 

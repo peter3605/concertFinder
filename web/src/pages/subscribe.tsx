@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { ActionError } from '@/components/action-error';
 import { SpotifyAttribution } from '@/components/spotify-attribution';
-import { mutatingFetch } from '@/lib/api';
+import { apiFetch, mutatingFetch } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
 
 // Full-fledged subscribe/search page. Any Spotify artist (touring or not)
@@ -30,9 +30,13 @@ export default function SubscribePage() {
   const [loading, setLoading] = useState(true);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generation = useRef(0);
+  // Subscribe and unsubscribe are the same URL with different methods, so a
+  // double-click could put both in flight and let the server's ordering — not
+  // the user's — decide the outcome. One change per artist at a time.
+  const pendingArtists = useRef(new Set<string>());
 
   useEffect(() => {
-    fetch('/api/me/subscribed-artists', { credentials: 'same-origin' })
+    apiFetch('/api/me/subscribed-artists')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((j: { artists: SubscribedArtist[] }) => setSubs(j.artists ?? []))
       .catch(() => setSubs([]))
@@ -41,20 +45,25 @@ export default function SubscribePage() {
 
   useEffect(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    // Invalidate whatever is in flight here, at the top of the effect —
+    // not inside the debounce timer. Clearing the box takes the early return
+    // below, which never armed a timer, so the generation never advanced and
+    // a fetch that resolved afterwards refilled the results under an empty
+    // search field. The same return is why `searching` is cleared explicitly:
+    // that request's `finally` is now on a stale generation and will not.
+    const my = ++generation.current;
     const trimmed = query.trim();
     if (!trimmed) {
       setResults([]);
       setSearchErr('');
+      setSearching(false);
       return;
     }
     debounceTimer.current = setTimeout(async () => {
-      const my = ++generation.current;
       setSearching(true);
       setSearchErr('');
       try {
-        const r = await fetch(`/api/me/artists/search?q=${encodeURIComponent(trimmed)}`, {
-          credentials: 'same-origin',
-        });
+        const r = await apiFetch(`/api/me/artists/search?q=${encodeURIComponent(trimmed)}`);
         if (my !== generation.current) return;
         if (!r.ok) {
           setSearchErr(`Search failed (${r.status})`);
@@ -77,32 +86,53 @@ export default function SubscribePage() {
 
   const subscribedIDs = new Set(subs.map((s) => s.id));
 
+  // Both mutators update functionally rather than restoring a list snapshot
+  // taken before the click: two different artists can be in flight at once,
+  // and replaying the old array would undo whichever one succeeded.
   async function subscribe(a: SearchArtist) {
+    if (pendingArtists.current.has(a.id)) return;
+    pendingArtists.current.add(a.id);
     setActionErr(null);
-    const prev = subs;
-    setSubs([...subs, { id: a.id, name: a.name }].sort(byName));
-    const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(a.id)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ display_name: a.name }),
-    });
-    if (!r.ok) {
-      setSubs(prev);
+    setSubs((s) => [...s.filter((x) => x.id !== a.id), { id: a.id, name: a.name }].sort(byName));
+    try {
+      // A rejected fetch and a refused request are the same failure to the
+      // user; both roll back here. Without the catch a dropped connection
+      // left the button reading "Subscribed" for an artist nobody followed.
+      const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(a.id)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: a.name }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch {
+      setSubs((s) => s.filter((x) => x.id !== a.id));
       setActionErr(`Couldn't subscribe to ${a.name}. Try again.`);
+    } finally {
+      pendingArtists.current.delete(a.id);
     }
   }
 
   async function unsubscribe(artistID: string) {
+    if (pendingArtists.current.has(artistID)) return;
+    pendingArtists.current.add(artistID);
     setActionErr(null);
-    const prev = subs;
-    const name = subs.find((s) => s.id === artistID)?.name ?? 'that artist';
-    setSubs(subs.filter((s) => s.id !== artistID));
-    const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(artistID)}`, {
-      method: 'DELETE',
-    });
-    if (!r.ok) {
-      setSubs(prev);
+    // Captured before the optimistic removal, since restoring it is the
+    // rollback and the name is what the error message says.
+    const removed = subs.find((s) => s.id === artistID);
+    const name = removed?.name ?? 'that artist';
+    setSubs((s) => s.filter((x) => x.id !== artistID));
+    try {
+      const r = await mutatingFetch(`/api/me/subscribed-artists/${encodeURIComponent(artistID)}`, {
+        method: 'DELETE',
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch {
+      if (removed) {
+        setSubs((s) => [...s.filter((x) => x.id !== artistID), removed].sort(byName));
+      }
       setActionErr(`Couldn't unsubscribe from ${name}. Try again.`);
+    } finally {
+      pendingArtists.current.delete(artistID);
     }
   }
 

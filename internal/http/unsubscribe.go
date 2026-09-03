@@ -86,6 +86,10 @@ func (h *UnsubscribeHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *UnsubscribeHandler) Post(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
+		// Unauthenticated, so the body is bounded before ParseForm reads it —
+		// this is the one mutating endpoint anyone on the internet can reach
+		// with no session, and ParseForm's own default cap is 10 MB.
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		_ = r.ParseForm()
 		token = r.PostFormValue("token")
 	}

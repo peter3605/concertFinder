@@ -1,0 +1,8 @@
+{
+  "_links": {
+    "self": {
+      "href": "/discovery/v2/events.json?attractionId=K8vZ917headline&size=100"
+    }
+  },
+  "page": { "size": 100, "totalElements": 0, "totalPages": 0, "number": 0 }
+}

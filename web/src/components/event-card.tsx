@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bell, BellOff, MapPin, Star, StarOff, Ticket } from 'lucide-react';
+import { Bell, MapPin, Star, Ticket } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,8 +8,12 @@ import { cn } from '@/lib/utils';
 
 type Props = {
   event: Event;
-  onToggleSave: (dedupKey: string, currentlySaved: boolean) => void;
-  onToggleSubscribe: (artistID: string, artistName: string, currentlySubscribed: boolean) => void;
+  // Both absent on the signed-out discover section, which is the same card
+  // over a response that carries no account: there is nothing to save a show
+  // to and no artist ID to subscribe with, and a star that silently does
+  // nothing is worse than no star.
+  onToggleSave?: (dedupKey: string, currentlySaved: boolean) => void;
+  onToggleSubscribe?: (artistID: string, artistName: string, currentlySubscribed: boolean) => void;
 };
 
 // How many acts to show before collapsing. A festival can match dozens of
@@ -32,6 +36,13 @@ function formatDay(iso: string): string {
 // save and subscribe controls because both are per-artist.
 export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
   const [expanded, setExpanded] = useState(false);
+  // The server groups by event_key and every event it emits has at least one
+  // act, so this is defence rather than a case we expect. It is worth having
+  // because the alternative is not a bad card: `acts[0]` on an empty array is
+  // undefined, reading `.artist` off it throws during render, and React takes
+  // the whole SPA to the error boundary -- one malformed row would blank the
+  // entire feed rather than cost one card.
+  if (event.acts.length === 0) return null;
   const multi = event.acts.length > 1;
   const shown = expanded ? event.acts : event.acts.slice(0, VISIBLE_ACTS);
   const hidden = event.acts.length - shown.length;
@@ -71,6 +82,7 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
                   <h3 className="truncate text-lg font-semibold">{solo.artist.name}</h3>
                   <BillingLabel billing={solo.billing} />
                 </div>
+                <ActReason reason={solo.reason} />
                 <div className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
                   <MapPin className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{place}</span>
@@ -86,7 +98,7 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
           {/* A single-act card keeps its controls in the corner, where they
               have always been. A multi-act card has one pair per artist
               below, so a corner pair would be ambiguous. */}
-          {!multi && (
+          {!multi && onToggleSave && onToggleSubscribe && (
             <ActControls
               act={solo}
               onToggleSave={onToggleSave}
@@ -104,6 +116,7 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
                     <span className="truncate text-sm font-medium">{a.artist.name}</span>
                     <BillingLabel billing={a.billing} />
                   </span>
+                  <ActReason reason={a.reason} />
                   {a.artist.genres && a.artist.genres.length > 0 && (
                     <div className="mt-0.5 flex flex-wrap gap-1">
                       {a.artist.genres.slice(0, 2).map((g) => (
@@ -114,11 +127,13 @@ export function EventCard({ event, onToggleSave, onToggleSubscribe }: Props) {
                     </div>
                   )}
                 </div>
-                <ActControls
-                  act={a}
-                  onToggleSave={onToggleSave}
-                  onToggleSubscribe={onToggleSubscribe}
-                />
+                {onToggleSave && onToggleSubscribe && (
+                  <ActControls
+                    act={a}
+                    onToggleSave={onToggleSave}
+                    onToggleSubscribe={onToggleSubscribe}
+                  />
+                )}
               </li>
             ))}
           </ul>
@@ -172,6 +187,15 @@ function BillingLabel({ billing }: { billing?: Act['billing'] }) {
   return <Badge variant="muted">{billing === 'headliner' ? 'Headlining' : 'Support'}</Badge>;
 }
 
+// Why this artist is in the feed, in the server's own words. Absent for
+// artists the profile has nothing honest to say about, and absent for every
+// act on a profile computed before the field existed — so nothing renders
+// rather than an empty line or a hedge.
+function ActReason({ reason }: { reason?: string }) {
+  if (!reason) return null;
+  return <p className="mt-0.5 truncate text-xs text-muted-foreground">{reason}</p>;
+}
+
 // Star (save) + bell (subscribe) for one artist. Labels name the artist
 // because a card can carry several of these, and "Save this show" repeated
 // six times tells a screen reader user nothing about which one they're on.
@@ -181,10 +205,14 @@ function ActControls({
   onToggleSubscribe,
 }: {
   act: Act;
-  onToggleSave: Props['onToggleSave'];
-  onToggleSubscribe: Props['onToggleSubscribe'];
+  onToggleSave: NonNullable<Props['onToggleSave']>;
+  onToggleSubscribe: NonNullable<Props['onToggleSubscribe']>;
 }) {
   const name = act.artist.name;
+  // Unset is the same icon, unfilled — not the `Off` variant. A struck-through
+  // bell means "muted" everywhere else on the web, so BellOff read as "we are
+  // suppressing alerts for this artist" when it actually meant the opposite,
+  // and StarOff said the same thing about a show nobody had saved yet.
   return (
     <div className="flex shrink-0 gap-1">
       <Button
@@ -195,7 +223,7 @@ function ActControls({
         title={act.saved ? `Remove ${name} from saved` : `Save ${name}`}
         className={cn(act.saved ? 'text-yellow-500 hover:text-yellow-600' : 'text-muted-foreground')}
       >
-        {act.saved ? <Star className="fill-current" /> : <StarOff />}
+        <Star className={act.saved ? 'fill-current' : undefined} />
       </Button>
       <Button
         variant="ghost"
@@ -210,7 +238,7 @@ function ActControls({
         }
         className={cn(act.subscribed ? 'text-primary hover:text-primary/80' : 'text-muted-foreground')}
       >
-        {act.subscribed ? <Bell className="fill-current" /> : <BellOff />}
+        <Bell className={act.subscribed ? 'fill-current' : undefined} />
       </Button>
     </div>
   );

@@ -131,6 +131,13 @@ enum FilterStore {
         guard let data = try? JSONEncoder().encode(filters) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
+
+    /// Sign-out. Filters are a view onto one account's facets — a venue and a
+    /// genre the next account may have no shows in — so leaving the blob
+    /// behind hands them an empty feed they did not filter.
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 }
 
 /// Whether this account has ever been through a completed first scan.
@@ -142,6 +149,7 @@ enum FilterStore {
 /// different account on the same device gets its own first run.
 enum FirstRunTracker {
     private static let key = "cf.firstRunCompleted"
+    private static let pushPromptKey = "cf.pushPromptOffered"
 
     static var hasCompleted: Bool {
         UserDefaults.standard.bool(forKey: key)
@@ -152,7 +160,56 @@ enum FirstRunTracker {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    /// Whether the soft prompt for notifications has been raised.
+    ///
+    /// The system authorization dialog is a one-shot — a decline is sticky
+    /// and cannot be asked again from inside the app — so the soft prompt in
+    /// front of it is shown once and never repeated, whatever the answer was.
+    /// Settings remains the way in for anyone who changes their mind.
+    static var hasOfferedPushPrompt: Bool {
+        UserDefaults.standard.bool(forKey: pushPromptKey)
+    }
+
+    static func markPushPromptOffered() {
+        guard !hasOfferedPushPrompt else { return }
+        UserDefaults.standard.set(true, forKey: pushPromptKey)
+    }
+
+    /// Sign-out. Both keys, because both are per account rather than per
+    /// device: a different person signing in on this phone gets their own
+    /// first run and their own one chance to be asked about notifications.
     static func reset() {
         UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: pushPromptKey)
+    }
+}
+
+/// One-off explanatory hints the user can dismiss for good.
+///
+/// Persisted rather than held in view state: a hint that comes back on the
+/// next launch was not dismissed, it was postponed, and the user has no way
+/// to tell the difference except by dismissing it again.
+enum HintStore {
+    enum Hint: String, CaseIterable {
+        /// Introduces the bookmark and the bell together. The two controls
+        /// are individually legible and nothing said what the *pair* was for
+        /// — subscribe is the retention action and it reads as a duplicate
+        /// save until someone says otherwise.
+        case saveVersusSubscribe = "cf.hint.saveVersusSubscribe"
+    }
+
+    static func isDismissed(_ hint: Hint) -> Bool {
+        UserDefaults.standard.bool(forKey: hint.rawValue)
+    }
+
+    static func dismiss(_ hint: Hint) {
+        UserDefaults.standard.set(true, forKey: hint.rawValue)
+    }
+
+    /// Sign-out, with the rest of the per-account state.
+    static func reset() {
+        for hint in Hint.allCases {
+            UserDefaults.standard.removeObject(forKey: hint.rawValue)
+        }
     }
 }

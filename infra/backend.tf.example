@@ -1,0 +1,31 @@
+# Copy to backend.tf, fill in the bucket name, then migrate. This is not
+# backend.tf already because adding a backend block makes `terraform init`
+# demand a bucket that does not exist yet — which would break `terraform
+# validate` for everyone, including CI-style checks, until someone ran the
+# bootstrap. See docs/aws-deploy.md, "Terraform state", for the full procedure.
+#
+#   cd infra/bootstrap && terraform init && terraform apply   # creates the bucket
+#   cd .. && cp backend.tf.example backend.tf
+#   # replace <account-id> with `aws sts get-caller-identity --query Account --output text`
+#   terraform init -migrate-state
+#
+# After the migration: `terraform.tfstate` in this directory is a stale local
+# copy, not the source of truth. Delete it and its .backup — they still contain
+# the SES SMTP password and the break-glass private key, and a stale secret in a
+# forgotten file is the same secret.
+#
+# `use_lockfile` is S3-native locking and needs Terraform >= 1.11 (this repo's
+# required_version floor is 1.6, which predates it — bump the floor in main.tf
+# at the same time as adopting this, or the lock is silently absent for anyone
+# on an older CLI). It replaces the DynamoDB table the older guides describe;
+# there is no table to create and none to pay for.
+
+terraform {
+  backend "s3" {
+    bucket       = "concertfinder-tfstate-<account-id>"
+    key          = "prod/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

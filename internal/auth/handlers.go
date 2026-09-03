@@ -203,27 +203,44 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID, err := RandomString(32)
+	// The row id and the credential are two different values since migration
+	// 0018. The id is opaque and is what other tables reference; the token is
+	// what the caller presents, and only its hash is ever written down.
+	sessionRowID := uuid.NewString()
+	sessionToken, err := RandomString(32)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	expires := time.Now().Add(SessionCreatedTTL)
-	if err := db.CreateSession(r.Context(), d.Pool, db.Session{
-		ID:        sessionID,
+	sess := db.Session{
+		ID:        sessionRowID,
+		TokenHash: HashSessionToken(sessionToken),
 		UserID:    user.ID,
 		ExpiresAt: expires,
-	}); err != nil {
-		slog.Error("create session failed", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
 	}
 	// An app-initiated login ends in a one-time code, not a cookie. The
 	// cookie is deliberately not set in that case: ASWebAuthenticationSession
 	// runs in a web context whose jar the app cannot read, so setting it
 	// would leave a session usable only by that throwaway context.
+	//
+	// The token minted just above is discarded for that path and the row is
+	// written with no hash at all, so the session exists but authenticates
+	// nobody until POST /api/auth/mobile/exchange claims it. That is what
+	// lets the app's credential be created at redemption time and travel
+	// only in the exchange response — the alternative is escrowing a working
+	// token in mobile_auth_codes, which is the exact storage this change
+	// exists to remove.
 	if hs.AppChallenge != "" {
-		code, err := d.mintMobileCode(r, sessionID, hs.AppChallenge)
+		sess.TokenHash = ""
+	}
+	if err := db.CreateSession(r.Context(), d.Pool, sess); err != nil {
+		slog.Error("create session failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if hs.AppChallenge != "" {
+		code, err := d.mintMobileCode(r, sessionRowID, hs.AppChallenge)
 		if err != nil {
 			slog.Error("mint mobile auth code failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -236,7 +253,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSessionCookie(w, d.CookieDomain, sessionID, expires)
+	setSessionCookie(w, d.CookieDomain, sessionToken, expires)
 
 	if d.OnLoginSuccess != nil {
 		d.OnLoginSuccess(r.Context(), user.ID)
@@ -253,8 +270,8 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 // row is what actually logs the caller out; clearing the cookie is cosmetic
 // for a bearer client, and harmless.
 func (d *Deps) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if sessID, _ := sessionCredential(r); sessID != "" {
-		_ = db.DeleteSession(r.Context(), d.Pool, sessID)
+	if token, _ := sessionCredential(r); token != "" {
+		_ = db.DeleteSessionByTokenHash(r.Context(), d.Pool, HashSessionToken(token))
 	}
 	clearSessionCookie(w, d.CookieDomain)
 	w.WriteHeader(http.StatusNoContent)

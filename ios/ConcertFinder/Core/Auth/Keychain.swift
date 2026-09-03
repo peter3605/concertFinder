@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 /// Keychain-backed storage for the session token.
 ///
@@ -34,14 +35,31 @@ actor KeychainTokenStore: TokenStore {
         return cached
     }
 
-    func store(_ token: String) async {
+    /// Returns whether the token reached the Keychain.
+    ///
+    /// The status was discarded, and a discarded `SecItemAdd` failure is
+    /// invisible in a specific and confusing way: the in-memory cache above
+    /// makes the rest of *this* launch work perfectly, and the session is
+    /// simply gone at the next one — which the user reads as being signed out
+    /// overnight for no reason. `@discardableResult` because the honest
+    /// remedy at the one call site is nothing (the sign-in has already
+    /// succeeded and the token still works until relaunch); the log is what
+    /// makes it diagnosable at all.
+    @discardableResult
+    func store(_ token: String) async -> Bool {
         cached = token
         didLoad = true
         var query = baseQuery()
         SecItemDelete(query as CFDictionary)
         query[kSecValueData as String] = Data(token.utf8)
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status != errSecSuccess {
+            Logger(subsystem: "com.concertfinder.ph", category: "keychain")
+                .error("session token was not persisted: OSStatus \(status)")
+            return false
+        }
+        return true
     }
 
     func clear() async {

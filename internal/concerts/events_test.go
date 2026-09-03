@@ -142,3 +142,23 @@ func TestCountEventKeys(t *testing.T) {
 		t.Errorf("expected 2 distinct events, got %d", got)
 	}
 }
+
+// Reason rides onto the Act with Saved and Subscribed. It is applied to the
+// Concert rows by the handler and only ever read off the Act by a client, so
+// dropping it here would blank the line on every card with nothing failing.
+func TestGroupEventsCarriesPerActReason(t *testing.T) {
+	when := time.Date(2026, 10, 3, 19, 30, 0, 0, time.UTC)
+	got := GroupEvents([]Concert{
+		{Artist: ArtistRef{ID: "a", Name: "Alpha"}, Date: when, Venue: "The Anthem", City: "Washington", Reason: "You follow them"},
+		{Artist: ArtistRef{ID: "b", Name: "Beta"}, Date: when, Venue: "The Anthem", City: "Washington"},
+	})
+	if len(got) != 1 || len(got[0].Acts) != 2 {
+		t.Fatalf("want one event with two acts, got %+v", got)
+	}
+	if got[0].Acts[0].Reason != "You follow them" {
+		t.Errorf("first act lost its reason: %q", got[0].Acts[0].Reason)
+	}
+	if got[0].Acts[1].Reason != "" {
+		t.Errorf("second act invented a reason: %q", got[0].Acts[1].Reason)
+	}
+}

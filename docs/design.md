@@ -206,7 +206,9 @@ Every outbound Spotify call is wrapped in middleware that ensures the access tok
 
 ### 3.5 Session Management
 
-Browser sessions use server-side state keyed by an opaque random session ID stored in an HttpOnly, Secure, SameSite=Lax cookie. The cookie name is `cf_session`. The session row in the database holds the user ID, creation time, and last-seen time. JWT-based sessions were considered and rejected: server-side sessions are simpler to revoke, easier to debug, and the marginal database read per request is negligible.
+Browser sessions use server-side state keyed by an opaque random token carried in an HttpOnly, Secure, SameSite=Lax cookie named `cf_session` (iOS sends the same token as `Authorization: Bearer`). JWT-based sessions were considered and rejected: server-side sessions are simpler to revoke, easier to debug, and the marginal database read per request is negligible.
+
+**The token itself is never stored — only its SHA-256** (migration 0018). `sessions.id` used to *be* the credential, which made every nightly `pg_dump` in S3 a file of working logins; `id` is now an opaque UUID that other tables reference, and `token_hash` is what authenticates. `auth.HashSessionToken` is the only thing allowed to produce it, because a second spelling of the hash authenticates nothing and says nothing about why. Unsalted SHA-256 is correct rather than lazy here: the input is 32 bytes of `crypto/rand`, so there is no keyspace for a work factor to slow down. Pre-0018 rows cannot be backfilled — the token is gone — and a NULL `token_hash` is what makes them stop resolving. That NULL does double duty: it is also the escrow state for the mobile login, where `/api/auth/callback` writes a row that exists but authenticates nobody until `POST /mobile/exchange` claims it and mints the token exactly once.
 
 ### 3.6 Required Scopes
 
@@ -633,14 +635,20 @@ CREATE TABLE users (
 );
 
 -- Browser sessions
+-- Shown as of migration 0018. In Phase 1 `id` WAS the cookie value; it is now
+-- an opaque UUID with no relationship to the token, and authentication goes by
+-- token_hash. The column type did not change -- only what goes in it. See §3.5
+-- for why, and for the two things a NULL token_hash means.
 CREATE TABLE sessions (
-  id           TEXT PRIMARY KEY,
+  id           TEXT PRIMARY KEY,     -- opaque UUID; referenced by mobile_auth_codes
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash   TEXT,                 -- sha256(token), lowercase hex; NULL = escrowed or pre-0018
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   expires_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX ON sessions(expires_at);
+CREATE UNIQUE INDEX ON sessions(token_hash);   -- many NULLs are allowed under it
 
 -- User location settings (Phase 2 surfaces this in UI; Phase 1 hardcoded)
 CREATE TABLE user_locations (
@@ -692,6 +700,10 @@ CREATE INDEX ON concert_cache(fetched_at);
 | `rate_ledger` | Phase 3 | Per (user, source, UTC day) API call counter (§8.3). |
 | `mb_url_cache` | Phase 2 | MusicBrainz homepage resolutions, shared globally by normalized artist name. |
 | `venue_geo_cache` | Phase 2 | Nominatim geocodes by normalized place key. |
+| `rate_ledger_account` | Phase 3 (0017) | Account-wide counter, `(source, UTC day)` with no `user_id` and no FK. The ceiling the upstream actually enforces (§8.3). |
+| `user_devices` | Phase 3 (0016) | APNs device tokens plus the environment each was minted in, which is what routes a notification to the right host. |
+| `mobile_auth_codes` | Phase 3 | One-time codes for the iOS login exchange. Never holds a working credential — the session row it points at has a NULL `token_hash` until claimed (§3.5). |
+| `user_location_visits` | Phase 3 (0020) | One row per `(user, day, location_key)`. A *set*, not a counter: re-entering a location already opened today costs nothing, so a commuter toggling between home and work is not locked out by lunchtime. |
 
 ### 7.2 Encryption of Refresh Tokens
 
@@ -779,27 +791,46 @@ In a multi-user deployment, a single heavy user must not exhaust Ticketmaster's 
   table, bucketed by UTC day.
 - Quota is taken out per scan as a reservation block on the context, not one
   DB round trip per call; unspent permits are handed back at the end.
-- Caps: `RATE_CAP_TM_PER_USER_DAILY` (250), `RATE_CAP_SONGKICK_PER_USER_DAILY`
+- Caps: `RATE_CAP_TM_PER_USER_DAILY` (500), `RATE_CAP_SONGKICK_PER_USER_DAILY`
   (100). 0 disables the cap for that source.
 - On user cap exceeded: degrade gracefully (serve cached results, surface a
   "refresh limited" message), do not fail entirely.
 
-**The cap must exceed the artist count, not just fit under the shared
-ceiling.** A scan needs roughly one call per artist per source once
-`concert_cache` lapses, so a cap below `MaxScoredArtists` (200) means a user
-can *never* cover their own profile: every scan spends the allowance partway
-through and reports itself incomplete. This shipped as TM=100 against 200
-artists, and presented as a concert list quietly holding half the shows it
-should. `main.go` warns at startup when a cap drops below the artist count.
+**The cap must exceed the cost of a *cold* scan, not the artist count, and not
+just fit under the shared ceiling.** Ticketmaster resolution is two-stage
+(§5.2) and only the positive resolution is cached forever, so a warm scan costs
+~1 call per artist and a first-ever scan costs ~2 —
+`MaxScoredArtists` × `ticketmaster.CallsPerArtistColdScan` = 400. A cap below
+that means a new user can *never* cover their own profile: the scan spends the
+allowance partway through and reports itself incomplete.
+
+This has been undersized twice in the same direction. TM=100 was below even the
+warm number. TM=250 cleared it, looked generous, and the first real scan died at
+exactly 250/250 having covered ~125 artists — a snapshot with 65 shows and
+`complete = false`. Checking against the artist count alone is what let it pass,
+so `main.go` and `internal/config`'s test both measure against the cold cost.
 
 **Every outbound call spends quota, including attraction resolution** — not
 just the events query. A source that runs out returns `errRateCapped`, which
 must not be read as "no results" (§5.4).
 
-**Sizing trade-off.** Ticketmaster's account-wide budget is 5,000/day, so 250
-per user supports roughly 20 concurrently active users rather than 50. The
-ledger enforces per-user limits only; it does not model the account total.
-Revisit before onboarding a crowd.
+**Sizing trade-off.** Ticketmaster's account-wide budget is 5,000/day, so the
+500 per user a cold scan requires supports roughly 10 concurrently active users
+rather than 50. Halving it to 250 would double that and hand every new user a
+half-empty first feed, which is the trade the paragraph above refuses.
+
+**The account ceiling is a second ledger, not a bigger per-user cap** (added
+Phase 3, migration 0017). Per-user caps multiply: ten users at 500 is the whole
+allowance, and the eleventh user's scan gets upstream 403s that arrive looking
+exactly like artists with no shows. `rate_ledger_account` is keyed
+`(source, day)` with no `user_id`, charged in `Reserve` after the per-user
+block and never for more than that block already allowed.
+`RATE_CAP_TM_ACCOUNT_DAILY` / `RATE_CAP_SONGKICK_ACCOUNT_DAILY` default to
+5000; unset (0) disables the ceiling and restores the pre-0017 behaviour
+exactly. An overdraw is refunded to **both** ledgers — returning it only to the
+account would leave a user charged for calls they were never granted.
+Exhaustion reuses the `retry_after` path, which is correct because the remedy
+is the same: wait for the UTC day to roll over.
 
 ---
 
@@ -976,11 +1007,12 @@ it is granted, everything in this phase is polish on an app that strangers
 cannot sign into.
 
 A second, quieter ceiling: Ticketmaster's account-wide budget is 5000
-calls/day, and the rate ledger (§8.3) enforces **per-user** limits only — it
-does not model the account total, so exceeding it degrades feeds silently
-rather than erroring. A public download button is not bounded by the Spotify
-allowlist the way the web app is, so an account-total ceiling has to exist
-before the app is genuinely open.
+calls/day, which a public download button is not bounded against the way the
+web app is bounded by the Spotify allowlist. The ledger models it as of
+migration 0017 (§8.3) — `rate_ledger_account`, keyed `(source, day)` — so
+exhaustion now surfaces as a dated `retry_after` instead of degrading feeds
+silently. What that buys is a *visible* limit, not a bigger one: deciding how
+many people to admit per day is still a launch decision.
 
 ---
 
@@ -1122,7 +1154,7 @@ The single-instance architecture is a deliberate free-tier / low-ops choice, not
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | Spotify Web API changes invalidate an endpoint we depend on | Medium | Verified all endpoints against current spec; monitor changelog; concentrate API contact in `/internal/spotify` package for blast-radius containment. |
-| Ticketmaster rate limit insufficient at scale | Medium | Per-user accounting in Phase 3 (§8.3); apply for higher tier; aggressive `concert_cache` TTL. At 250/user against a 5,000/day account budget this binds at ~20 active users. |
+| Ticketmaster rate limit insufficient at scale | Medium | Per-user *and* account accounting in Phase 3 (§8.3); apply for higher tier; aggressive `concert_cache` TTL. At the 500/user a cold scan costs, against a 5,000/day account budget, this binds at ~10 active users — visibly, as a dated `retry_after`. |
 | ~~Bandsintown restricts public API for high volume~~ | **Realized** | The public API 403'd every request and the partnership request went unanswered. Source removed (§5.3). Ticketmaster is now the only primary, so a Ticketmaster outage is a total outage. |
 | A dead source is indistinguishable from an empty one | High | The Bandsintown failure ran for months because "403" and "this artist has no shows" both rendered as an empty list. Sources must surface transport failure distinctly from a negative result — the same rule that keeps `errRateCapped` out of the empty-result path (§5.4). |
 | Spotify Extended Quota Mode application is rejected or delayed | Low | Phase 1 and 2 do not require it. Begin application early in Phase 2. |
@@ -1202,8 +1234,11 @@ environments.
 |---|---|---|
 | `SNAPSHOT_STALE_AFTER_HOURS` | `6` | Staleness threshold for the SWR read (§6.0) |
 | `CONCERT_CACHE_TTL_HOURS` | `12` | Upstream response cache; bounded on both sides (§7.3) |
-| `RATE_CAP_TM_PER_USER_DAILY` | `250` | Must exceed the 200-artist scan (§8.3) |
+| `RATE_CAP_TM_PER_USER_DAILY` | `500` | Must exceed a cold scan: 200 artists × 2 calls (§8.3) |
 | `RATE_CAP_SONGKICK_PER_USER_DAILY` | `100` | 0 disables the cap |
+| `RATE_CAP_TM_ACCOUNT_DAILY` | `5000` | Account-wide ceiling; matches Ticketmaster's per-key limit. 0 disables it |
+| `RATE_CAP_SONGKICK_ACCOUNT_DAILY` | `5000` | As above, for Songkick |
+| `DB_MAX_CONNS` | `20` | pgx pool size. Its own default is `max(4, NumCPU)` — 4 on a t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers. Exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries |
 | `DAILY_AFFINITY_HOUR_UTC` | `6` | Wall-clock schedule, not an interval (§10.3.1) |
 | `DAILY_SCAN_HOUR_UTC` | `7` | |
 | `DAILY_DIGEST_HOUR_UTC` | `9` | Must trail the scan by ≥ 2h |

@@ -41,6 +41,12 @@ variable "ec2_instance_type" {
 # because Neon's free-plan restore window is far shorter than the 7-day RDS
 # retention it replaces.
 
+variable "subnet_id" {
+  description = "Subnet the app instance lives in, e.g. subnet-0123456789abcdef0. Set this to the subnet the CURRENT instance is already in. Leave empty and it falls back to the first ID of the default VPC's subnet list, which is a *set* — an unordered one, so the value at index 0 can change with no change to this config, and a changed subnet_id forces Terraform to REPLACE the instance: /opt/concertfinder, the rendered .env and the docker volumes all go with it. Find the value with: aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder --query 'Reservations[].Instances[].SubnetId' --output text"
+  type        = string
+  default     = ""
+}
+
 variable "backup_retention_days" {
   description = "How long nightly pg_dump artifacts live in S3 before the lifecycle rule expires them. Covers the gap left by Neon's short free-plan restore history."
   type        = number
@@ -56,6 +62,12 @@ variable "ses_notification_local_part" {
 variable "ses_verified_recipient" {
   description = "Email address to verify in SES sandbox for initial testing (typically the operator's personal address)."
   type        = string
+}
+
+variable "alert_email" {
+  description = "Where CloudWatch alarm notifications go. Leave empty to reuse ses_verified_recipient, which is the same address CONTACT_EMAIL already uses. The subscription is confirmed by clicking a link in a mail AWS sends on the first apply; until that is done the topic accepts publishes and delivers nothing."
+  type        = string
+  default     = ""
 }
 
 variable "billing_alarm_threshold_usd" {
@@ -123,4 +135,31 @@ variable "min_ios_build" {
   description = "Oldest iOS build the server supports, returned by /api/site-info. 0 means no floor."
   type        = number
   default     = 0
+}
+
+# Break-glass SSH. Empty by default, which is the deployed state: port 22 is
+# closed and the key pair in ec2.tf is attached but unreachable. SSM Session
+# Manager is the access path (`aws ssm start-session --target <id>`), and it is
+# the one the deploy already depends on.
+#
+# This variable exists because the alternative to a documented lever is an
+# undocumented emergency: the failure this covers is SSM itself being down or
+# the SSM agent being wedged, and that is the worst moment to be discovering
+# that the security group has no rule and the key has never been tried. Set it
+# to ["<your-ip>/32"], apply, do the work, set it back to [] and apply again.
+#
+# A list rather than a bool: an emergency rule scoped to one address is a
+# different thing from 0.0.0.0/0, and the type is what keeps the difference
+# visible in the diff. Never leave a value in here between incidents — an
+# always-open port 22 on a box whose only other ingress is Caddy is the largest
+# attack surface this account has.
+variable "ssh_ingress_cidrs" {
+  description = "CIDRs allowed to reach port 22 on the app instance. Empty (the default and the intended steady state) means no SSH ingress at all; use SSM Session Manager. Set to your own address for break-glass access, then set it back."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.ssh_ingress_cidrs, "0.0.0.0/0")
+    error_message = "Refusing to open port 22 to the whole internet. Use a /32, or use SSM."
+  }
 }

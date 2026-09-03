@@ -10,7 +10,12 @@ export type Me = {
 };
 
 export type TicketLink = { source: string; url: string };
-export type Artist = { id: string; name: string; genres?: string[] };
+// `id` is a Spotify artist ID. It is absent on /api/discover, whose acts are
+// Ticketmaster's lineup for a show rather than anyone's listening — the server
+// leaves it empty on purpose rather than putting a Ticketmaster attraction ID
+// in a field every other caller reads as Spotify's. Subscribing needs it, so
+// the control is disabled without one.
+export type Artist = { id?: string; name: string; genres?: string[] };
 
 export type Concert = {
   artist: Artist;
@@ -33,6 +38,12 @@ export type Act = {
   dedup_key: string;
   saved?: boolean;
   subscribed?: boolean;
+  // One short line naming the strongest signal that put this artist in the
+  // feed ("You follow them", "#7 in your top artists"). Optional in both
+  // directions: the server omits it for artists it has nothing honest to say
+  // about, and every act on a profile computed by an older build arrives
+  // without one, so a missing reason renders nothing rather than a placeholder.
+  reason?: string;
   // Inferred from position in Ticketmaster's attraction list, which is not
   // documented as billing order — see internal/concerts/billing.go. Absent
   // means unknown, which is the honest answer for everything the Phase 2
@@ -93,6 +104,17 @@ export type ConcertsResponse = {
   retry_after?: string;
 };
 
+// GET /api/discover — the signed-out "popular shows near you" list. Same
+// Event shape as the feed so the card is reused, but deliberately none of the
+// per-user parts: no facets, no computed_at, no refreshing/complete, and acts
+// with no id, no saved and no subscribed. This response knows nothing about
+// who is asking, and the UI built on it must not imply otherwise.
+export type DiscoverResponse = {
+  location: Location;
+  count: number;
+  events: Event[];
+};
+
 export type Weekday = 'all' | 'weekday' | 'weekend';
 
 export type FiltersState = {
@@ -114,6 +136,16 @@ export const EMPTY_FILTERS: FiltersState = {
   dateTo: '',
   weekday: 'all',
 };
+
+// Whether the user is looking at a deliberately narrowed list. The empty
+// state's wording and the Clear filters button both hinge on this, and an
+// empty list is the moment they must agree — telling someone "Nothing saved
+// yet" while a genre pill is still lit is the one answer that is false.
+export function hasActiveFilters(f: FiltersState): boolean {
+  return (
+    f.genre !== '' || f.venue !== '' || f.dateFrom !== '' || f.dateTo !== '' || f.weekday !== 'all'
+  );
+}
 
 export const SOURCE_LABELS: Record<string, string> = {
   ticketmaster: 'Ticketmaster',

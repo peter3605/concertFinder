@@ -43,6 +43,33 @@ type ScoredArtist struct {
 	Name   string   `json:"name"`
 	Score  float64  `json:"score"`
 	Genres []string `json:"genres,omitempty"`
+	// Signals records which inputs produced Score. It is what lets the feed
+	// say *why* an artist is in it; see affinity.Reason.
+	Signals ArtistSignals `json:"signals"`
+}
+
+// ArtistSignals is the per-signal breakdown behind a ScoredArtist's score:
+// which of the six §4.3 inputs contributed, and how much of each.
+//
+// This is derived affinity data — counts over signals that were already
+// scored — not raw Spotify Content, so it belongs in the same profile blob
+// as the scores and adds no new storage of listening data (design §4.4).
+// Nothing here names a track, an album, or a playlist.
+//
+// Zero value means "computed before this existed": profiles persisted by an
+// older build decode with every field empty, which reads as "no reason to
+// show" rather than a wrong one.
+type ArtistSignals struct {
+	Followed bool `json:"followed,omitempty"`
+	// TopRank is the best (lowest) 1-based position the artist held across
+	// the three time ranges, or 0 if they were in none of them.
+	TopRank     int `json:"top_rank,omitempty"`
+	SavedAlbums int `json:"saved_albums,omitempty"`
+	SavedTracks int `json:"saved_tracks,omitempty"`
+	RecentPlays int `json:"recent_plays,omitempty"`
+	// Playlists counts the user's own playlists the artist appears in, not
+	// the number of their tracks in them.
+	Playlists int `json:"playlists,omitempty"`
 }
 
 // ScoreArtists applies the §4.3 formula and returns the top MaxScoredArtists
@@ -54,6 +81,7 @@ func ScoreArtists(s Sources) []ScoredArtist {
 		name   string
 		score  float64
 		genres map[string]struct{}
+		sig    ArtistSignals
 	}
 	scores := map[string]*accum{}
 
@@ -72,7 +100,7 @@ func ScoreArtists(s Sources) []ScoredArtist {
 		scores[a.ID] = fresh
 		return fresh
 	}
-	bumpTop := func(t TopArtist, delta float64) {
+	bumpTop := func(t TopArtist, delta float64, rank int) {
 		acc := bump(t.ArtistRef, delta)
 		if acc == nil {
 			return
@@ -80,10 +108,15 @@ func ScoreArtists(s Sources) []ScoredArtist {
 		for _, g := range t.Genres {
 			acc.genres[g] = struct{}{}
 		}
+		if acc.sig.TopRank == 0 || rank < acc.sig.TopRank {
+			acc.sig.TopRank = rank
+		}
 	}
 
 	for _, a := range s.Followed {
-		bump(a, weightFollowed)
+		if acc := bump(a, weightFollowed); acc != nil {
+			acc.sig.Followed = true
+		}
 	}
 	for tr, list := range map[TimeRange][]TopArtist{
 		ShortTerm:  s.Top.Short,
@@ -91,32 +124,53 @@ func ScoreArtists(s Sources) []ScoredArtist {
 		LongTerm:   s.Top.Long,
 	} {
 		w := weightTop * timeRangeWeights[tr]
-		for _, a := range list {
-			bumpTop(a, w)
+		for i, a := range list {
+			// Best position across the three ranges. Taking the minimum
+			// rather than the first one seen keeps this independent of the
+			// map iteration order above, which Go randomises.
+			bumpTop(a, w, i+1)
 		}
 	}
 	for _, sa := range s.SavedAlbums {
 		for _, a := range sa.Album.Artists {
-			bump(a, weightSavedAlbum)
+			if acc := bump(a, weightSavedAlbum); acc != nil {
+				acc.sig.SavedAlbums++
+			}
 		}
 	}
 	for _, st := range s.SavedTracks {
 		for _, a := range st.Track.Artists {
-			bump(a, weightSavedTrack)
+			if acc := bump(a, weightSavedTrack); acc != nil {
+				acc.sig.SavedTracks++
+			}
 		}
 	}
 	for _, rp := range s.Recent {
 		for _, a := range rp.Track.Artists {
-			bump(a, weightRecent)
+			if acc := bump(a, weightRecent); acc != nil {
+				acc.sig.RecentPlays++
+			}
 		}
 	}
 	for _, pl := range s.PlaylistItems {
+		// One playlist counts once for an artist however many of their
+		// tracks are on it: "in 3 of your playlists" is a statement about
+		// playlists, and counting tracks would make a single mix look like
+		// three.
+		inThis := map[string]struct{}{}
 		for _, it := range pl {
 			if it.Track == nil {
 				continue
 			}
 			for _, a := range it.Track.Artists {
-				bump(a, weightPlaylist)
+				acc := bump(a, weightPlaylist)
+				if acc == nil {
+					continue
+				}
+				if _, seen := inThis[a.ID]; !seen {
+					inThis[a.ID] = struct{}{}
+					acc.sig.Playlists++
+				}
 			}
 		}
 	}
@@ -131,7 +185,7 @@ func ScoreArtists(s Sources) []ScoredArtist {
 			}
 			sort.Strings(genres)
 		}
-		out = append(out, ScoredArtist{ID: id, Name: a.name, Score: a.score, Genres: genres})
+		out = append(out, ScoredArtist{ID: id, Name: a.name, Score: a.score, Genres: genres, Signals: a.sig})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {

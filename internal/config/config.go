@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -17,10 +18,18 @@ import (
 // Variables are defined in docs/design.md Appendix A plus a Phase 1 hardcoded
 // location (§10.1: location picker is Phase 2).
 type Config struct {
-	SpotifyClientID     string
-	SpotifyRedirectURI  string
-	TicketmasterAPIKey  string
-	DatabaseURL         string
+	SpotifyClientID    string
+	SpotifyRedirectURI string
+	TicketmasterAPIKey string
+	DatabaseURL        string
+	// DBMaxConns sizes the pgx pool. pgx's own default is max(4, NumCPU) --
+	// four on a t4g.small -- and that pool is shared by river's notifier (one
+	// connection held open forever), its elector, producer and completer, five
+	// job workers and every HTTP request. Running out is not an error: callers
+	// block inside Acquire until their context expires, so it shows up as slow
+	// requests and scans that spend their budget queueing. 0 = package default
+	// (db.DefaultMaxConns).
+	DBMaxConns          int
 	EncryptionKey       string
 	SessionCookieDomain string
 	ListenAddr          string
@@ -69,18 +78,27 @@ type Config struct {
 	// Per-user daily caps on outbound API calls (design §8.3). 0 disables
 	// enforcement for that source.
 	//
-	// These must be sized against spotify.MaxScoredArtists (200), not picked
-	// for the shared-account ceiling alone. A scan needs roughly one call per
-	// artist per source once the concert cache lapses; the previous TM cap of
-	// 100 was below that, so a single user could never cover their own
-	// profile in a day and every scan reported itself incomplete. 250 covers
-	// 200 artists plus resolution calls and leaves headroom.
+	// Size these against a COLD scan, which is
+	// spotify.MaxScoredArtists (200) x ticketmaster.CallsPerArtistColdScan
+	// (2) = 400, not against the artist count alone. Ticketmaster resolution
+	// is two-stage, so a warm cache costs ~1 call per artist and a first-ever
+	// scan costs ~2.
 	//
-	// The trade-off is real: TM's account-wide budget is 5000/day, so 250
-	// per user supports ~20 concurrently active users rather than ~50. With
-	// DefaultCacheTTL at 12h a user costs far less than their cap on a
-	// typical day, but the ceiling is worth revisiting before onboarding a
-	// crowd — the ledger enforces per-user limits, not the account total.
+	// This has now been undersized twice, in the same direction, for two
+	// different reasons. 100 was below even the warm number, so no user could
+	// ever cover their profile. 250 cleared the warm number and looked
+	// generous — and the first real scan died at exactly 250/250 having
+	// covered ~125 artists, writing a snapshot with 65 shows and
+	// complete=false. Neither failure raises an error; both present as a
+	// concert list quietly holding a fraction of the shows it should.
+	//
+	// The trade-off is real and is the reason this is not simply set higher:
+	// TM's account-wide budget is 5000/day, so 500 per user is ~10
+	// concurrently active users where 250 would be ~20. What makes 500 the
+	// right side of that trade is RateCapTMAccountDaily below — exceeding the
+	// shared ceiling is now a dated retry_after rather than upstream 403s
+	// that arrive looking exactly like artists with no shows. A visible limit
+	// for ten users beats a silent half-empty feed for twenty.
 	RateCapTMPerUserDaily       int
 	RateCapSongkickPerUserDaily int
 	// Account-wide daily ceilings. These are the numbers the upstream
@@ -214,13 +232,16 @@ func Load() (*Config, error) {
 	c.DailyJanitorHourUTC = hourEnv("DAILY_JANITOR_HOUR_UTC", 10)
 	// Defaults sized so one full scan of a 200-artist profile fits inside a
 	// day's allowance for each source; see the field comments.
-	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 250)
+	// 500 = MaxScoredArtists (200) x CallsPerArtistColdScan (2), rounded up
+	// for headroom. Matches what .env.example ships; see the field comment.
+	c.RateCapTMPerUserDaily = intEnv("RATE_CAP_TM_PER_USER_DAILY", 500)
 	c.RateCapSongkickPerUserDaily = intEnv("RATE_CAP_SONGKICK_PER_USER_DAILY", 100)
 	// Defaults are the documented upstream allowances, so an operator who
 	// sets nothing is bounded by the real limit rather than by nothing.
 	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
+	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
 
 	c.EmailDeliveryMode = strings.ToLower(strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_MODE")))
 	if c.EmailDeliveryMode == "" {
@@ -319,6 +340,23 @@ func (c Config) Validate() []error {
 		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must be hex-encoded: %w", err))
 	case len(key) != 32:
 		errs = append(errs, fmt.Errorf("ENCRYPTION_KEY must decode to 32 bytes, got %d", len(key)))
+	}
+
+	// USER_LATITUDE/USER_LONGITUDE are the fallback location every user is
+	// served until they pick one, so they are also half of a snapshot identity
+	// and of the scan job built from it. A garbage value does not fail: it
+	// formats into a perfectly valid location_key and buys a five-minute scan
+	// of nowhere, on every login, for every user who has not set a location.
+	// Note Load parses these with the error discarded, so an unparseable
+	// value arrives here as 0,0 — off the coast of Ghana, but in range, and
+	// not something this can distinguish from someone who meant it.
+	if math.IsNaN(c.UserLatitude) || math.IsInf(c.UserLatitude, 0) ||
+		c.UserLatitude < -90 || c.UserLatitude > 90 {
+		errs = append(errs, fmt.Errorf("USER_LATITUDE must be between -90 and 90, got %v", c.UserLatitude))
+	}
+	if math.IsNaN(c.UserLongitude) || math.IsInf(c.UserLongitude, 0) ||
+		c.UserLongitude < -180 || c.UserLongitude > 180 {
+		errs = append(errs, fmt.Errorf("USER_LONGITUDE must be between -180 and 180, got %v", c.UserLongitude))
 	}
 
 	if u := c.SpotifyRedirectURI; u != "" && !strings.HasSuffix(strings.TrimRight(u, "/"), SpotifyCallbackPath) {

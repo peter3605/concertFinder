@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { apiFetch } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
 
 type SiteInfo = { contact_email: string; effective_date: string };
@@ -7,7 +8,9 @@ export default function TermsPage() {
   useDocumentTitle('Terms');
   const [info, setInfo] = useState<SiteInfo>({ contact_email: '', effective_date: '' });
   useEffect(() => {
-    fetch('/api/site-info')
+    // Public endpoint, and this page is linked from the login screen: a 401
+    // here must not be read as a session that expired.
+    apiFetch('/api/site-info', {}, { publicEndpoint: true })
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => j && setInfo(j))
       .catch(() => {});

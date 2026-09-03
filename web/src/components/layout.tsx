@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Bookmark, Calendar, Music2, Settings, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -25,6 +26,14 @@ export function Layout() {
   const { auth, logout } = useAuth();
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {/* First thing in the tab order, invisible until focused. Without it a
+          keyboard or screen-reader user walks the whole nav on every page. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground"
+      >
+        Skip to content
+      </a>
       <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4">
           <NavLink to="/" className="flex items-center gap-2 font-semibold">
@@ -95,7 +104,12 @@ export function Layout() {
                 end={end}
                 className={({ isActive }) =>
                   cn(
-                    'flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs',
+                    // 44px floor. py-1.5 around a 12px label gave a ~28px
+                    // target — under every platform's minimum, on the one nav
+                    // that is only ever reached with a thumb. Unconditional
+                    // rather than `coarse:` because this bar is md:hidden, so
+                    // it is already the touch case.
+                    'flex min-h-[44px] flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs',
                     isActive
                       ? 'bg-accent text-accent-foreground'
                       : 'text-muted-foreground hover:bg-accent',
@@ -109,8 +123,14 @@ export function Layout() {
           </nav>
         )}
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-6">
-        <Outlet />
+      <main id="main" className="mx-auto max-w-6xl px-4 py-6">
+        {/* The boundary for App.tsx's lazy routes. It sits inside the layout
+            so a chunk fetch swaps the page body only — hoisting it above the
+            header would blank the whole shell, nav included, for the length
+            of one request. */}
+        <Suspense fallback={<div className="text-sm text-muted-foreground">Loading…</div>}>
+          <Outlet />
+        </Suspense>
       </main>
       <footer className="mx-auto max-w-6xl px-4 pb-8 text-xs text-muted-foreground">
         <SpotifyAttribution /> · <NavLink to="/privacy" className="hover:underline">Privacy</NavLink> ·{' '}

@@ -1,0 +1,11 @@
+# Only the landing page and the two policy pages are readable without a
+# session. Everything else answers a crawler with the login screen, so letting
+# it walk them spends crawl budget on identical HTML — and /api/ is not a
+# document surface at all.
+User-agent: *
+Disallow: /api/
+Disallow: /app/
+Disallow: /saved
+Disallow: /settings
+Disallow: /subscribe
+Allow: /

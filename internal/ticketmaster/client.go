@@ -7,11 +7,27 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const APIBase = "https://app.ticketmaster.com/discovery/v2"
+
+// CallsPerArtistColdScan is what one artist costs on a scan that finds nothing
+// cached: resolution (name -> attractionId) plus the events query. A warm
+// scan costs one, because positive resolutions are cached in
+// `artist_resolutions` and never expire.
+//
+// It exists as a named constant because sizing a per-user daily cap from the
+// warm number is a specific, repeatable mistake: RATE_CAP_TM_PER_USER_DAILY
+// shipped at 250 against 200 artists — comfortably above the artist count, and
+// still only enough for 125 of them — and the very first real scan died at
+// exactly 250/250, writing a snapshot with 65 shows and complete=false. Cap
+// checks should measure against MaxScoredArtists * CallsPerArtistColdScan,
+// which is the cost of the scan that actually matters: a new user's first one.
+const CallsPerArtistColdScan = 2
 
 const (
 	maxRetries       = 3
@@ -37,31 +53,64 @@ func NewClient(httpClient *http.Client, apiKey string) *Client {
 	return &Client{HTTP: httpClient, APIKey: apiKey}
 }
 
-// doGETRetry executes a GET with the design §8.2 retry policy.
-func (c *Client) doGETRetry(ctx context.Context, url string) ([]byte, int, error) {
+// redactPath reduces a request URL to its path. The Ticketmaster API key
+// travels in the query string (?apikey=), so anything that echoes a whole URL
+// leaks the credential.
+func redactPath(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.Path
+	}
+	// Unparseable, so cut conservatively: everything from the first '?' is
+	// query, and a URL with no '?' has no query to leak.
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		return raw[:i]
+	}
+	return raw
+}
+
+// redactURLError strips the query string out of a *url.Error. http.Client.Do
+// returns one on every transport failure and its Error() string is the full
+// request URL — including ?apikey= — which callers log verbatim
+// (internal/concerts/search.go). With a 10s timeout across a 200-artist
+// fanout those errors are routine, not exceptional. Errors that are not
+// *url.Error pass through untouched.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	redacted := *ue
+	redacted.URL = redactPath(ue.URL)
+	return &redacted
+}
+
+// doGETRetry executes a GET with the design §8.2 retry policy. Every error it
+// returns names the path only — see redactURLError.
+func (c *Client) doGETRetry(ctx context.Context, rawURL string) ([]byte, int, error) {
+	path := redactPath(rawURL)
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("tm %s: %w", path, redactURLError(err))
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = err
+			lastErr = redactURLError(err)
 			if !sleepBackoff(ctx, attempt) {
-				return nil, 0, lastErr
+				return nil, 0, fmt.Errorf("tm %s: %w", path, lastErr)
 			}
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 		resp.Body.Close()
 		if readErr != nil {
-			lastErr = readErr
+			lastErr = redactURLError(readErr)
 			if !sleepBackoff(ctx, attempt) {
-				return nil, 0, lastErr
+				return nil, 0, fmt.Errorf("tm %s: %w", path, lastErr)
 			}
 			continue
 		}
@@ -69,7 +118,7 @@ func (c *Client) doGETRetry(ctx context.Context, url string) ([]byte, int, error
 		case resp.StatusCode/100 == 2:
 			return body, resp.StatusCode, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
-			lastErr = fmt.Errorf("tm 429")
+			lastErr = errors.New("429")
 			// Honor Retry-After, clamped to maxRetryAfter — clamping
 			// shortens the wait toward 30s, it does not discard it. See
 			// spotify/http.go for why the previous form was wrong.
@@ -83,23 +132,23 @@ func (c *Client) doGETRetry(ctx context.Context, url string) ([]byte, int, error
 				continue
 			}
 			if !sleepBackoff(ctx, attempt) {
-				return nil, resp.StatusCode, fmt.Errorf("tm 429: retries exhausted")
+				return nil, resp.StatusCode, fmt.Errorf("tm %s: 429: retries exhausted", path)
 			}
 			continue
 		case resp.StatusCode/100 == 5:
-			lastErr = fmt.Errorf("tm %d", resp.StatusCode)
+			lastErr = fmt.Errorf("%d", resp.StatusCode)
 			if !sleepBackoff(ctx, attempt) {
-				return nil, resp.StatusCode, lastErr
+				return nil, resp.StatusCode, fmt.Errorf("tm %s: %w", path, lastErr)
 			}
 			continue
 		default:
-			return body, resp.StatusCode, fmt.Errorf("tm %d: %s", resp.StatusCode, truncate(body))
+			return body, resp.StatusCode, fmt.Errorf("tm %s: %d: %s", path, resp.StatusCode, c.scrubKey(truncate(body)))
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("tm: retries exhausted")
+		return nil, 0, fmt.Errorf("tm %s: retries exhausted", path)
 	}
-	return nil, 0, lastErr
+	return nil, 0, fmt.Errorf("tm %s: %w", path, lastErr)
 }
 
 func retryAfter(v string) time.Duration {
@@ -133,6 +182,26 @@ func sleepFor(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// scrubKey removes the API key from a string built out of an upstream response
+// body, which is the one path P0-1's URL redaction does not cover.
+//
+// Ticketmaster's own error bodies do not echo the request, but this error is
+// raised for any unexpected 4xx, and a 4xx does not always come from
+// Ticketmaster: a WAF, a caching proxy or a corporate gateway in front of it
+// answers with an HTML error page, and those routinely quote the full request
+// URL they refused — query string included. The body is then interpolated into
+// an error that internal/concerts/search.go logs verbatim.
+//
+// Matching the client's own key exactly, rather than a `apikey=\w+` pattern,
+// means this cannot half-match a key containing an unexpected character or
+// miss one the upstream URL-encoded differently than we sent it.
+func (c *Client) scrubKey(s string) string {
+	if c.APIKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.APIKey, "REDACTED")
 }
 
 func truncate(b []byte) string {

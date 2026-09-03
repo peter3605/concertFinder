@@ -1,0 +1,64 @@
+{
+  "_embedded": {
+    "attractions": [
+      {
+        "name": "Test Artist Tribute",
+        "type": "attraction",
+        "id": "K8vZ917tribute0",
+        "test": true,
+        "locale": "en-us",
+        "url": "https://www.ticketmaster.com/test-artist-tribute-tickets/artist/2000001",
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" }
+          }
+        ],
+        "upcomingEvents": { "_total": 12, "tmr": 12 }
+      },
+      {
+        "name": "The Test Artist Experience",
+        "type": "attraction",
+        "id": "K8vZ917coverba",
+        "test": true,
+        "locale": "en-us",
+        "url": "https://www.ticketmaster.com/the-test-artist-experience-tickets/artist/2000002",
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" }
+          }
+        ],
+        "upcomingEvents": { "_total": 4, "tmr": 4 }
+      },
+      {
+        "name": "TEST ARTIST",
+        "type": "attraction",
+        "id": "K8vZ917realone",
+        "test": true,
+        "locale": "en-us",
+        "url": "https://www.ticketmaster.com/test-artist-tickets/artist/2000003",
+        "classifications": [
+          {
+            "primary": true,
+            "segment": { "id": "KZFzniwnSyZfZ7v7nJ", "name": "Music" },
+            "genre": { "id": "KnvZfZ7vAeA", "name": "Rock" }
+          }
+        ],
+        "upcomingEvents": { "_total": 31, "tmr": 31 }
+      },
+      {
+        "name": "Test Artistry",
+        "type": "attraction",
+        "id": "K8vZ917nearmis",
+        "test": true,
+        "locale": "en-us",
+        "url": "https://www.ticketmaster.com/test-artistry-tickets/artist/2000004",
+        "upcomingEvents": { "_total": 1, "tmr": 1 }
+      }
+    ]
+  },
+  "page": { "size": 10, "totalElements": 4, "totalPages": 1, "number": 0 }
+}

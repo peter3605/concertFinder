@@ -10,13 +10,29 @@ import UIKit
 /// endpoint, and adding one would spend a round trip on data the feed
 /// response already carried.
 struct EventDetailView: View {
-    @State private var event: Event
+    /// The event as the list that pushed this screen had it. Identity and
+    /// fallback, never the source of the save/subscribe state — see `event`.
+    private let pushed: Event
     @Environment(FeedModel.self) private var model
     @State private var safariURL: URL?
     @State private var calendarError: String?
 
     init(event: Event) {
-        _event = State(initialValue: event)
+        self.pushed = event
+    }
+
+    /// Read through the model rather than copied into `@State`.
+    ///
+    /// The copy was optimistic in its own right, and the model rolls a failed
+    /// save back in its copy only — so a save that failed reverted in the
+    /// list behind this screen and stayed lit here, which is the one place
+    /// the user was looking. Reading through means there is a single answer.
+    ///
+    /// The fallback covers a card pushed from the Saved tab for a show that
+    /// is not in the loaded feed: it renders what the list gave it, which is
+    /// what this screen showed before, minus the optimism.
+    private var event: Event {
+        model.events.first { $0.eventKey == pushed.eventKey } ?? pushed
     }
 
     var body: some View {
@@ -66,14 +82,8 @@ struct EventDetailView: View {
             ForEach(event.acts) { act in
                 ActRow(
                     act: act,
-                    onToggleSave: {
-                        toggleLocally(dedupKey: act.dedupKey)
-                        Task { await model.toggleSave(act: act) }
-                    },
-                    onToggleSubscribe: {
-                        toggleSubscribeLocally(artistID: act.artist.id)
-                        Task { await model.toggleSubscribe(act: act) }
-                    }
+                    onToggleSave: { Task { await model.toggleSave(act: act) } },
+                    onToggleSubscribe: { Task { await model.toggleSubscribe(act: act) } }
                 )
                 .padding(.vertical, 4)
                 if act.id != event.acts.last?.id { Divider() }
@@ -130,24 +140,6 @@ struct EventDetailView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-        }
-    }
-
-    // MARK: - Local optimistic state
-
-    /// The detail view holds its own copy of the event so its controls
-    /// respond immediately. The model is the source of truth and is updated
-    /// alongside; this only keeps the visible screen honest while that
-    /// round trip is in flight.
-    private func toggleLocally(dedupKey: String) {
-        for i in event.acts.indices where event.acts[i].dedupKey == dedupKey {
-            event.acts[i].saved = !(event.acts[i].saved ?? false)
-        }
-    }
-
-    private func toggleSubscribeLocally(artistID: String) {
-        for i in event.acts.indices where event.acts[i].artist.id == artistID {
-            event.acts[i].subscribed = !(event.acts[i].subscribed ?? false)
         }
     }
 
