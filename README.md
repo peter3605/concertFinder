@@ -20,10 +20,13 @@ Development Mode, and Extended Quota Mode has not been granted. Anyone else
 gets a 403 explaining why rather than a generic failure.
 
 A native iOS client lives in `ios/`. Its server-side half — bearer auth, the
-mobile code exchange, APNs — is implemented and deployed; the Apple Developer
-configuration is not filled in, so mobile sign-in returns 501 and push no-ops
-until it is. **`docs/ios-app-plan.md` §0 is the current status and the ordered
-list of what is left** — start there rather than at the top of that document,
+mobile code exchange, APNs — is implemented and deployed, and the Apple
+Developer configuration has been applied since 2026-08-26: mobile sign-in is
+live and push is wired. What is left is the APNs key being reissued for both
+environments (it was created Sandbox-only, and a sandbox key against the
+production host reads as a dead token) and the App Store submission itself.
+**`docs/ios-app-plan.md` §0 is the current status and the ordered list of what
+is left** — start there rather than at the top of that document,
 whose body is the original plan and reads as aspirational.
 
 One ordering trap worth knowing before touching infrastructure: do not
@@ -65,11 +68,17 @@ internal/concerts   aggregation, dedup, event grouping, scoring
 internal/fallback   Phase 2 small-artist chain (MusicBrainz → official site → JSON-LD)
 internal/jobs       river workers: scan, digest, affinity refresh, janitor
 internal/http       handlers and middleware
+internal/rate       per-user and account-wide daily API quota ledgers
+internal/push       APNs delivery for the iOS client
 internal/db         queries and migrations runner
 migrations          SQL migrations
 web                 React + TS + Vite SPA
+ios                 native SwiftUI client; XcodeGen spec, no committed .pbxproj
 infra               Terraform for the AWS deployment
+scripts             deploy, backup, and restore-drill scripts that run on the instance
 ```
+
+`docs/design.md` §2.3 is the complete package list and why each one exists.
 
 Each external API gets its own package with its own types — there is
 deliberately no shared `models` package, because external schemas drift
@@ -112,11 +121,12 @@ These come from third-party terms and have real consequences:
 Two upstream quotas bound how many people this can serve today, and neither is
 fixed by scaling the infrastructure:
 
-- **Ticketmaster** — an account-wide budget of 5000 calls/day against
-  `RATE_CAP_TM_PER_USER_DAILY=250` works out to roughly **20 concurrently
-  active users**. The rate ledger enforces per-user limits only; it does not
-  model the account total, so exceeding this degrades feeds rather than
-  erroring.
+- **Ticketmaster** — an account-wide budget of 5000 calls/day. At the shipped
+  `RATE_CAP_TM_PER_USER_DAILY=500` (`.env.example`) that is ~10 concurrently
+  active users; at the code default of 250 it is ~20. The ledger models both
+  halves — per user *and* per account (`RATE_CAP_TM_ACCOUNT_DAILY`, default
+  5000) — so exhausting the account ceiling surfaces as a dated `retry_after`
+  rather than as upstream 403s that look exactly like artists with no shows.
 - **Spotify** — the app runs in Development Mode, which caps authorized users.
   Lifting it requires an approved Extended Quota Mode application, which has
   not been started (design §9.1, §10.2).
