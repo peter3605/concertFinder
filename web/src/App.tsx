@@ -1,4 +1,5 @@
 import { lazy } from 'react';
+import type React from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from '@/components/layout';
 import { AuthProvider, useAuth } from '@/lib/auth';
@@ -22,7 +23,7 @@ const TermsPage = lazy(() => import('@/pages/terms'));
 
 // RequireAuth gates authenticated routes. Anon users get bounced to /login;
 // still-loading auth just renders nothing rather than flash the login screen.
-function RequireAuth({ children }: { children: JSX.Element }) {
+function RequireAuth({ children }: { children: React.JSX.Element }) {
   const { auth } = useAuth();
   if (auth.kind === 'loading') return null;
   if (auth.kind === 'signed_in') return children;
