@@ -32,6 +32,14 @@ func Handler() http.Handler {
 		// Programmer error — static/ must exist at compile time.
 		panic("spa: embed sub failed: " + err.Error())
 	}
+	return handlerFor(sub)
+}
+
+// handlerFor is Handler's body against an arbitrary filesystem, so the routing
+// rules can be tested without a built SPA in static/ — the placeholder there
+// holds one file, and the rule that matters most is what happens to the files
+// that are absent.
+func handlerFor(sub fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Deny weird paths early.
@@ -53,10 +61,30 @@ func Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 			return
 		}
+		// A path that names a file we do not have is a 404, not a route.
+		// Answering /robots.txt and /favicon.ico with index.html and a 200
+		// tells a crawler the file exists and hands it HTML — and any missing
+		// bundle chunk reads to the browser as a syntax error in a script
+		// rather than a 404, which is the harder thing to diagnose.
+		if looksLikeFile(clean) {
+			http.NotFound(w, r)
+			return
+		}
 		// No matching file → SPA route, serve index.html so React Router (or
-		// window.location changes) can take over.
+		// window.location changes) can take over. The router owns what an
+		// unknown route renders; this handler cannot tell one from a real one
+		// without duplicating the route table.
 		serveIndex(sub, w)
 	})
+}
+
+// looksLikeFile reports whether a path is asking for a document rather than an
+// app route. Every route in App.tsx is extension-free, so the extension is the
+// whole test — it covers /robots.txt, /favicon.ico and /sitemap.xml without
+// naming them. Keep it that way: a route with a dot in it would start 404ing
+// silently.
+func looksLikeFile(clean string) bool {
+	return path.Ext(clean) != ""
 }
 
 func serveIndex(sub fs.FS, w http.ResponseWriter) {

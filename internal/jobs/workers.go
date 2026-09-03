@@ -192,12 +192,6 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		rows[i] = db.ConcertRow{DedupKey: c.DedupKey, Data: body, EventDate: c.Date}
 		dedupKeys[i] = c.DedupKey
 	}
-	// Persist partial results too — a half-filled page beats an empty one —
-	// but record that they're partial so the SWR handler keeps treating the
-	// snapshot as stale instead of sitting on it for the full window.
-	if err := db.UpsertConcerts(ctx, w.Pool, rows); err != nil {
-		return err
-	}
 	// A quota-capped scan can't do better until the ledger's UTC day turns
 	// over, so record when it's worth trying again. Any other flavor of
 	// incompleteness (budget overrun) leaves this nil and retries freely.
@@ -206,15 +200,17 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		t := nextQuotaReset(time.Now())
 		retryAfter = &t
 	}
-	err = db.UpsertConcertSnapshot(ctx, w.Pool, db.ConcertSnapshot{
+	// Persist partial results too — a half-filled page beats an empty one —
+	// but record that they're partial so the SWR handler keeps treating the
+	// snapshot as stale instead of sitting on it for the full window.
+	if err := persistScan(ctx, poolStore{pool: w.Pool}, rows, db.ConcertSnapshot{
 		UserID:      user.ID,
 		LocationKey: LocationKey(loc),
 		DedupKeys:   dedupKeys,
 		ComputedAt:  time.Now(),
 		Complete:    incomplete == nil,
 		RetryAfter:  retryAfter,
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 	slog.Info("scan_concerts done",
@@ -233,7 +229,13 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	// email, the ledger channels are separate (migration 0016), and a user
 	// opted into both must receive both.
 	if w.River != nil {
-		w.enqueueNotifications(ctx, user, found)
+		// Detached for the same reason the writes above are: this runs after
+		// up to a full ScanBudget of searching, and an enqueue refused because
+		// the scan's own context expired loses the notification silently —
+		// nothing else ever revisits this snapshot's net-new set.
+		notifyCtx, cancelNotify := detached(ctx, persistBudget)
+		w.enqueueNotifications(notifyCtx, user, found)
+		cancelNotify()
 	}
 
 	// Surface incompleteness to river so the job retries (bounded by
@@ -249,6 +251,56 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		return searchErr
 	}
 	return nil
+}
+
+// persistBudget is how long the writes that follow a scan get. They run on a
+// context detached from the scan's, so this is also the bound that stops a
+// hung write holding a river worker slot open indefinitely.
+const persistBudget = 15 * time.Second
+
+// detached returns a context for work that must survive the scan budget
+// running out. Same shape as the reservation Release above, and for the same
+// reason: by the time these run, ctx may already be done.
+func detached(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), d)
+}
+
+// concertStore is the slice of the database the persist step touches. Narrow
+// on purpose: it is the seam a test uses to check that an expired scan context
+// still writes, which is the whole point of the step existing separately.
+type concertStore interface {
+	UpsertConcerts(ctx context.Context, rows []db.ConcertRow) error
+	UpsertConcertSnapshot(ctx context.Context, snap db.ConcertSnapshot) error
+}
+
+// poolStore is the production concertStore — the package-level db helpers
+// bound to the worker's pool.
+type poolStore struct{ pool *pgxpool.Pool }
+
+func (s poolStore) UpsertConcerts(ctx context.Context, rows []db.ConcertRow) error {
+	return db.UpsertConcerts(ctx, s.pool, rows)
+}
+
+func (s poolStore) UpsertConcertSnapshot(ctx context.Context, snap db.ConcertSnapshot) error {
+	return db.UpsertConcertSnapshot(ctx, s.pool, snap)
+}
+
+// persistScan writes a finished scan's results on a context detached from the
+// scan's own.
+//
+// ctx here is the ScanBudget-bounded context, and the scan this most matters
+// for is the one that used all of it: a cold 200-artist profile is exactly the
+// result worth keeping, and it arrives at this point with ctx already expired.
+// Writing on it failed both statements and returned the error to river, which
+// retried the entire fan-out — spending the day's quota again to recompute a
+// snapshot that had already been assembled and thrown away.
+func persistScan(ctx context.Context, store concertStore, rows []db.ConcertRow, snap db.ConcertSnapshot) error {
+	persistCtx, cancel := detached(ctx, persistBudget)
+	defer cancel()
+	if err := store.UpsertConcerts(persistCtx, rows); err != nil {
+		return err
+	}
+	return store.UpsertConcertSnapshot(persistCtx, snap)
 }
 
 // isOnlyRateCapped reports whether quota exhaustion was the sole reason a
@@ -612,6 +664,10 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 	steps := []step{
 		{"rate_ledger", func(c context.Context) (int64, error) { return db.PruneRateLedger(c, w.Pool, 90) }},
 		{"rate_ledger_account", func(c context.Context) (int64, error) { return db.PruneRateLedgerAccount(c, w.Pool, 90) }},
+		// Daily location slots. They only mean anything on the day they were
+		// claimed, but nothing else removes them and one lands per location
+		// per user per day.
+		{"location_visits", func(c context.Context) (int64, error) { return db.PruneLocationVisits(c, w.Pool, 30) }},
 		{"concert_cache", func(c context.Context) (int64, error) { return db.PruneConcertCache(c, w.Pool, 7) }},
 		{"past_concerts", func(c context.Context) (int64, error) { return db.PrunePastConcerts(c, w.Pool, 7) }},
 		{"oauth_handshakes", func(c context.Context) (int64, error) { return db.PruneExpiredHandshakes(c, w.Pool) }},
@@ -634,6 +690,13 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		// we ever failed to resolve, forever. Positives are kept on purpose.
 		{"expired_mb_negatives", func(c context.Context) (int64, error) { return db.PruneExpiredNegativeMBURLs(c, w.Pool) }},
 		{"expired_geo_negatives", func(c context.Context) (int64, error) { return db.PruneExpiredNegativeGeo(c, w.Pool) }},
+		// The third negative cache, and the one that grows fastest: a row per
+		// artist anyone's profile has ever contained. concerts.needsTMResolution
+		// already re-asks about these once they age past the TTL, so nothing
+		// reads them; positives have a non-NULL attraction ID and are kept.
+		{"expired_tm_negatives", func(c context.Context) (int64, error) {
+			return db.PruneExpiredNegativeResolutions(c, w.Pool, concerts.NegativeResolutionTTL)
+		}},
 	}
 	for _, s := range steps {
 		n, err := s.run(ctx)

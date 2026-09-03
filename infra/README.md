@@ -24,7 +24,10 @@ the Cloudflare dashboard. See "DNS records" below.
   bootstrapped via user_data. Elastic IP attached.
 - **Security groups** — `ec2-sg` open on 80/443 to the internet, all outbound.
   There is no `rds-sg`: the database is Neon, reached outbound over the public
-  internet on 5432 with TLS. Port 22 is deliberately closed — access is via SSM.
+  internet on 5432 with TLS. Port 22 is closed — access is via SSM — unless
+  `ssh_ingress_cidrs` is set for break-glass; empty is the default and the
+  intended steady state, and the dynamic block emits no rule at all when the
+  list is empty. See "Break-glass SSH" below.
 - **S3** a private, versioned backup bucket for the nightly `pg_dump`
   (`scripts/backup-db.sh`), with a lifecycle rule expiring dumps after
   `backup_retention_days`. The instance role gets `s3:PutObject` and nothing
@@ -37,14 +40,19 @@ the Cloudflare dashboard. See "DNS records" below.
 - **SES** verified domain identity, DKIM, custom MAIL FROM subdomain, and a
   sandbox-verified recipient (for initial testing). The DNS records these
   need are emitted as the `dns_records` output, not created.
-- **CloudWatch** two alarms: EC2 status check failed, and estimated monthly
-  billing over threshold. Neither is wired to an SNS topic — alarm state is
-  visible in the console only, so nothing pages you. There is deliberately no
-  database alarm: Neon publishes no CloudWatch metrics, so its storage and
-  compute-hour headroom can only be alerted on from the Neon console.
+- **CloudWatch** three alarms, all publishing to an SNS topic with an email
+  subscription on `alert_email`: EC2 status check failed, EC2 *system* status
+  check (whose action is `ec2:recover`, so it fixes rather than reports), and
+  estimated monthly billing over threshold. **An email subscription stays in
+  `PendingConfirmation` until someone clicks the link AWS sends on the first
+  apply, and Terraform reports the resource created either way** — confirm it
+  once rather than assuming a green apply means the alarms reach anyone. There
+  is deliberately no database alarm: Neon publishes no CloudWatch metrics, so
+  its storage and compute-hour headroom can only be alerted on from the Neon
+  console.
 
 Deliberately not included (see design §11.3 for triggers to add them):
-ALB, ECS Fargate, CloudFront/S3, Secrets Manager, SNS topics on alarms.
+ALB, ECS Fargate, CloudFront/S3, Secrets Manager.
 
 ## Prerequisites
 
@@ -234,8 +242,21 @@ State is **local**, in `infra/terraform.tfstate` (gitignored). Contains
 plaintext SES SMTP creds and the break-glass private key, so back it up
 somewhere secure (1Password vault, encrypted external drive). It no longer
 contains a database password — that moved to the Neon console when RDS went
-away. If this ever grows to multiple contributors, migrate to an S3 backend +
-DynamoDB lock table.
+away.
+
+**The S3 backend is written and ready to adopt, and has not been applied.**
+`bootstrap/` creates the state bucket (versioned, encrypted, TLS-only, 90-day
+noncurrent expiry) and `backend.tf.example` is the block to copy in afterwards;
+the full procedure is in `docs/aws-deploy.md`, "Terraform state". It is not
+`backend.tf` already because a backend block makes `terraform init` demand a
+bucket that does not exist yet, which would break `validate` for everyone until
+someone ran the bootstrap.
+
+Locking is S3-native (`use_lockfile`, Terraform ≥ 1.11) rather than the
+DynamoDB table older guides describe — there is no table to create and none to
+pay for. Note this module's `required_version` floor is still 1.6, which
+predates that feature: bump it when you adopt the backend, or the lock is
+silently absent for anyone on an older CLI.
 
 ## Break-glass SSH
 
@@ -243,6 +264,15 @@ Terraform writes a private key to `infra/.secrets/concertfinder-breakglass.pem`
 (gitignored, mode 0600). Never used in normal operation — SSM is the primary
 admin channel. Only touch this if SSM Agent on the box has broken and you
 need to fix it before it can be replaced.
+
+**The key alone is not access.** Port 22 has no ingress rule, so that key has
+never been usable, and an incident is the wrong time to find that out. The
+lever is `ssh_ingress_cidrs` in `terraform.tfvars`: set it to your own `/32`,
+apply, do the work, set it back to `[]` and apply again. Empty is the default
+and the intended steady state, the variable refuses `0.0.0.0/0`, and the
+dynamic block produces no rule at all when the list is empty — so this is a
+lever, not a change in posture. `docs/aws-deploy.md`, "Break-glass access", has
+the commands.
 
 ## Common operations
 
@@ -253,6 +283,43 @@ role's password in the Neon console, then update `DATABASE_URL` in
 
 **Restore from a backup:** see `docs/aws-deploy.md` §7. The instance can only
 write to the bucket, so restores run from your laptop with admin credentials.
+
+**Pin `subnet_id`, once, on an existing deployment.** The instance used to take
+its subnet from `data.aws_subnets.default.ids[0]`. That is index 0 of a *set*,
+and a set is unordered — the value can come back different with nothing in this
+config having changed. `subnet_id` forces replacement, so the consequence is
+not a diff, it is Terraform destroying the box: `/opt/concertfinder`, the `.env`
+`render-env.sh` rendered from SSM, and the caddy volumes holding the issued
+certificates. Set `subnet_id` in `terraform.tfvars` to the subnet the instance
+is *already* in:
+
+```bash
+aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder \
+  --query 'Reservations[].Instances[].SubnetId' --output text
+```
+
+Left empty it falls back to the old lookup, so an existing gitignored
+`terraform.tfvars` keeps working — but that is the state this exists to get out
+of, not a supported configuration.
+
+**The instance carries `lifecycle { prevent_destroy = true }`.** It is the
+backstop for the paragraph above: any plan that would replace or destroy
+`aws_instance.app` now fails at plan time naming the resource, instead of
+succeeding. `ignore_changes` covers only `user_data` and `ami`; everything else
+that forces replacement is caught here.
+
+The trade is that a *deliberate* rebuild no longer just works. Two ways
+through, both intentional friction:
+
+- Comment the `prevent_destroy` line out for the single apply that rebuilds,
+  then put it back. Simplest, and it leaves a diff someone has to write.
+- `terraform state rm aws_instance.app`, make the change, then
+  `terraform import aws_instance.app <instance-id>` — for the case where the
+  real instance is fine and only the state's idea of it needs moving.
+
+If a plan is refusing with "Instance cannot be destroyed", read *why* it wants
+to replace before reaching for either. On this config the likely answer is a
+drifting `subnet_id`, which wants pinning, not overriding.
 
 **Add more SES-verified recipients (while in sandbox):**
 Edit `ses.tf`, add another `aws_ses_email_identity` resource. Re-apply.
@@ -265,6 +332,11 @@ Or exit sandbox with an AWS support ticket and skip this.
 aws s3 rm "s3://$(terraform output -raw backup_bucket)" --recursive
 terraform destroy
 ```
+
+This will now stop on `aws_instance.app`: `prevent_destroy` does not
+distinguish an accidental replacement from a teardown you meant. Remove the
+`lifecycle` block's `prevent_destroy` line in `ec2.tf` first, and treat having
+to do so as the last chance to notice you are destroying production.
 
 `destroy` does not touch the database. Neon is outside this state entirely, so
 the project and its data survive — delete it in the Neon console separately, and

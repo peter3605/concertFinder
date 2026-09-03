@@ -1,4 +1,35 @@
 import SwiftUI
+import UIKit
+
+/// The app's top-level sections.
+///
+/// Top level rather than nested in `MainTabView` because the selection now
+/// lives on `AppContainer`: a screen deep inside one tab needs to be able to
+/// send the user to another (the empty feed's "get alerts" action points at
+/// Artists), and a notification's deep link has to land on the feed.
+enum AppTab: Hashable, CaseIterable, Identifiable {
+    case feed, saved, artists, settings
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .feed: "Concerts"
+        case .saved: "Saved"
+        case .artists: "Artists"
+        case .settings: "Settings"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .feed: "music.note.list"
+        case .saved: "bookmark"
+        case .artists: "person.2"
+        case .settings: "gearshape"
+        }
+    }
+}
 
 /// Decides which of the four top-level states the app is in.
 struct RootView: View {
@@ -32,57 +63,43 @@ struct MainTabView: View {
 
     @Environment(FeedModel.self) private var feed
     @Environment(AppContainer.self) private var container
-    // Regular width is iPad, and an iPhone in landscape on the larger
-    // devices. Reviewers do open the iPad build, and a stretched four-tab
-    // phone layout across 1024 points reads as an unported app.
-    @Environment(\.horizontalSizeClass) private var sizeClass
-    @State private var selection = Tab.feed
 
-    enum Tab: Hashable, CaseIterable, Identifiable {
-        case feed, saved, artists, settings
-
-        var id: Self { self }
-
-        var title: String {
-            switch self {
-            case .feed: "Concerts"
-            case .saved: "Saved"
-            case .artists: "Artists"
-            case .settings: "Settings"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .feed: "music.note.list"
-            case .saved: "bookmark"
-            case .artists: "person.2"
-            case .settings: "gearshape"
-            }
-        }
-    }
+    /// The idiom, not the size class. Reviewers do open the iPad build and a
+    /// stretched four-tab phone layout across 1024 points reads as an
+    /// unported app — but `horizontalSizeClass` is `.regular` for a
+    /// Max-class iPhone in landscape too, so rotating the phone swapped the
+    /// tab bar for a sidebar and tore down every navigation stack with it.
+    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     var body: some View {
         Group {
-            if sizeClass == .regular {
+            if isPad {
                 splitLayout
             } else {
                 tabLayout
             }
         }
-        // A tapped notification names an event. Switching to the feed is the
-        // honest minimum — the event may not be in the current filtered view,
-        // and silently clearing the user's filters to reveal it would be a
-        // surprising thing to do to their screen.
+        // A tapped notification names an event, and the tap is a request to
+        // see *that* card. Switching tabs was as far as this went, so the
+        // notification opened a feed the user then had to scroll for.
+        //
+        // Clearing the key afterwards is the other half: `onChange` fires on a
+        // change, so leaving the previous key in place made a second
+        // notification about the same event a silent no-op.
         .onChange(of: container.pendingEventKey) { _, key in
-            guard key != nil else { return }
-            selection = .feed
+            guard let key else { return }
+            container.selectedTab = .feed
+            Task {
+                await feed.openEvent(withKey: key)
+                container.pendingEventKey = nil
+            }
         }
     }
 
     private var tabLayout: some View {
-        TabView(selection: $selection) {
-            ForEach(Tab.allCases) { tab in
+        @Bindable var container = container
+        return TabView(selection: $container.selectedTab) {
+            ForEach(AppTab.allCases) { tab in
                 destination(for: tab)
                     .tabItem { Label(tab.title, systemImage: tab.icon) }
                     .tag(tab)
@@ -98,9 +115,9 @@ struct MainTabView: View {
             // List selection on iOS is an optional binding. The sidebar can
             // never actually be deselected here, so nil folds back to the
             // current tab rather than to an empty detail pane.
-            List(Tab.allCases, selection: Binding(
-                get: { Optional(selection) },
-                set: { selection = $0 ?? selection }
+            List(AppTab.allCases, selection: Binding(
+                get: { Optional(container.selectedTab) },
+                set: { container.selectedTab = $0 ?? container.selectedTab }
             )) { tab in
                 Label(tab.title, systemImage: tab.icon)
                     .tag(tab)
@@ -108,12 +125,12 @@ struct MainTabView: View {
             .navigationTitle("ConcertFinder")
             .listStyle(.sidebar)
         } detail: {
-            destination(for: selection)
+            destination(for: container.selectedTab)
         }
     }
 
     @ViewBuilder
-    private func destination(for tab: Tab) -> some View {
+    private func destination(for tab: AppTab) -> some View {
         switch tab {
         case .feed: FeedView()
         case .saved: SavedView()
@@ -135,9 +152,37 @@ struct UpdateRequiredView: View {
         } description: {
             Text("This version of ConcertFinder no longer works with our servers. Please update from the App Store to keep going.")
         } actions: {
-            Link("Open App Store", destination: URL(string: "itms-apps://apple.com/app")!)
-                .buttonStyle(.borderedProminent)
+            // Only when there is somewhere to send them. The screen is
+            // deliberately undismissable, so a button that opens the App
+            // Store to nothing is the last thing the user can do in the app.
+            if let url = AppStoreLink.url() {
+                Link("Open App Store", destination: url)
+                    .buttonStyle(.borderedProminent)
+            }
         }
+    }
+}
+
+/// The App Store listing for this app, if there is one yet.
+///
+/// The app ID is assigned by App Store Connect on first submission, which has
+/// not happened — so `CFAppStoreAppID` is an empty build setting today. It is
+/// read rather than hardcoded so that filling it in is a one-line change in
+/// `project.yml` with no Swift touched.
+enum AppStoreLink {
+    static func url(bundle: Bundle = .main) -> URL? {
+        url(appID: bundle.object(forInfoDictionaryKey: "CFAppStoreAppID") as? String)
+    }
+
+    /// Split out so the gate is testable without a bundle.
+    ///
+    /// `allSatisfy(\.isNumber)` is not fussiness: an unset build setting can
+    /// reach the plist as an empty string *or* as the literal
+    /// `$(CF_APP_STORE_APP_ID)`, and both would otherwise build a URL that
+    /// opens the App Store to nothing.
+    static func url(appID: String?) -> URL? {
+        guard let appID, !appID.isEmpty, appID.allSatisfy(\.isNumber) else { return nil }
+        return URL(string: "itms-apps://apps.apple.com/app/id\(appID)")
     }
 }
 

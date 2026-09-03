@@ -82,19 +82,37 @@ struct SettingsView: View {
         }
     }
 
+    /// Whether a toggle's new value came from a tap rather than from
+    /// `syncFromProfile`.
+    ///
+    /// `.onChange` cannot tell the two apart — a programmatic write fires it
+    /// exactly like a user's does — so opening this screen used to ask the OS
+    /// for notification authorization and PUT all three preferences back,
+    /// every time. A plain `isSyncing` flag does not close it: SwiftUI
+    /// delivers the change during the *next* update pass, by which point a
+    /// flag set and cleared inside the sync has already gone false. Comparing
+    /// against the profile does, and needs no state: a sync writes the value
+    /// the profile already holds, and a tap never does.
+    private func isUserEdit(_ newValue: Bool, matching current: Bool?) -> Bool {
+        newValue != (current ?? false)
+    }
+
     private var notificationsSection: some View {
         Section {
             Toggle("Push notifications", isOn: $pushOptIn)
                 .onChange(of: pushOptIn) { _, newValue in
+                    guard isUserEdit(newValue, matching: me?.pushOptIn) else { return }
                     Task { await setPush(newValue) }
                 }
             Toggle("Daily email digest", isOn: $digestOptIn)
                 .onChange(of: digestOptIn) { _, newValue in
+                    guard isUserEdit(newValue, matching: me?.digestOptIn) else { return }
                     Task { await save(digest: newValue) }
                 }
                 .disabled(me?.hasEmail != true)
             Toggle("Email me new shows immediately", isOn: $instantOptIn)
                 .onChange(of: instantOptIn) { _, newValue in
+                    guard isUserEdit(newValue, matching: me?.instantNotifyOptIn) else { return }
                     Task { await save(instantNotify: newValue) }
                 }
                 .disabled(me?.hasEmail != true)

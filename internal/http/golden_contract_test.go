@@ -51,6 +51,7 @@ func TestGoldenFixtures(t *testing.T) {
 		{"empty-feed", goldenEmptyFeed()},
 		{"incomplete-scan", goldenIncompleteScan()},
 		{"refresh-throttled", goldenRefreshThrottled()},
+		{"discover", goldenDiscover()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Indented and newline-terminated so a diff on failure is
@@ -155,12 +156,13 @@ func TestEventCarriesCoordinates(t *testing.T) {
 // from production, because a captured response would carry a real user's
 // listening profile — but the *shapes* are the handlers' own.
 
-func goldenAct(id, name, dedup string, genres []string, saved, subscribed bool) concerts.Act {
+func goldenAct(id, name, dedup string, genres []string, saved, subscribed bool, reason string) concerts.Act {
 	return concerts.Act{
 		Artist:     concerts.ArtistRef{ID: id, Name: name, Genres: genres},
 		DedupKey:   dedup,
 		Saved:      saved,
 		Subscribed: subscribed,
+		Reason:     reason,
 	}
 }
 
@@ -182,12 +184,12 @@ func goldenFestival() concertsResponse {
 			Latitude:  39.2037,
 			Longitude: -76.8610,
 			Acts: []concerts.Act{
-				goldenAct("3fMbdgg4jU18AjLCKBhRSm", "Turnstile", "a1b2c3d4e5f60718293a4b5c6d7e8f90", []string{"hardcore punk", "alternative rock"}, true, false),
-				goldenAct("4LG4Bs1Gadht7TCrMytQUO", "Snail Mail", "b2c3d4e5f60718293a4b5c6d7e8f9001", []string{"indie rock"}, false, true),
-				goldenAct("56ZTgzPBDge0OvCGgMO3OY", "Beach House", "c3d4e5f60718293a4b5c6d7e8f900112", []string{"dream pop"}, false, false),
-				goldenAct("1Bl6wpkWCQ4KVgnASpvzzA", "Wednesday", "d4e5f60718293a4b5c6d7e8f90011223", []string{"indie rock"}, false, false),
-				goldenAct("6l3HvQ5sa6mXTsMTB19rO5", "MJ Lenderman", "e5f60718293a4b5c6d7e8f9001122334", []string{"indie rock"}, false, false),
-				goldenAct("7jy3rLJdDQY21OgRLCZ9sD", "Foo Fighters", "f60718293a4b5c6d7e8f900112233445", []string{"alternative rock"}, false, false),
+				goldenAct("3fMbdgg4jU18AjLCKBhRSm", "Turnstile", "a1b2c3d4e5f60718293a4b5c6d7e8f90", []string{"hardcore punk", "alternative rock"}, true, false, "You follow them"),
+				goldenAct("4LG4Bs1Gadht7TCrMytQUO", "Snail Mail", "b2c3d4e5f60718293a4b5c6d7e8f9001", []string{"indie rock"}, false, true, "#7 in your top artists"),
+				goldenAct("56ZTgzPBDge0OvCGgMO3OY", "Beach House", "c3d4e5f60718293a4b5c6d7e8f900112", []string{"dream pop"}, false, false, "You saved 3 of their albums"),
+				goldenAct("1Bl6wpkWCQ4KVgnASpvzzA", "Wednesday", "d4e5f60718293a4b5c6d7e8f90011223", []string{"indie rock"}, false, false, "Recently played"),
+				goldenAct("6l3HvQ5sa6mXTsMTB19rO5", "MJ Lenderman", "e5f60718293a4b5c6d7e8f9001122334", []string{"indie rock"}, false, false, "In 2 of your playlists"),
+				goldenAct("7jy3rLJdDQY21OgRLCZ9sD", "Foo Fighters", "f60718293a4b5c6d7e8f900112233445", []string{"alternative rock"}, false, false, ""),
 			},
 			Links: []concerts.TicketLink{
 				{Source: "ticketmaster", URL: "https://www.ticketmaster.com/event/example"},
@@ -236,7 +238,7 @@ func goldenIncompleteScan() concertsResponse {
 			Latitude:  38.9180,
 			Longitude: -77.0243,
 			Acts: []concerts.Act{
-				goldenAct("3fMbdgg4jU18AjLCKBhRSm", "Turnstile", "aabbccddeeff00112233445566778899", []string{"hardcore punk"}, false, false),
+				goldenAct("3fMbdgg4jU18AjLCKBhRSm", "Turnstile", "aabbccddeeff00112233445566778899", []string{"hardcore punk"}, false, false, "You follow them"),
 			},
 			Links: []concerts.TicketLink{
 				{Source: "ticketmaster", URL: "https://www.ticketmaster.com/event/other"},
@@ -262,5 +264,35 @@ func goldenRefreshThrottled() refreshResponse {
 		Refreshing: false,
 		RetryAfter: &retry,
 		Reason:     "daily upstream quota exhausted",
+	}
+}
+
+// goldenDiscover is GET /api/discover: the signed-out view. It reuses the
+// Event model, which is the point — but it is a *different* response type, so
+// a client cannot assume the feed's fields are there. There is no facets
+// block, no computed_at, no refreshing and no complete flag, and its acts
+// carry no artist id, no reason and no saved/subscribed state, because
+// nothing about this response knows who is asking.
+func goldenDiscover() discoverResponse {
+	return discoverResponse{
+		Location: concerts.Location{Latitude: 38.8951, Longitude: -77.0364, RadiusMiles: 50},
+		Count:    1,
+		Events: []concerts.Event{{
+			EventKey:  "22334455667788990011223344556677",
+			Date:      time.Date(2026, 10, 3, 19, 30, 0, 0, time.UTC),
+			Venue:     "The Anthem",
+			City:      "Washington",
+			State:     "DC",
+			Country:   "US",
+			Latitude:  38.8790,
+			Longitude: -77.0217,
+			Acts: []concerts.Act{
+				{Artist: concerts.ArtistRef{Name: "Fontaines D.C."}, DedupKey: "0011223344556677889900aabbccddee", Billing: "headliner"},
+				{Artist: concerts.ArtistRef{Name: "Been Stellar"}, DedupKey: "11223344556677889900aabbccddeeff", Billing: "support"},
+			},
+			Links: []concerts.TicketLink{
+				{Source: "ticketmaster", URL: "https://www.ticketmaster.com/event/anthem"},
+			},
+		}},
 	}
 }

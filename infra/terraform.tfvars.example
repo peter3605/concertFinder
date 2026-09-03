@@ -16,6 +16,31 @@ ses_dns_records_created = false
 # pasted into /opt/concertfinder/.env as DATABASE_URL — see docs/aws-deploy.md
 # §1. This Terraform owns only the S3 bucket its nightly dump lands in.
 
+# The subnet the app instance lives in. SET THIS on an existing deployment, to
+# the subnet the instance is already in:
+#
+#   aws ec2 describe-instances --filters Name=tag:Name,Values=concertfinder \
+#     --query 'Reservations[].Instances[].SubnetId' --output text
+#
+# Unset, it falls back to the first ID of the default VPC's subnet list. That
+# list is a set, so it has no defined order: the value at index 0 can change
+# with nothing in the config changing, and a changed subnet forces Terraform to
+# REPLACE the instance -- taking /opt/concertfinder, the rendered .env and the
+# caddy certificate volumes with it. `prevent_destroy` on the instance now
+# turns that into an error rather than a rebuild, but the error is a stuck
+# plan; pinning the value is what avoids it.
+# subnet_id = "subnet-0123456789abcdef0"
+
+# Where CloudWatch alarm mail goes. Unset, it reuses ses_verified_recipient
+# above -- the same address CONTACT_EMAIL already uses. Set it only if alerts
+# should go somewhere other than the operator's own inbox.
+#
+# An email subscription is PENDING until the recipient clicks the confirmation
+# link AWS mails on the first apply. Terraform reports the resource created
+# either way, so a green apply is not proof that alerts are deliverable; check
+# the subscription reads Confirmed in the SNS console once.
+# alert_email = "alerts@example.com"
+
 # Everything else has sensible defaults; override only if needed:
 # region                       = "us-east-1"
 # github_repo                  = "peter3605/concertFinder"
@@ -45,3 +70,17 @@ ses_dns_records_created = false
 # REPLACE_ME and render-env.sh fails the next deploy until you run
 # ./scripts/set-secrets.sh. That applies even if you never ship the app: mark
 # it unused with [-] once. Do not apply until you have the key in hand.
+
+# --- Break-glass SSH (docs/aws-deploy.md, "Break-glass access") --------------
+#
+# Leave this unset. Empty is the deployed posture: no port-22 rule at all, and
+# SSM Session Manager (`aws ssm start-session --target <id>`) is the admin
+# channel -- the same one the deploy already uses. The key pair in ec2.tf is
+# attached to the instance and unusable precisely because nothing opens the
+# port.
+#
+# Set it only while SSM itself is unavailable or its agent is wedged, scoped to
+# a single address, and set it back to [] and apply again afterwards. The
+# variable refuses 0.0.0.0/0.
+#
+# ssh_ingress_cidrs = ["203.0.113.4/32"]

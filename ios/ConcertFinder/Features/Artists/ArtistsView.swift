@@ -102,6 +102,18 @@ final class ArtistsModel {
             self.error = error as? APIError ?? .unknown(error.localizedDescription)
         }
     }
+
+    /// Sign-out. The debounce task goes too: a keystroke in flight would
+    /// otherwise land a search against a session that no longer exists.
+    func reset() {
+        searchTask?.cancel()
+        searchTask = nil
+        query = ""
+        subscribed = []
+        results = []
+        isSearching = false
+        error = nil
+    }
 }
 
 struct ArtistsView: View {
@@ -112,6 +124,19 @@ struct ArtistsView: View {
 
         NavigationStack {
             List {
+                // The model has always set `error` here and the screen has
+                // never shown it: a failed load left "You're not getting
+                // alerts for any artists yet", which reads as the user having
+                // no subscriptions rather than as an outage.
+                if let error = model.error {
+                    Section {
+                        InfoBanner(kind: .error(error.userMessage))
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                        Button("Try again") { Task { await model.load() } }
+                    }
+                }
+
                 if !model.query.isEmpty {
                     Section("Results") {
                         if model.isSearching && model.results.isEmpty {
@@ -129,7 +154,10 @@ struct ArtistsView: View {
                 }
 
                 Section {
-                    if model.subscribed.isEmpty {
+                    if model.subscribed.isEmpty && model.error != nil {
+                        Text("We couldn't load your artists.")
+                            .foregroundStyle(.secondary)
+                    } else if model.subscribed.isEmpty {
                         Text("You're not getting alerts for any artists yet. Search above to add one.")
                             .foregroundStyle(.secondary)
                     } else {

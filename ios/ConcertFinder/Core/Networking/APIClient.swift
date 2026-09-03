@@ -22,7 +22,12 @@ actor APIClient {
     private let baseURL: URL
     private let session: URLSession
     private let tokens: TokenStore
-    private weak var invalidationHandler: (any SessionInvalidationHandler)?
+    /// Strong. A weak reference here made the handler's lifetime a property of
+    /// whoever happened to hold it, and the answer was "nobody" — it was gone
+    /// before the first request and every 401 went unreported. The cycle this
+    /// would otherwise close (client → handler → controller → client) is
+    /// broken at the controller instead, where it is visible.
+    private var invalidationHandler: (any SessionInvalidationHandler)?
 
     /// Identifies the client on every request, e.g. "ios/1.0.0 (build 42)".
     /// The server logs it; when something breaks for app users only, this is
@@ -85,11 +90,21 @@ actor APIClient {
 
     // MARK: - Request plumbing
 
+    /// - Parameters:
+    ///   - authenticated: whether to attach the bearer token. `false` is for
+    ///     the endpoints that must work with no session at all — a stranger
+    ///     on the first-run screen has one, an expired one, or none, and
+    ///     sending a dead token would turn a public read into a 401 that
+    ///     signs the app out.
+    ///   - timeout: overrides URLSession's 60-second default. Only worth
+    ///     setting where waiting the full minute is itself the failure.
     private func makeRequest(
         _ method: String,
         _ path: String,
         query: [URLQueryItem] = [],
-        body: (any Encodable & Sendable)? = nil
+        body: (any Encodable & Sendable)? = nil,
+        authenticated: Bool = true,
+        timeout: TimeInterval? = nil
     ) async throws -> URLRequest {
         guard var components = URLComponents(
             url: baseURL.appendingPathComponent(path),
@@ -104,9 +119,10 @@ actor APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if let timeout { request.timeoutInterval = timeout }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(clientHeader, forHTTPHeaderField: "X-CF-Client")
-        if let token = await tokens.currentToken() {
+        if authenticated, let token = await tokens.currentToken() {
             // Bearer, never a cookie. This is also what makes the server skip
             // its CSRF check — a native client has no token to double-submit.
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -182,8 +198,16 @@ actor APIClient {
         }
     }
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], as type: T.Type) async throws -> T {
-        let data = try await perform(try await makeRequest("GET", path, query: query))
+    private func get<T: Decodable>(
+        _ path: String,
+        query: [URLQueryItem] = [],
+        authenticated: Bool = true,
+        timeout: TimeInterval? = nil,
+        as type: T.Type
+    ) async throws -> T {
+        let data = try await perform(
+            try await makeRequest("GET", path, query: query, authenticated: authenticated, timeout: timeout)
+        )
         return try decode(T.self, from: data)
     }
 
@@ -212,8 +236,38 @@ actor APIClient {
         _ = try await perform(try await makeRequest("POST", "api/auth/logout"))
     }
 
+    /// The minimum-build check runs before anything else on launch, so its
+    /// deadline is the launch screen's. URLSession's default is 60 seconds:
+    /// on a captive portal that is a minute of `ProgressView` before an app
+    /// that would have worked offline against its cached snapshot. The check
+    /// fails open, so a short deadline costs nothing but the check.
+    static let siteInfoTimeout: TimeInterval = 5
+
     func siteInfo() async throws -> SiteInfo {
-        try await get("api/site-info", as: SiteInfo.self)
+        try await get("api/site-info", timeout: Self.siteInfoTimeout, as: SiteInfo.self)
+    }
+
+    // MARK: - Discover
+
+    /// "Popular shows near you", with no session.
+    ///
+    /// `authenticated: false` is load-bearing rather than tidy. This is the
+    /// backdrop of the first screen a stranger sees, and it runs while the
+    /// app may hold a token that is expired or belongs to a deleted account —
+    /// attaching it turns a public read into a 401, which `perform` treats as
+    /// a session expiry and which would sign the user out from the sign-in
+    /// screen.
+    func discover(latitude: Double, longitude: Double, radiusMiles: Int) async throws -> DiscoverResponse {
+        try await get(
+            "api/discover",
+            query: [
+                URLQueryItem(name: "lat", value: String(latitude)),
+                URLQueryItem(name: "lng", value: String(longitude)),
+                URLQueryItem(name: "radius", value: String(radiusMiles)),
+            ],
+            authenticated: false,
+            as: DiscoverResponse.self
+        )
     }
 
     // MARK: - Feed

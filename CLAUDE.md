@@ -80,7 +80,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
 - **Spotify redirect URI is `https://127.0.0.1:3000/api/auth/callback`** for local dev (`https://<domain>/api/auth/callback` in prod) — `http://localhost` is rejected by Spotify as of Nov 2025. The path is not `/callback`: the handler is mounted under `/api/auth`, and a dashboard entry pointing at `/callback` hits the SPA catch-all instead, so login silently completes into a logged-out app.
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
-- **Per-user daily caps must exceed `spotify.MaxScoredArtists` (200).** A scan needs roughly one call per artist per source once `concert_cache` lapses, so a cap below that count means a user can *never* cover their own profile: every scan spends the allowance partway and reports itself incomplete. This shipped as TM=100 against 200 artists and presented as a concert list quietly holding half the shows it should. Defaults are now TM=250 / Songkick=100, and `main.go` warns at startup if a cap drops below the artist count. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
+- **Per-user daily caps must exceed the cost of a *cold* scan, which is `spotify.MaxScoredArtists` (200) × `ticketmaster.CallsPerArtistColdScan` (2) = 400.** Ticketmaster resolution is two-stage, so a warm cache costs ~1 call per artist and a first-ever scan costs ~2. A cap below that means a new user can *never* cover their own profile: the scan spends the allowance partway and reports itself incomplete. This has been undersized twice, in the same direction. TM=100 was below even the warm number. TM=250 cleared it and looked generous — and the first real scan died at exactly 250/250 having covered ~125 artists, writing a snapshot with 65 shows and `complete = false`. Neither failure raises an error; both present as a concert list quietly holding a fraction of the shows it should. **Check against the cold cost, not the artist count** — comparing against 200 is precisely what let 250 pass. The TM default is now 500; Songkick stays 100 because it only sees escalating artists, not all 200, which is why `config_test` asserts on TM alone. `main.go` warns at startup when the TM cap drops below the cold-scan cost. The counterweight is `DefaultCacheTTL` (12h, `CONCERT_CACHE_TTL_HOURS`): it must stay **above** `SNAPSHOT_STALE_AFTER_HOURS` so SWR refreshes are cache-served, and **below** the janitor's 7-day `concert_cache` prune. `internal/config` tests pin all three relationships.
 - **Per-user caps multiply; the account ceiling is what the upstream enforces.**
   Ticketmaster's 5000/day is per API key, not per user of ours, so ten users at
   `RATE_CAP_TM_PER_USER_DAILY=500` is the entire allowance and the eleventh
@@ -129,7 +129,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   the previous one named a GitHub repo that does not exist, which satisfied
   the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
-- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly.
+- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly. **Push records after the send round, not before.** `SendPushWorker` used to write the ledger first, matching the digest's at-most-once trade — but it then merely logged transient APNs errors and returned nil, so the keys were burned and river's retry found them already recorded and sent nothing. The user was never told about those shows and nothing said so. `sendRound` now reports which keys actually landed (delivered, or refused for a dead token — that one will never succeed), records only those, and returns an error if anything failed transiently. The reversed trade is that a crash between send and record costs a duplicate rather than a lost notification, which is the milder direction and which `CollapseID` absorbs.
 - **APNs routing is per device, and a notification carries its address in two
   halves.** A device token belongs to exactly one APNs environment and the
   other host answers `BadDeviceToken` — which `push.Error.IsUnregistered`
@@ -151,6 +151,46 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   matching entitlement flip, and either half moving alone broke push with
   nothing but `BadDeviceToken` to show for it.
 - **DICE.fm is excluded** from any scraping/fallback work; their ToS prohibits automated access.
+- **A session token is never stored, only its SHA-256** (migration 0018).
+  `sessions.id` used to *be* the credential — the `cf_session` cookie and the
+  iOS `Authorization: Bearer` value — so every nightly `pg_dump` in S3 was a
+  file of working logins. `id` is now an opaque UUID that other tables
+  reference (`mobile_auth_codes.session_id` cascades off it); `token_hash` is
+  what authenticates, and `auth.HashSessionToken` is the **only** thing allowed
+  to produce it — a second spelling of the hash authenticates nothing, silently.
+  Unsalted SHA-256 is correct rather than lazy: the input is 32 bytes of
+  `crypto/rand`, so there is no keyspace for a work factor to slow down.
+  A **NULL** `token_hash` does double duty and both halves matter: it is what
+  makes pre-0018 rows stop resolving (they cannot be backfilled — the token is
+  gone), and it is the escrow state for the mobile login. `/api/auth/callback`
+  writes the app's row with no hash, so it exists but authenticates nobody, and
+  `POST /mobile/exchange` claims it via `db.ClaimSessionToken`, minting the
+  token there and returning it exactly once. That is why `mobile_auth_codes`
+  never holds a working credential. `CreateSession` must keep `NULLIF($3,'')`:
+  an empty string is a *value*, and the second escrowed row would collide on
+  the unique index.
+- **The location cap bounds a set, not a count.** A scan is keyed by
+  `(user, location_key)` and river's uniqueness only collapses jobs sharing
+  that key, so one account walking coordinates fills all five worker slots with
+  five-minute jobs and starves everyone else's scans, digests and pushes — with
+  no error, because each job is individually legitimate. `user_location_visits`
+  (migration 0020) is therefore one row per `(user_id, day, location_key)`, not
+  a counter: re-entering a location already opened today is `ON CONFLICT DO
+  NOTHING` and costs nothing. A counter — a second use of `rate_ledger`, say —
+  cannot tell a revisit from a new location, so a commuter toggling between
+  home and work would spend the allowance twice every morning and be locked out
+  by lunchtime. Count and insert are one statement so two tabs cannot straddle
+  the check.
+- **The artist-site fetcher follows URLs from a user-editable wiki, so it is
+  guarded at the dialer.** MusicBrainz "official homepage" relationships are
+  attacker-supplyable, and `fallback.Fetcher` caches what it retrieves.
+  `https` only, and `newGuardedTransport` resolves the host and refuses
+  loopback/private/link-local/CGNAT/unique-local addresses **in `DialContext`**
+  — which is what covers redirects, and which dials the resolved literal so DNS
+  rebinding cannot win the gap between check and connect. robots.txt goes
+  through the same client. The cost is real and accepted: MusicBrainz lists
+  plenty of `http://` homepages, and those artists now fail the fallback rather
+  than being fetched.
 - **Display "Powered by Spotify"** attribution on any UI surface showing
   Spotify-derived data, **with Spotify's logo** — their guidelines require the
   mark, not just the words. One component per client owns it
@@ -170,6 +210,34 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   digests deliberately keep **text-only** attribution: remote images are
   blocked by default in most mail clients, so an `<img>` there would attribute
   nothing most of the time while the words always land.
+- **`GET /api/discover` is the one concert endpoint a stranger can call, and
+  what makes that safe is what it cannot do.** It is served entirely from
+  `concert_cache` (`db.ScanCachedConcerts` over the `tm:` prefix that
+  `concerts.CachePrefixTicketmaster` and `cacheKey` share): no upstream call,
+  no rate ledger, no affinity. An unauthenticated endpoint that can reach
+  Ticketmaster is a quota drain with a URL, and the account-wide allowance is
+  what decides whether signed-in users get a complete feed. Three further
+  properties are load-bearing. `FromCachedTicketmaster` decodes
+  **location-independently** and `Near` filters per request, because the
+  decoded candidate set is a process-wide cache and filtering at decode time
+  would hand the second visitor the first visitor's city. Acts carry **no
+  artist ID** — the IDs everywhere else in `concerts` are Spotify's, and a
+  Ticketmaster attraction ID in that field is a save or subscribe pointed at
+  an artist that does not exist. And every failure — an unreadable cache, an
+  undecodable payload, an empty area — answers `200` with `events: []`,
+  because the caller is the first screen a stranger sees and both clients
+  render nothing rather than an error there.
+- **The feed's `reason` line reads the affinity profile; it never computes
+  one.** `Act.reason` ("You follow them", "#7 in your top artists") comes from
+  `spotify.ArtistSignals`, a derived per-signal breakdown persisted in the
+  same 24h profile blob as the scores — no raw Spotify Content, nothing new
+  stored. The concerts handler calls `affinity.Service.ReasonsFor`, which
+  wraps `LoadCached`; calling `LoadOrCompute` there would turn the request the
+  frontend polls every 10s into a six-endpoint Spotify fan-out with a 60s
+  timeout. A missing or expired profile costs one line on a card, which is the
+  correct trade. `reason` is applied per request like `Saved` and
+  `Subscribed` and is never persisted in a snapshot, whose lifetime is
+  unrelated to the profile's.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 
@@ -246,8 +314,12 @@ The actual Ticketmaster + fallback fan-out happens inside `ScanConcertsWorker`
 - `ScanBudget = 5 * time.Minute` per job. Fallback resolver + venue geocoder
   are rate-limited (MB and Nominatim are both 1 req/sec/IP).
 - **The fallback chain gets its own scan-wide deadline**
-  (`SearchDeps.FallbackBudget`, default 60s, env
-  `PHASE2_FALLBACK_BUDGET_SECONDS`). Its lookups are globally serialized at
+  (`SearchDeps.FallbackBudget`, `concerts.DefaultFallbackBudget` = 120s, env
+  `PHASE2_FALLBACK_BUDGET_SECONDS`; zero means the default, negative disables
+  the chain). It was 60s until Bandsintown was removed: a measured 200-artist
+  scan logged `artists_not_escalated=34` at that figure, and with Ticketmaster
+  as the only primary those artists are simply absent from the feed rather
+  than merely missing a third chance. Its lookups are globally serialized at
   1 req/sec, so cost scales with the number of *escalating artists* and
   parallelism buys nothing: a cold 200-artist profile measured ~250s of
   MusicBrainz + ~86s of Nominatim against a 300s `ScanBudget`. The deadline
@@ -321,7 +393,14 @@ of killing the loop or replacing already-loaded data with an error screen.
 Four triggers, all funnelling into the same `ScanConcerts` job, which river's
 args-level uniqueness collapses to one in flight per (user, location):
 
-1. **Login** — `OnLoginSuccess` pre-warms a snapshot.
+1. **Login** — `OnLoginSuccess` pre-warms a snapshot, but **only for a user
+   who already has a location of their own**. Without that check the pre-warm
+   scans `USER_LATITUDE`/`USER_LONGITUDE` — a city the new user has never
+   mentioned — for up to `ScanBudget`, reserving a chunk of a daily per-user
+   cap sized at roughly one scan; the moment they name a real place the result
+   is filed under a different `location_key` and never read. The user waited
+   through it to be handed nothing. Both clients ask for a location before the
+   first feed, and the SWR read enqueues the scan when the answer arrives.
 2. **A stale read** — the SWR handler, per the rules above.
 3. **The nightly fanout** — `FanoutScanConcerts`, one job per user with a
    session in the last 14 days, spread across 60min to avoid a thundering herd.
@@ -536,14 +615,29 @@ separate SSM steps: `up -d --build` tears down running containers as part of
 the same command, so a failed or OOM-killed build took the site with it. Keep
 them separate in the runbook's manual and rollback commands too — a rollback is
 by definition a moment when the site is already unhappy. CI runs gofmt, vet,
-`go build`, `go test`, and `npm run build` — `go test` alone compiles only
-packages that have tests, and several here have none. Building in Actions and
+`go build`, `go test`, `govulncheck ./...`, and `npm run build` — `go test`
+alone compiles only packages that have tests, and several here have none.
+`govulncheck` reports against the **toolchain in PATH**, so the standard-library
+half of any failure is fixed by bumping `go-version` in the workflow, not by
+changing code; that is why the version there floats on the minor (`'1.25'`),
+which is where the Go team's security backports land. Building in Actions and
 pushing to ECR would remove the on-instance build entirely; that needs an ECR
 repo plus instance-profile pull permissions in `/infra`.
 
+**The backup and its drill must pin the same Postgres image.**
+`scripts/restore-drill.sh` is the read half of `scripts/backup-db.sh` — it
+fetches the newest dump from S3, restores it into a scratch Neon branch, times
+it, and asserts the four tables that do not rebuild themselves came back with
+rows. `pg_restore` refuses an archive produced by a *newer* server, so a
+`PG_IMAGE` that drifts between the two scripts fails the drill for a reason
+that has nothing to do with the backups, on the one day that distinction
+matters. `check-deploy-config.sh` compares them. The drill also refuses a target
+that already holds users, because it restores `--clean --if-exists`: without
+that guard a mispasted production URL is an outage rather than a typo.
+
 ## Required Environment Variables (Appendix A)
 
-Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
+Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `DB_MAX_CONNS` (optional, default 20 — pgx's own default is `max(4, NumCPU)`, i.e. 4 on the t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers; exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries), `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 

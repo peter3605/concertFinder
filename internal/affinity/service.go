@@ -53,6 +53,40 @@ func (s *Service) LoadOrCompute(ctx context.Context, u User) (artists []spotify.
 	return artists, time.Now(), false, nil
 }
 
+// LoadCached returns the persisted profile when one is inside the TTL, and
+// reports whether there was one. It never computes.
+//
+// That is the whole point of it: the SWR concerts read wants the profile to
+// annotate a feed it is about to return, and LoadOrCompute would turn that
+// read into a six-endpoint Spotify fan-out with a 60s timeout — on the
+// request the frontend polls every 10s. A missing profile here means one
+// fewer line on a card, which is the correct thing to trade.
+func (s *Service) LoadCached(ctx context.Context, userID uuid.UUID) ([]spotify.ScoredArtist, bool, error) {
+	blob, _, ok, err := db.LoadFreshAffinityProfile(ctx, s.Pool, userID, s.TTL)
+	if err != nil {
+		return nil, false, fmt.Errorf("load affinity: %w", err)
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	var artists []spotify.ScoredArtist
+	if err := json.Unmarshal(blob, &artists); err != nil {
+		return nil, false, fmt.Errorf("decode affinity: %w", err)
+	}
+	return artists, true, nil
+}
+
+// ReasonsFor is LoadCached plus Reasons: artist ID to the one line explaining
+// why that artist is in the user's feed. An empty map is a perfectly good
+// answer and is what every failure returns.
+func (s *Service) ReasonsFor(ctx context.Context, userID uuid.UUID) (map[string]string, error) {
+	artists, ok, err := s.LoadCached(ctx, userID)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return Reasons(artists), nil
+}
+
 // Compute forces a fresh computation and persists the result.
 func (s *Service) Compute(ctx context.Context, u User) ([]spotify.ScoredArtist, error) {
 	cctx, cancel := context.WithTimeout(ctx, ComputeTimeout)

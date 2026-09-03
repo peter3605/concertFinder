@@ -2,7 +2,13 @@ import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { EMPTY_FILTERS, type Facet, type FiltersState, type Weekday } from '@/lib/types';
+import {
+  EMPTY_FILTERS,
+  hasActiveFilters,
+  type Facet,
+  type FiltersState,
+  type Weekday,
+} from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 type Props = {
@@ -30,12 +36,7 @@ export function FilterBar({ filters, facets, venueFacets = [], onChange }: Props
       : venueFacets;
   // The empty state tells people to try clearing filters, so give them a
   // way to actually do it rather than resetting four controls by hand.
-  const anyActive =
-    filters.genre !== '' ||
-    filters.venue !== '' ||
-    filters.dateFrom !== '' ||
-    filters.dateTo !== '' ||
-    filters.weekday !== 'all';
+  const anyActive = hasActiveFilters(filters);
   return (
     <div className="flex flex-col gap-3">
       {topGenres.length > 0 && (

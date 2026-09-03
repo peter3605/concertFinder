@@ -69,7 +69,7 @@ func TestJSONLDViability(t *testing.T) {
 		t.Fatal("mb_url_cache has no resolved homepages — run a scan first")
 	}
 
-	fetcher := NewFetcher(pool)
+	fetcher := NewFetcher(pool, "")
 	results := probeAll(ctx, t, fetcher, resolved)
 	reportFunnel(t, len(resolved), negatives, results)
 }

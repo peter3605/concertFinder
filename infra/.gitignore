@@ -1,5 +1,11 @@
-# Local Terraform state — contains generated RDS passwords and SES SMTP creds.
-# Never commit. Migrate to S3 backend if this repo ever gets multiple contributors.
+# Terraform state — contains the SES SMTP password and the break-glass ED25519
+# private key in cleartext. Never commit.
+#
+# These patterns are recursive, so they also cover bootstrap/, whose state stays
+# local on purpose (it cannot store its state in the bucket it creates). Once
+# the root module has moved to the S3 backend per backend.tf.example, the
+# terraform.tfstate here is a stale copy holding live secrets — delete it rather
+# than relying on this file to keep it quiet.
 *.tfstate
 *.tfstate.*
 *.tfstate.backup

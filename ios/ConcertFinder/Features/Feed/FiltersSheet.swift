@@ -47,6 +47,12 @@ struct FiltersSheet: View {
             .onAppear {
                 draft = filters
                 useDateRange = !filters.dateFrom.isEmpty || !filters.dateTo.isEmpty
+                // The pickers too, not just the toggle. Restoring the switch
+                // alone reopened the sheet showing today-to-90-days over an
+                // active filter, so re-applying anything else silently
+                // widened the date range the user had set.
+                if let from = Self.isoDay.date(from: filters.dateFrom) { fromDate = from }
+                if let to = Self.isoDay.date(from: filters.dateTo) { toDate = to }
             }
         }
         .presentationDetents([.medium, .large])

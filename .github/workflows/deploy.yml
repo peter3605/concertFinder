@@ -24,6 +24,15 @@ on:
 permissions:
   contents: read
 
+# Two deploys must never interleave on one instance: they share a git checkout
+# under /opt/concertfinder, one .env, and one docker daemon, so a second run's
+# `git reset --hard` can land under the first run's build. cancel-in-progress is
+# false on purpose — cancelling a deploy mid-way leaves the instance in whatever
+# state the SSM command reached, which is worse than queueing behind it.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
 env:
   AWS_REGION: us-east-1
 
@@ -73,6 +82,23 @@ jobs:
         run: go build ./...
       - name: Go test
         run: go test ./...
+
+      # Known-vulnerability scan. `deploy` needs this job, so a finding blocks
+      # the deploy rather than merely annotating it — which is the point: this
+      # repo deploys on merge, so there is no later gate.
+      #
+      # govulncheck reports only vulnerabilities your code can actually reach,
+      # and it reports them against the toolchain in PATH — so the standard
+      # library half of any failure here is fixed by bumping `go-version`
+      # above, not by changing code. The floating '1.25' picks up each patch
+      # release, which is where the Go team lands security backports; that is
+      # what keeps this green without a standing chore.
+      #
+      # Not pinned to a govulncheck version: the tool is a scanner, its
+      # database is fetched at run time either way, and pinning it means the
+      # scan silently ages while looking like it still runs.
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       # The database-backed tests skip silently without TEST_DATABASE_URL, so
       # assert they actually ran rather than trusting a green suite.
@@ -157,6 +183,19 @@ jobs:
       # entirely (and free the instance from carrying a Node toolchain); it
       # needs an ECR repository plus pull permissions on the instance profile,
       # which is a change in /infra rather than here.
+      #
+      # The checkout resets to github.sha, not origin/main. They are usually the
+      # same commit and occasionally are not: two merges landing close together
+      # mean the older run's deploy step builds the newer run's tree, so what
+      # ships is a commit this workflow never tested. Pinning the SHA also makes
+      # the concurrency queue safe — the run that waits still deploys its own
+      # commit when it gets the lock.
+      #
+      # The built image is tagged with the commit SHA and prune-images.sh keeps
+      # the last three, so a rollback is `docker tag concertfinder-api:<sha>
+      # concertfinder-api:latest` plus a restart, rather than a rebuild on a
+      # 2 GiB box at the moment the site is already unhappy. See
+      # docs/aws-deploy.md §8.
       - name: Deploy via SSM
         id: ssm
         run: |
@@ -168,14 +207,15 @@ jobs:
             --parameters commands='[
               "set -euo pipefail",
               "cd /opt/concertfinder",
-              "sudo -u concertfinder git fetch --all",
-              "sudo -u concertfinder git reset --hard origin/main",
+              "sudo -u concertfinder git fetch origin",
+              "sudo -u concertfinder git reset --hard ${{ github.sha }}",
               "sudo ./scripts/render-env.sh",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml pull || true",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml build",
+              "sudo -u concertfinder docker tag concertfinder-api:latest concertfinder-api:${{ github.sha }}",
               "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 || echo compose-wait-failed-verify-deploy-below-is-the-verdict",
               "sudo -u concertfinder ./scripts/verify-deploy.sh",
-              "sudo -u concertfinder docker image prune -f"
+              "sudo -u concertfinder ./scripts/prune-images.sh"
             ]' \
             --query 'Command.CommandId' \
             --output text)

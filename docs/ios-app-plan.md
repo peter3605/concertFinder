@@ -142,12 +142,21 @@ third-party tokens) and [§10.2](#102-guideline-48-and-sign-in-with-apple)
   inside the app, and today only account deletion does that. See
   [§10.1.2](#1012-the-revoke-clause-which-this-plan-had-missed---built-2026-08-31),
   built 2026-08-31 as `DELETE /api/me/spotify-connection`.
-- **The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**
-  The rate ledger models per-user limits, not Ticketmaster's 5000/day account
-  total, so exceeding it degrades feeds silently. The web app is bounded by
-  the Spotify allowlist; a public App Store listing is not. This should exist
-  before the app is genuinely open — which is to say, before Extended Quota
-  Mode lands, not after.
+- ~~**The account-total quota ceiling ([§3.3](#33-upstream-quota-against-an-open-download-button)).**~~
+  **Built 2026-08-30** (`d23eedf`): `rate_ledger_account`, migration 0017,
+  keyed `(source, day)` with no `user_id`, with `RATE_CAP_TM_ACCOUNT_DAILY` /
+  `RATE_CAP_SONGKICK_ACCOUNT_DAILY` defaulting to 5000. Exhaustion surfaces as
+  a dated `retry_after` instead of upstream 403s that look exactly like artists
+  with no shows. Hardened 2026-09-01 (P2-5): the account write used to fail
+  *open*, so a Postgres blip during the nightly fanout granted an unlimited
+  block — on the one cap the upstream actually enforces. It now grants
+  `min(granted, 50)` and logs at ERROR.
+
+  **The decision it was standing in for is still open**, and it is a product
+  one: how many people to admit per day. A visible ceiling is not a bigger
+  ceiling — a public listing against 5000 calls/day is roughly 25 cold scans in
+  the worst case, and considerably more once `concert_cache` is warm in a city.
+  See `docs/production-plan.md` Phase 4, "Decide what launch means".
 
 ### What is deliberately not built
 
@@ -424,19 +433,24 @@ Start the application now; it is the longest pole in this plan.
 ### 3.3 Upstream quota, against an open download button
 
 Ticketmaster's account-wide budget is 5000 calls/day. `internal/config`
-defaults `RATE_CAP_TM_PER_USER_DAILY` to 250 (≈20 concurrently active users);
-`.env.example` ships 500, with a comment acknowledging that halves it to ≈10.
+defaults `RATE_CAP_TM_PER_USER_DAILY` to 500 (≈10 concurrently active users),
+matching `.env.example`. *Amended 2026-09-02: the default was 250 (≈20) when
+this was written, which the two files disagreed about; 500 is what a cold scan
+costs and both now say so.*
 Either way, the rate ledger enforces **per-user limits only** — it does not
 model the account total, so exceeding it degrades feeds silently rather than
 erroring.
 
 The web app's exposure is bounded by the Spotify allowlist. An App Store
-listing is not bounded by anything. Before the app is public, the ledger
-needs an account-total ceiling, and the app needs a designed response to
-hitting it (which is different from the per-user `retry_after` it already
-gets). Note also that `README.md` still cites 250/≈20 users while
-`.env.example` ships 500/≈10 — worth reconciling so the number people plan
-against is one number.
+listing is not bounded by anything.
+
+*Amended 2026-09-01.* Both halves of that are now addressed. The ledger has an
+account-total ceiling (`rate_ledger_account`, migration 0017), and hitting it
+reuses the per-user `retry_after` path — which turned out to be the right
+answer rather than a shortcut, because the remedy is identical: wait for the
+UTC day to roll over. `README.md` now quotes both figures and says which is
+which (500 is what `.env.example` ships, 250 is the code default) instead of
+picking one and disagreeing with the other file.
 
 ---
 

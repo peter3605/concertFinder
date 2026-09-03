@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/peterho/concertfinder/internal/concerts"
@@ -24,7 +25,13 @@ const (
 	songkickMaxRetries    = 3
 	songkickMaxRetryAfter = 30 * time.Second
 	songkickBaseBackoff   = 200 * time.Millisecond
-	songkickUserAgent     = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
+
+	// songkickUserAgent is the last-resort default for a client built with an
+	// empty string, same arrangement as fallback.UserAgent and
+	// NewMusicBrainzClient. The point of the header is that Songkick can reach
+	// us before they rate-limit us, which a URL for a repository that does not
+	// exist cannot do.
+	songkickUserAgent = "ConcertFinder/1.0 (+https://concertfinder.app)"
 )
 
 // SongkickCallsPerLookup is how many upstream requests one
@@ -38,12 +45,33 @@ const SongkickCallsPerLookup = 2
 type SongkickClient struct {
 	HTTP   *http.Client
 	APIKey string
+
+	// UserAgent identifies the deployment. Empty falls back to the package
+	// default; main.go passes one built from SITE_BASE_URL + CONTACT_EMAIL,
+	// the same string the MusicBrainz, Nominatim and page-fetch clients get.
+	UserAgent string
 }
 
 // NewSongkickClient panics on a nil httpClient — a hung Songkick call would
 // otherwise burn a scan worker's whole budget.
-func NewSongkickClient(apiKey string) *SongkickClient {
-	return &SongkickClient{HTTP: &http.Client{Timeout: 10 * time.Second}, APIKey: apiKey}
+func NewSongkickClient(apiKey, userAgent string) *SongkickClient {
+	if userAgent == "" {
+		userAgent = songkickUserAgent
+	}
+	return &SongkickClient{
+		HTTP:      &http.Client{Timeout: 10 * time.Second},
+		APIKey:    apiKey,
+		UserAgent: userAgent,
+	}
+}
+
+// ua returns the header value, defaulting for a hand-built client (tests
+// construct SongkickClient directly) that left the field empty.
+func (c *SongkickClient) ua() string {
+	if c.UserAgent == "" {
+		return songkickUserAgent
+	}
+	return c.UserAgent
 }
 
 // Enabled reports whether this client can actually reach Songkick. Callers
@@ -175,9 +203,40 @@ func (c *SongkickClient) resolveArtistID(ctx context.Context, name string) (int,
 	return 0, nil
 }
 
+// songkickRedactPath reduces a request URL to its path. The Songkick API key
+// travels in the query string (?apikey=), so anything that echoes a whole URL
+// leaks the credential.
+func songkickRedactPath(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.Path
+	}
+	// Unparseable, so cut conservatively: everything from the first '?' is
+	// query, and a URL with no '?' has no query to leak.
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		return raw[:i]
+	}
+	return raw
+}
+
+// redactURLError strips the query string out of a *url.Error. http.Client.Do
+// returns one on every transport failure and its Error() string is the full
+// request URL — including ?apikey= — which fallback.go logs verbatim. Errors
+// that are not *url.Error pass through untouched.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	redacted := *ue
+	redacted.URL = songkickRedactPath(ue.URL)
+	return &redacted
+}
+
 // get is retry-aware: honors Retry-After on 429, exponential backoff for
-// 5xx / network errors.
+// 5xx / network errors. Every error it returns names the path only — see
+// redactURLError.
 func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
+	path := songkickRedactPath(u)
 	var lastErr error
 	for attempt := 0; attempt <= songkickMaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -185,24 +244,24 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("songkick %s: %w", path, redactURLError(err))
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", songkickUserAgent)
+		req.Header.Set("User-Agent", c.ua())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = err
+			lastErr = redactURLError(err)
 			if !songkickBackoff(ctx, attempt) {
-				return nil, lastErr
+				return nil, fmt.Errorf("songkick %s: %w", path, lastErr)
 			}
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		if readErr != nil {
-			lastErr = readErr
+			lastErr = redactURLError(readErr)
 			if !songkickBackoff(ctx, attempt) {
-				return nil, lastErr
+				return nil, fmt.Errorf("songkick %s: %w", path, lastErr)
 			}
 			continue
 		}
@@ -210,7 +269,7 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 		case resp.StatusCode/100 == 2:
 			return body, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
-			lastErr = fmt.Errorf("songkick 429")
+			lastErr = errors.New("429")
 			d := time.Duration(0)
 			if raw := resp.Header.Get("Retry-After"); raw != "" {
 				if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
@@ -235,23 +294,24 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 				continue
 			}
 			if !songkickBackoff(ctx, attempt) {
-				return nil, fmt.Errorf("songkick 429: retries exhausted")
+				return nil, fmt.Errorf("songkick %s: 429: retries exhausted", path)
 			}
 			continue
 		case resp.StatusCode/100 == 5:
-			lastErr = fmt.Errorf("songkick %d", resp.StatusCode)
+			lastErr = fmt.Errorf("%d", resp.StatusCode)
 			if !songkickBackoff(ctx, attempt) {
-				return nil, lastErr
+				return nil, fmt.Errorf("songkick %s: %w", path, lastErr)
 			}
 			continue
 		default:
-			return nil, fmt.Errorf("songkick %d: %s", resp.StatusCode, u)
+			// The URL used to be interpolated here verbatim, api key and all.
+			return nil, fmt.Errorf("songkick %s: %d", path, resp.StatusCode)
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("songkick: retries exhausted")
+		return nil, fmt.Errorf("songkick %s: retries exhausted", path)
 	}
-	return nil, lastErr
+	return nil, fmt.Errorf("songkick %s: %w", path, lastErr)
 }
 
 func songkickBackoff(ctx context.Context, attempt int) bool {

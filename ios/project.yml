@@ -50,6 +50,16 @@ targets:
         MARKETING_VERSION: "1.0.0"
         TARGETED_DEVICE_FAMILY: "1,2" # iPhone and iPad — reviewers do open the iPad build
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Without this, `Color.accentColor` is system blue no matter what is
+        # in the asset catalogue — the setting is what tells the compiler
+        # which colour set is the global accent. Every bookmark and bell in
+        # the app renders through it.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # Assigned by App Store Connect on first submission, so empty until
+        # there is a listing. `UpdateRequiredView` hides its App Store button
+        # rather than opening the store to nothing; filling this in is the
+        # only change needed to bring the button back.
+        CF_APP_STORE_APP_ID: ""
       configs:
         # The API origin is a build setting, not a constant, so a debug build
         # points at the local server and a release build at the deployment

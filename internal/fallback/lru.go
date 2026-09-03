@@ -29,6 +29,15 @@ func newLRU(max int) *lruCache {
 	return &lruCache{max: max, order: list.New(), items: map[string]*list.Element{}}
 }
 
+// Len returns how many entries are currently held. Exists so a test can
+// assert that the bound actually binds — an LRU whose cap is never reached is
+// indistinguishable from the unbounded map it replaced.
+func (c *lruCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.items)
+}
+
 // Get returns (value, true) on hit, promotes the entry to most-recent.
 func (c *lruCache) Get(key string) (any, bool) {
 	c.mu.Lock()

@@ -73,13 +73,20 @@ func main() {
 	}
 
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	pool, err := db.Connect(dbCtx, cfg.DatabaseURL)
+	pool, err := db.Connect(dbCtx, cfg.DatabaseURL, cfg.DBMaxConns)
 	dbCancel()
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Its own context, cancelled before the pool closes (defers run LIFO), so
+	// the reporter never outlives what it reports on. dbCtx is no use here —
+	// it is a 10s connect deadline and is already cancelled.
+	statsCtx, stopStats := context.WithCancel(context.Background())
+	defer stopStats()
+	db.StartPoolStatsLogger(statsCtx, pool)
 
 	// App + river migrations run at startup. Both are idempotent.
 	migCtx, migCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -207,13 +214,19 @@ func main() {
 				)
 			}
 		}
-		// A cap below the artist count means a user can never cover their own
-		// profile: every scan runs out of quota partway and reports itself
-		// incomplete. Worth saying out loud rather than leaving to be
-		// rediscovered from a thin concert list.
-		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < spotify.MaxScoredArtists {
-			logger.Warn("TM per-user daily cap is below the per-scan artist count; scans will be capped short",
-				"cap", cfg.RateCapTMPerUserDaily, "artists", spotify.MaxScoredArtists)
+		// A cap below the cost of a COLD scan means a new user can never cover
+		// their own profile: the scan runs out of quota partway and reports
+		// itself incomplete. Measured against artists x CallsPerArtistColdScan
+		// rather than against the artist count, because the artist count is
+		// the warm cost and checking it is what let a 250 cap look fine while
+		// covering 125 of 200 artists. Worth saying out loud rather than
+		// leaving to be rediscovered from a thin concert list.
+		coldScanCost := spotify.MaxScoredArtists * ticketmaster.CallsPerArtistColdScan
+		if cfg.RateCapTMPerUserDaily > 0 && cfg.RateCapTMPerUserDaily < coldScanCost {
+			logger.Warn("TM per-user daily cap is below the cost of a cold scan; a new user's first scan will be capped short",
+				"cap", cfg.RateCapTMPerUserDaily,
+				"cold_scan_cost", coldScanCost,
+				"artists", spotify.MaxScoredArtists)
 		}
 
 		var fallbackChain concerts.Fallbacker
@@ -225,11 +238,16 @@ func main() {
 			if cfg.BraveSearchAPIKey != "" {
 				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
 			}
+			// One User-Agent for every outbound client, not just the two that
+			// happened to take one. The artist-site fetcher and the Songkick
+			// client each carried their own hardcoded string naming a GitHub
+			// repository that does not exist — which is worse than none, since
+			// it looks like an operator can be contacted and nobody can be.
 			fallbackChain = &fallback.Chain{
 				Pool:     pool,
-				Fetcher:  fallback.NewFetcher(pool),
+				Fetcher:  fallback.NewFetcher(pool, userAgent),
 				Resolver: resolver,
-				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey),
+				Songkick: fallback.NewSongkickClient(cfg.SongkickAPIKey, userAgent),
 				VenueGeo: fallback.NewVenueGeocoder(geocoder).WithPool(pool),
 			}
 			budget := time.Duration(cfg.Phase2FallbackBudgetSeconds) * time.Second
@@ -433,6 +451,9 @@ func main() {
 			// is plenty at single-instance scale — typically one live entry
 			// per active user per location.
 			SnapshotCache: webhttp.NewSnapshotCache(200),
+			// Read-only use of the profile: the handler asks for reasons, not
+			// for a computation. See ConcertsHandler.Affinity.
+			Affinity: affinitySvc,
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
 		devicesH = &webhttp.DevicesHandler{Pool: pool}
@@ -447,10 +468,27 @@ func main() {
 		// snapshot job. Uses a detached background context so a browser
 		// disconnect mid-callback doesn't cancel the enqueue.
 		authDeps.OnLoginSuccess = func(_ context.Context, userID uuid.UUID) {
-			loc := fallbackLoc
-			if ul, hit, err := db.GetUserLocation(context.Background(), pool, userID); err == nil && hit {
-				loc = concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
+			ul, hit, err := db.GetUserLocation(context.Background(), pool, userID)
+			if err != nil {
+				logger.Warn("prewarm location lookup failed", "err", err, "user", userID)
+				return
 			}
+			if !hit {
+				// No location of the user's own yet, so the only thing to
+				// scan is this deployment's USER_LATITUDE/USER_LONGITUDE —
+				// a city the user has never mentioned. That scan takes up to
+				// ScanBudget and reserves a chunk of a daily per-user cap
+				// sized at roughly one scan, and the moment the user names a
+				// real place the result is filed under a different
+				// location_key and never read. The user waited through it to
+				// be handed nothing.
+				//
+				// Both clients ask for a location before the first feed, and
+				// the SWR read enqueues the scan when the answer arrives.
+				logger.Info("prewarm skipped: user has no location yet", "user", userID)
+				return
+			}
+			loc := concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
 			args := jobs.ScanConcertsArgs{
 				UserID:      userID,
 				Latitude:    loc.Latitude,
@@ -476,7 +514,28 @@ func main() {
 	// types (images, video) automatically.
 	r.Use(middleware.Compress(5))
 
+	// Rate limiting lives here rather than in Caddy on purpose. The stock
+	// caddy:2-alpine image ships no rate_limit directive — it is a
+	// third-party module that has to be compiled in with xcaddy — and the
+	// image is pinned by digest, so adding one means owning a custom build and
+	// its update path. Middleware costs a map lookup and stays in the same
+	// place as the handlers it protects.
+	//
+	// Three tiers, outermost first:
+	//   - the whole /api subtree, generous, so no single address can flood any
+	//     endpoint including the ones added later;
+	//   - /api/auth, /api/healthz and /api/unsubscribe, each tighter for its
+	//     own reason (below);
+	//   - /me/artists/search, keyed by user rather than address, because the
+	//     resource it spends is the app's single Spotify client ID.
+	//
+	// 20 req/s with burst 60 per address. A signed-in browser polls
+	// /me/concerts every 10s during a refresh and the first paint of the feed
+	// issues a handful of calls, so this is roughly two orders of magnitude
+	// above real use — the aim is a ceiling, not a quota.
+	apiLimiter := auth.NewIPRateLimit(20, 60)
 	r.Route("/api", func(api chi.Router) {
+		api.Use(apiLimiter.Middleware)
 		// Unknown /api/* paths return a JSON 404 rather than falling through
 		// to the SPA HTML handler — matters for API clients that would
 		// otherwise see HTML and misdiagnose.
@@ -494,7 +553,15 @@ func main() {
 		// on this server means reaching Postgres. Reporting ok without
 		// checking it is backwards: a restart loop or an alert would see a
 		// green light while every real endpoint 500s.
-		api.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		//
+		// Which is also why it needs its own, tighter limit: each call is a
+		// round trip to a Neon compute pinned at 0.25 CU, and the free plan is
+		// a compute-hour budget rather than a request budget. 1/s with burst
+		// 10 is far above the two callers that legitimately exist — the
+		// container healthcheck and scripts/verify-deploy.sh — while leaving
+		// them room to retry.
+		healthLimiter := auth.NewIPRateLimit(1, 10)
+		api.With(healthLimiter.Middleware).Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
 			w.Header().Set("Content-Type", "application/json")
@@ -506,6 +573,22 @@ func main() {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		})
+		// "Popular shows near you" for a visitor with no session: the login
+		// page, App Review's first screen, and the backdrop behind the iOS
+		// first-run flow. Served entirely from concert_cache — it cannot
+		// reach an upstream API and cannot touch the rate ledger, which is
+		// the property that makes an unauthenticated concert endpoint safe
+		// to have at all.
+		//
+		// Its own bucket, tighter than /api's, because it is unauthenticated
+		// and its refresh decodes thousands of cached payloads. 2/s with
+		// burst 20 is far above a page that calls it once on load.
+		discoverLimiter := auth.NewIPRateLimit(2, 20)
+		// One instance for the process. The handler holds the decoded
+		// candidate set (DiscoverRefreshInterval), so a per-request one would
+		// be an empty cache every time, i.e. no cache at all.
+		discoverH := &webhttp.DiscoverHandler{Pool: pool}
+		api.With(discoverLimiter.Middleware).Get("/discover", discoverH.Get)
 		api.Get("/site-info", (&webhttp.SiteInfoHandler{
 			ContactEmail:  cfg.ContactEmail,
 			EffectiveDate: "2026-07-29",
@@ -530,8 +613,24 @@ func main() {
 		// POST, so link-scanning mail gateways can't unsubscribe people by
 		// prefetching. POST is also what RFC 8058 one-click sends, which is
 		// what the List-Unsubscribe-Post header on our mail advertises.
-		api.Get("/unsubscribe", unsubscribeH.Get)
-		api.Post("/unsubscribe", unsubscribeH.Post)
+		//
+		// Its own bucket because it is the other unauthenticated mutation on
+		// the server and its guard is an HMAC verification, which is cheap but
+		// not free, followed by a write. 2/s with burst 20 comfortably covers
+		// a mail gateway prefetching links and a person clicking twice.
+		unsubLimiter := auth.NewIPRateLimit(2, 20)
+		api.With(unsubLimiter.Middleware).Get("/unsubscribe", unsubscribeH.Get)
+		api.With(unsubLimiter.Middleware).Post("/unsubscribe", unsubscribeH.Post)
+		// One instance for the process, mounted per route below. A limiter
+		// constructed inside a handler is a fresh empty bucket on every
+		// request, i.e. no limiter at all.
+		//
+		// 1 req/s with burst 10 per user. The picker is debounced client-side,
+		// so this is many times a real typist; what it stops is one account
+		// spending the whole app's Spotify /v1/search allowance, which is
+		// enforced against our client ID and would 429 every other user's
+		// searches with nothing in our logs to connect the two.
+		artistSearchLimiter := auth.NewUserRateLimit(1, 10)
 		api.Route("/me", func(r chi.Router) {
 			r.Use(auth.RequireUser(pool))
 			r.Use(auth.CSRF(signingKey))
@@ -546,7 +645,8 @@ func main() {
 			r.Get("/subscribed-artists", subscribedH.List)
 			r.Post("/subscribed-artists/{artistID}", subscribedH.Post)
 			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
-			r.Get("/artists/search", subscribedH.SearchArtists)
+			// Mounted inside RequireUser so the limiter has a user to key on.
+			r.With(artistSearchLimiter.Middleware).Get("/artists/search", subscribedH.SearchArtists)
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)

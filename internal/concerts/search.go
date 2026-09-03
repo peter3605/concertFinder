@@ -480,15 +480,18 @@ func needsTMResolution(r db.ArtistResolution, hit bool) bool {
 	return time.Since(r.ResolvedAt) > NegativeResolutionTTL
 }
 
-func cacheKey(source, artistID string, loc Location) string {
-	return source + ":" + artistID + ":" +
+// cacheKey composes a concert_cache key. prefix carries its own trailing
+// separator (CachePrefixTicketmaster) because the discover view reads these
+// rows back by that exact prefix — see FromCachedTicketmaster.
+func cacheKey(prefix, artistID string, loc Location) string {
+	return prefix + artistID + ":" +
 		strconv.FormatFloat(loc.Latitude, 'f', 4, 64) + "," +
 		strconv.FormatFloat(loc.Longitude, 'f', 4, 64) + "," +
 		strconv.Itoa(loc.RadiusMiles)
 }
 
 func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID string, loc Location) ([]ticketmaster.Event, error) {
-	key := cacheKey("tm", artistID, loc)
+	key := cacheKey(CachePrefixTicketmaster, artistID, loc)
 	if blob, ok, err := db.GetCachedConcerts(ctx, d.Pool, key, d.CacheTTL); err != nil {
 		slog.Warn("cache read failed", "key", key, "err", err)
 	} else if ok {

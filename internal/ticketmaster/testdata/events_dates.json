@@ -1,0 +1,182 @@
+{
+  "_embedded": {
+    "events": [
+      {
+        "name": "Test Headliner",
+        "type": "event",
+        "id": "vvG1zZ9pacific",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9pacific",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-09-15",
+            "localTime": "20:00:00",
+            "dateTime": "2026-09-16T03:00:00Z",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/Los_Angeles",
+          "status": { "code": "onsale" },
+          "spanMultipleDays": false
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Theatre",
+              "type": "venue",
+              "id": "KovZpZAtestLA",
+              "locale": "en-us",
+              "timezone": "America/Los_Angeles",
+              "city": { "name": "Los Angeles" },
+              "state": { "name": "California", "stateCode": "CA" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-118.3219", "latitude": "34.1019" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Matinee",
+        "type": "event",
+        "id": "vvG1zZ9matinee",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9matinee",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-09-15",
+            "localTime": "14:00:00",
+            "dateTime": "2026-09-15T18:00:00Z",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" },
+          "spanMultipleDays": false
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Hall",
+              "type": "venue",
+              "id": "KovZpZAtestNY",
+              "locale": "en-us",
+              "timezone": "America/New_York",
+              "city": { "name": "New York" },
+              "state": { "name": "New York", "stateCode": "NY" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-73.9911", "latitude": "40.7566" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Time TBA",
+        "type": "event",
+        "id": "vvG1zZ9timetba",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9timetba",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-09-15",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": true,
+            "noSpecificTime": true
+          },
+          "timezone": "America/Los_Angeles",
+          "status": { "code": "onsale" },
+          "spanMultipleDays": false
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Theatre",
+              "type": "venue",
+              "id": "KovZpZAtestLA",
+              "locale": "en-us",
+              "city": { "name": "Los Angeles" },
+              "state": { "name": "California", "stateCode": "CA" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-118.3219", "latitude": "34.1019" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Malformed DateTime",
+        "type": "event",
+        "id": "vvG1zZ9malformed",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9malformed",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-10-02",
+            "localTime": "19:30:00",
+            "dateTime": "2026-10-02 19:30:00",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/Chicago",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Ballroom",
+              "type": "venue",
+              "id": "KovZpZAtestCH",
+              "locale": "en-us",
+              "city": { "name": "Chicago" },
+              "state": { "name": "Illinois", "stateCode": "IL" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-87.6673", "latitude": "41.9294" }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Date TBD",
+        "type": "event",
+        "id": "vvG1zZ9datetbd",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9datetbd",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "dateTBD": true,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/Denver",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Amphitheatre",
+              "type": "venue",
+              "id": "KovZpZAtestDN",
+              "locale": "en-us",
+              "city": { "name": "Denver" },
+              "state": { "name": "Colorado", "stateCode": "CO" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-104.9903", "latitude": "39.7392" }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "page": { "size": 100, "totalElements": 5, "totalPages": 1, "number": 0 }
+}

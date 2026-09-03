@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Nightly logical backup of the Neon database to S3. Run on the instance by the
-# systemd timer installed in docs/aws-deploy.md §7.
+# concertfinder-backup.timer that infra/ec2.tf's user_data installs (see
+# docs/aws-deploy.md §7 -- the manual install there is now a fallback for
+# instances that predate it, since user_data does not re-run).
 #
 # Why this exists: moving Postgres from RDS to Neon gave up
 # `backup_retention_period = 7` and the final snapshot. Neon's free plan keeps a
@@ -89,3 +91,26 @@ aws s3 cp "$TMP" "s3://${BACKUP_S3_BUCKET}/${KEY}" --only-show-errors ||
 
 printf 'backup ok: s3://%s/%s (%s bytes)\n' \
     "$BACKUP_S3_BUCKET" "$KEY" "$(wc -c < "$TMP" | tr -d ' ')"
+
+# Dead-man's switch. Everything above fails loudly into the journal, which
+# nobody reads -- and the failure mode that matters most is the one that
+# produces no output at all: a timer that was never installed, a box that was
+# rebuilt, a unit that stopped firing. Only a signal that must ARRIVE catches
+# those, so ping an external monitor (healthchecks.io, Better Stack, an SNS
+# HTTP subscription) after a verified upload.
+#
+# Optional: unset, this is a no-op and the backup behaves exactly as before.
+# BACKUP_HEARTBEAT_URL comes out of the same .env sourced above.
+#
+# The ping failing must never fail the backup -- the dump is in S3 by this
+# point, and exiting non-zero here would report a successful backup as a
+# failure, which is the wrong direction to be wrong in -- so the curl is
+# tested rather than left to `set -e`, and the outcome is logged either way.
+if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
+    if curl -fsS --max-time 10 -o /dev/null "$BACKUP_HEARTBEAT_URL"; then
+        echo "heartbeat ok"
+    else
+        # The URL is not echoed: heartbeat URLs are bearer credentials.
+        echo "heartbeat ping failed (backup itself succeeded)" >&2
+    fi
+fi

@@ -81,8 +81,9 @@ CloudWatch.
 ### What this gives up
 
 - **Backup retention.** RDS had `backup_retention_period = 7` plus a final
-  snapshot; Neon's free plan restore history is much shorter. §7 installs a
-  nightly `pg_dump` to S3 to cover it.
+  snapshot; Neon's free plan restore history is much shorter. A nightly
+  `pg_dump` to S3 covers it — the timer is installed by `infra/ec2.tf`'s
+  user_data and §7 has the details.
 - **In-VPC isolation.** Database traffic now crosses the public internet with
   TLS instead of staying inside the security group. `?sslmode=require` on the
   connection string is what replaces the `rds.force_ssl=1` parameter group.
@@ -435,8 +436,34 @@ every previous night's encrypted refresh tokens or delete the history on its way
 out.
 
 Put `BACKUP_S3_BUCKET` in `/opt/concertfinder/.env` (from
-`terraform output backup_bucket`), then install the timer on the instance over
-SSM:
+`terraform output backup_bucket`). That is the only step for a freshly built
+instance: **the `concertfinder-backup.service` and `.timer` units are installed
+and enabled by `infra/ec2.tf`'s user_data**, alongside the swapfile and the
+docker plugins. They used to exist only as the copy-paste below, which meant a
+rebuilt box came up with no backups and nothing anywhere said so — the kind of
+failure you find out about on the night you need a dump.
+
+Two caveats that follow from where they live now:
+
+- **user_data does not re-run**, and `lifecycle { ignore_changes = [user_data] }`
+  keeps an edit from replacing the instance. An instance that predates this
+  change therefore still has no units; install them once by hand with the block
+  below. `systemctl list-timers concertfinder-backup` says which case you are in.
+- The units reference `/opt/concertfinder/scripts/backup-db.sh`, which does not
+  exist until the clone in §3. That is fine — a systemd timer does not resolve
+  its service's `ExecStart` until it fires, and the clone happens long before
+  the first 03:00.
+
+Optionally set `BACKUP_HEARTBEAT_URL` in the same `.env`. The script pings it
+after a verified upload, and that ping is the only thing that catches the
+failures which produce *no* output: a timer that was never installed, a box that
+was rebuilt, a unit that quietly stopped firing. Everything else in the script
+fails loudly into a journal nobody reads. A failed ping is logged and does not
+fail the backup — the dump is already in S3 by then. Point it at
+healthchecks.io, Better Stack, or an SNS HTTPS subscription, and treat the URL
+as a credential.
+
+The manual install, for an instance that predates user_data:
 
 ```
 sudo tee /etc/systemd/system/concertfinder-backup.service >/dev/null <<'EOF'
@@ -488,6 +515,11 @@ Neon project reports. `pg_dump` aborts outright against a server newer than
 itself, so when Neon bumps the project's major version, bump this too. It is
 pinned rather than `:latest` so that mismatch fails loudly on an ordinary night
 rather than on the one where you need the dump.
+
+**A backup nobody has restored is a hypothesis.** `scripts/restore-drill.sh`
+turns it into a measurement — `--check` alone says whether a restore point even
+exists, which is a live question here rather than a rhetorical one. See
+"Restore drills" below.
 
 To restore, from your laptop with admin credentials:
 
@@ -568,19 +600,38 @@ output when it finishes.
 
 ## Rolling back
 
-The workflow resets the instance to `origin/main`, builds, brings containers
-up with `--wait`, and then runs `scripts/verify-deploy.sh`. The normal rollback
-is therefore just:
+The workflow resets the instance to the exact commit that triggered it
+(`github.sha`, not `origin/main` — two merges landing close together otherwise
+mean the older run builds the newer run's tree, so what ships is a commit CI
+never tested), builds, tags the image with that SHA, brings containers up with
+`--wait`, and then runs `scripts/verify-deploy.sh`. The normal rollback is
+therefore just:
 
 ```
 git revert <bad-commit> && git push
 ```
 
-Or manually via SSM. **Keep `build` and `up` as separate commands** — `up -d
---build` tears the running containers down as part of the same command, so a
-build that fails or runs the 2 GB box out of memory takes the site with it.
-That is the last thing you want during a rollback, which is by definition a
-moment when the site is already unhappy:
+**The fast rollback is a retag, not a rebuild.** Every deploy leaves its image
+behind as `concertfinder-api:<sha>` and `scripts/prune-images.sh` keeps the last
+three, so going back does not mean running `npm ci` and a Vite build on a 2 GiB
+box at the moment the site is already unhappy:
+
+```
+sudo -u concertfinder bash -c 'cd /opt/concertfinder \
+  && docker image ls concertfinder-api \
+  && docker tag concertfinder-api:<good-sha> concertfinder-api:latest \
+  && docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 \
+  && ./scripts/verify-deploy.sh'
+```
+
+Note this rolls back the *image* only. The checkout under `/opt/concertfinder`
+still points at the bad commit, so anything read from the working tree rather
+than baked into the image — `Caddyfile`, `docker-compose.prod.yml`, the scripts
+— is still the new version. If the bad change is in one of those, or if the SHA
+you want is older than the three kept images, rebuild instead. **Keep `build`
+and `up` as separate commands** — `up -d --build` tears the running containers
+down as part of the same command, so a build that fails or runs the box out of
+memory takes the site with it:
 
 ```
 sudo -u concertfinder bash -c 'cd /opt/concertfinder \
@@ -596,6 +647,157 @@ dumps both on its way out. Config problems appear there in full:
 `config.Validate` reports every bad variable at once rather than one per
 restart.
 
+## Rotating a credential
+
+Every secret lives in Parameter Store under `/concertfinder/` as a
+SecureString. `scripts/set-secrets.sh` writes them from a hidden prompt through
+a mode-600 temp file, so a value never reaches shell history or `ps`, and
+Terraform's `ignore_changes = [value]` means no apply ever reads one back or
+resets it to `REPLACE_ME`.
+
+Rotation is therefore two steps, and **the second one is not optional**: the
+instance reads Parameter Store once per deploy, in `render-env.sh`, so a
+rotated parameter does nothing at all until the next deploy re-renders
+`/opt/concertfinder/.env`.
+
+```
+AWS_PROFILE=<profile> ./scripts/set-secrets.sh        # prompts; Enter skips a parameter
+gh workflow run deploy.yml                            # re-renders .env and restarts
+```
+
+Order matters for a rotation that must not drop traffic: at any moment the old
+value is live on the instance and the new one is in SSM, so create the new
+credential upstream *first*, leave the old one valid, rotate the parameter,
+deploy, then revoke the old one upstream once the site is verified.
+
+Two of these do not behave like the others:
+
+- **`ENCRYPTION_KEY` is not rotatable.** It is the AES-256-GCM key for every
+  stored Spotify refresh token, and nothing here re-encrypts them, so changing
+  it does not invalidate a session — it makes `AccessTokenFor` fail for every
+  existing user, permanently, until each one reconnects Spotify. It also
+  derives `SIGNING_KEY` when that is unset. If it is ever genuinely
+  compromised, the honest recovery is to rotate it *and* accept that every user
+  reauthorizes; set `SIGNING_KEY` explicitly beforehand if you want signing
+  rotated without touching the ciphertexts.
+- **`SMTP_USERNAME` / `SMTP_PASSWORD` are Terraform's, not yours.** They come
+  from `aws_iam_access_key` in `ses.tf` and are written to SSM by the apply.
+  Rotate by tainting that key and applying, not with `set-secrets.sh`.
+
+## Escrowing `ENCRYPTION_KEY`
+
+Because it cannot be rotated, it also cannot be lost. Every nightly dump in S3
+stores `users.spotify_refresh_token` as ciphertext under that one key: with the
+parameter gone, the backups restore to a table of unreadable bytes and every
+user reconnects — the exact loss the backups exist to prevent.
+
+Parameter Store is not a second copy of itself. Put the value somewhere with a
+different failure mode from the AWS account (a password manager, a sealed
+envelope), labelled with what it decrypts:
+
+```
+aws ssm get-parameter --name /concertfinder/ENCRYPTION_KEY \
+  --with-decryption --query Parameter.Value --output text
+```
+
+Do that from a machine you would be comfortable typing it on; the value is now
+in that shell's scrollback.
+
+## Restore drills
+
+The backups have a verified *write* path — `backup-db.sh` runs `pg_restore
+--list` over the archive before uploading, and pings a heartbeat after. Nothing
+verifies the *read* path, and an untested restore is a hypothesis.
+`scripts/restore-drill.sh` is that test, run from your laptop (the instance role
+has `PutObject` and nothing else, on purpose).
+
+The cheap half answers "is there a restore point at all", in seconds:
+
+```
+AWS_PROFILE=<profile> ./scripts/restore-drill.sh --check
+```
+
+It fails if the newest object under `pg/` is more than two days old, and prints
+the newest dump's size against the previous one — a dump that halves overnight
+is a database that lost something, and a freshness check alone waves that
+through.
+
+The real drill restores into a **scratch Neon branch** and times it:
+
+```
+neon branches create --name restore-drill        # or the Neon console
+AWS_PROFILE=<profile> ./scripts/restore-drill.sh 'postgres://…restore-drill…?sslmode=require'
+neon branches delete restore-drill
+```
+
+It refuses a target that already has rows in `users`, which is what makes a
+mispasted production URL a refusal rather than an outage. It asserts the four
+tables that do not rebuild themselves (`users`, `user_saved_concerts`,
+`user_subscribed_artists`, `user_locations`) came back with rows — a restore
+that produces an empty schema exits 0 and otherwise looks like a pass. The
+elapsed restore time it prints is the data-layer RTO; record it here when you
+first measure it, and remember it excludes noticing, deciding, branching, and
+pointing `DATABASE_URL` at the result.
+
+The whole-database restore into production, when it is not a drill, is still
+the manual path in §7 above.
+
+## Break-glass access
+
+There is no SSH ingress. Port 22 is closed in `infra/security_groups.tf` and
+the access path is SSM Session Manager, which is the same channel the deploy
+uses:
+
+```
+aws ssm start-session --target <instance-id>
+```
+
+The instance also carries a key pair (`aws_key_pair.breakglass`, private key at
+`infra/.secrets/concertfinder-breakglass.pem`) that has never been usable,
+because nothing has ever opened the port. That is the right steady state and a
+bad thing to discover mid-incident, so the lever is explicit:
+
+```
+# in infra/terraform.tfvars
+ssh_ingress_cidrs = ["203.0.113.4/32"]     # your address, /32, never 0.0.0.0/0
+```
+
+`terraform apply`, then `ssh -i infra/.secrets/concertfinder-breakglass.pem
+ec2-user@<public-ip>`. Set it back to `[]` and apply again when you are done —
+an always-open port 22 beside a box whose only other ingress is Caddy is the
+largest surface this account has, and the variable refuses `0.0.0.0/0`
+outright.
+
+This is for SSM being unavailable or the agent being wedged. For everything
+else, including a deploy that failed, `start-session` is faster and leaves an
+audit trail.
+
+## Terraform state
+
+State is **local** today: `infra/terraform.tfstate`, in a git checkout on one
+laptop, gitignored. It contains the SES SMTP password and the break-glass
+ED25519 private key in cleartext, and there is no lock, so two concurrent
+applies would silently clobber each other's view of reality.
+
+Moving it to S3 is prepared but not applied — the bucket does not exist until
+someone runs the bootstrap, and adding the backend block before that would
+break `terraform init` for everyone:
+
+```
+cd infra/bootstrap && terraform init && terraform apply   # creates the bucket
+cd .. && cp backend.tf.example backend.tf
+# fill in <account-id>: aws sts get-caller-identity --query Account --output text
+terraform init -migrate-state                             # answer yes
+rm terraform.tfstate terraform.tfstate.backup             # stale, and still full of secrets
+git add backend.tf && git commit
+```
+
+`infra/bootstrap/` keeps its own state local forever and that is fine: it
+manages one bucket and holds no secret. Locking is S3-native (`use_lockfile`),
+which needs Terraform ≥ 1.11 — there is no DynamoDB table to create, and none
+to pay for. Bump `required_version` in `main.tf` when you adopt it, or the lock
+is quietly absent for anyone running an older CLI.
+
 ## What's not in this setup
 
 Deliberately kept out to keep the year-1 bill at ~$16:
@@ -604,19 +806,34 @@ Deliberately kept out to keep the year-1 bill at ~$16:
   ALB would add $16/mo.
 - **No auto-scaling.** Single-instance; if it dies, restart it. Fine for
   personal-project scale.
-- **No CloudWatch dashboards, and no alerting on the alarms that do exist.**
-  `infra/cloudwatch.tf` defines two metric alarms (EC2 status check, estimated
-  billing), but neither is wired to an SNS topic — the state is visible in the
-  CloudWatch console and nowhere else. Nothing pages you. Application logs are
-  slog to Docker logs; `docker compose logs -f` over SSM when you need them.
+- **No CloudWatch dashboards, and no application-level alerting.**
+  `infra/cloudwatch.tf` defines three metric alarms — EC2 status check, EC2
+  *system* status check (whose action is `ec2:recover`, so it fixes rather than
+  reports), and estimated billing — and all three now publish to an SNS topic
+  with an email subscription on `var.alert_email`. Two things to know about
+  that: an email subscription stays **PendingConfirmation** until you click the
+  link AWS mails on the first apply, and Terraform reports the resource created
+  either way, so confirm it once in the SNS console rather than assuming a green
+  apply means alerts arrive. And these alarms watch the *instance*, not the app:
+  a crash-looping api container behind a healthy EC2 host fires nothing.
+  Application logs are slog to Docker logs (capped at 3 × 10 MB per container);
+  `docker compose logs -f` over SSM when you need them.
 - **Nothing on the AWS side can see the database.** Neon publishes no
   CloudWatch metrics, so storage and the compute-hour budget — the line that
   actually binds on the free plan — are visible only in the Neon console. Set
   usage alerts there; there is no way to fold them in here.
-- **Nothing checks that the nightly backup ran.** The timer logs to
-  `journalctl` on the box and that is all. A failed dump is silent until you
-  need it. `systemctl list-timers concertfinder-backup` and an occasional
-  `aws s3 ls` are the current answer.
+- **Nothing checks that the nightly backup ran, unless you opt in.** The timer
+  logs to `journalctl` on the box and that is all, so a failed dump — or, worse,
+  a timer that never fired — is silent until you need it. Setting
+  `BACKUP_HEARTBEAT_URL` in the `.env` turns that around: the script pings it
+  after a verified upload, and an external monitor alerts on the *absence* of
+  the ping, which is the only signal that catches a run that never happened.
+  Without it, `systemctl list-timers concertfinder-backup` and an occasional
+  `aws s3 ls` are the answer.
+- **The backup has never been restored.** Time one restore into a scratch Neon
+  branch; the elapsed time is the real RTO, and `ENCRYPTION_KEY` needs to be
+  escrowed somewhere that is not SSM — every dump of `users` is AES-GCM
+  ciphertext, so losing that one parameter makes all of them unrecoverable.
 - **No secrets manager.** The `.env` file on the box holds credentials. If
   the box is compromised, so are the creds. AWS Secrets Manager costs
   $0.40/mo per secret; migrate later if you care.

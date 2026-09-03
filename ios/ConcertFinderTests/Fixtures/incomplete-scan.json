@@ -24,7 +24,8 @@
               "hardcore punk"
             ]
           },
-          "dedup_key": "aabbccddeeff00112233445566778899"
+          "dedup_key": "aabbccddeeff00112233445566778899",
+          "reason": "You follow them"
         }
       ],
       "links": [

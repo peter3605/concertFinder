@@ -4,8 +4,20 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { mutatingFetch } from '@/lib/api';
+import { mutatingFetch, NETWORK_ERROR_MESSAGE, statusMessage } from '@/lib/api';
 import type { Location } from '@/lib/types';
+
+// The server rejects anything outside 1..500 with a 400 whose body is a
+// developer sentence. A number input that has been emptied reads back as '',
+// which Number() makes 0, and a partially-typed value can be NaN — which
+// JSON.stringify writes as `null`. Both were being sent.
+const MIN_RADIUS = 1;
+const MAX_RADIUS = 500;
+
+function clampRadius(v: number, fallback: number): number {
+  if (!Number.isFinite(v) || v < MIN_RADIUS) return fallback;
+  return Math.min(MAX_RADIUS, Math.round(v));
+}
 
 // Compact location card that shows the current radius/city and expands
 // inline for editing. Extracted from the old App.tsx and reskinned to
@@ -13,11 +25,21 @@ import type { Location } from '@/lib/types';
 export function LocationBar({
   location,
   onSaved,
+  openEditorToken = 0,
 }: {
   location: Location;
   onSaved: (loc: Location) => void;
+  // Bumped by the first-run prompt to open the editor and put the cursor in
+  // the city field. A counter rather than a boolean: the prompt can ask more
+  // than once — the user declines the browser dialog, then cancels out of the
+  // editor — and a boolean already true would not fire the second time.
+  openEditorToken?: number;
 }) {
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (openEditorToken > 0) setEditing(true);
+  }, [openEditorToken]);
   const [query, setQuery] = useState('');
   const [radius, setRadius] = useState(location.radius_miles);
   const [saving, setSaving] = useState(false);
@@ -28,24 +50,32 @@ export function LocationBar({
   async function save() {
     setSaving(true);
     setErr('');
+    const miles = clampRadius(radius, location.radius_miles);
+    setRadius(miles);
     try {
       const body = query
-        ? { query, radius_miles: radius }
-        : { latitude: location.latitude, longitude: location.longitude, radius_miles: radius };
+        ? { query, radius_miles: miles }
+        : { latitude: location.latitude, longitude: location.longitude, radius_miles: miles };
       const r = await mutatingFetch('/api/me/location', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!r.ok) {
-        setErr(await r.text());
+        setErr(
+          statusMessage(r.status, {
+            404: "We couldn't find that place. Try “City, State”.",
+            429: "You've used a lot of different locations today. Going back to one you already used still works.",
+            502: 'Looking up that city failed. Try again in a moment.',
+          }),
+        );
         return;
       }
       onSaved((await r.json()) as Location);
       setEditing(false);
       setQuery('');
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    } catch {
+      setErr(NETWORK_ERROR_MESSAGE);
     } finally {
       setSaving(false);
     }
@@ -68,7 +98,16 @@ export function LocationBar({
             </Button>
           </>
         ) : (
-          <div className="flex flex-1 flex-wrap items-end gap-3">
+          // A form, not a div of controls: typing a city and pressing Enter is
+          // the obvious way to use two text fields, and without a submit
+          // handler it did nothing at all.
+          <form
+            className="flex flex-1 flex-wrap items-end gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!saving) void save();
+            }}
+          >
             <div className="grid flex-1 gap-1.5">
               <Label htmlFor="loc-query">City, state</Label>
               <Input
@@ -85,27 +124,29 @@ export function LocationBar({
               <Input
                 id="loc-radius"
                 type="number"
-                min={1}
-                max={500}
+                min={MIN_RADIUS}
+                max={MAX_RADIUS}
                 className="w-24"
                 value={radius}
                 onChange={(e) => setRadius(Number(e.target.value))}
               />
             </div>
-            <Button onClick={save} disabled={saving}>
+            <Button type="submit" disabled={saving}>
               Save
             </Button>
             <Button
+              type="button"
               variant="ghost"
               onClick={() => {
                 setEditing(false);
+                setRadius(location.radius_miles);
                 setErr('');
               }}
             >
               Cancel
             </Button>
             {err && <span className="text-xs text-destructive">{err}</span>}
-          </div>
+          </form>
         )}
       </CardContent>
     </Card>

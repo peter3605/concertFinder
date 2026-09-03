@@ -1,0 +1,179 @@
+{
+  "_embedded": {
+    "events": [
+      {
+        "name": "Test Headliner with Test Support",
+        "type": "event",
+        "id": "vvG1zZ9lineup3",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9lineup3",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-11-04",
+            "localTime": "19:00:00",
+            "dateTime": "2026-11-05T00:00:00Z",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestDC",
+              "locale": "en-us",
+              "city": { "name": "Washington" },
+              "state": { "name": "District of Columbia", "stateCode": "DC" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-77.0234", "latitude": "38.9180" }
+            }
+          ],
+          "attractions": [
+            {
+              "name": "Test Headliner",
+              "type": "attraction",
+              "id": "K8vZ917headline",
+              "locale": "en-us",
+              "url": "https://www.ticketmaster.com/test-headliner-tickets/artist/1000001"
+            },
+            {
+              "name": "Test Support One",
+              "type": "attraction",
+              "id": "K8vZ917support1",
+              "locale": "en-us",
+              "url": "https://www.ticketmaster.com/test-support-one-tickets/artist/1000002"
+            },
+            {
+              "name": "Test Support Two",
+              "type": "attraction",
+              "id": "K8vZ917support2",
+              "locale": "en-us",
+              "url": "https://www.ticketmaster.com/test-support-two-tickets/artist/1000003"
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Solo Booking",
+        "type": "event",
+        "id": "vvG1zZ9lineup1",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9lineup1",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-11-06",
+            "localTime": "20:00:00",
+            "dateTime": "2026-11-07T01:00:00Z"
+          },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestDC",
+              "locale": "en-us",
+              "city": { "name": "Washington" },
+              "state": { "name": "District of Columbia", "stateCode": "DC" },
+              "country": { "name": "United States Of America", "countryCode": "US" },
+              "location": { "longitude": "-77.0234", "latitude": "38.9180" }
+            }
+          ],
+          "attractions": [
+            {
+              "name": "Test Headliner",
+              "type": "attraction",
+              "id": "K8vZ917headline",
+              "locale": "en-us",
+              "url": "https://www.ticketmaster.com/test-headliner-tickets/artist/1000001"
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Nameless Attraction",
+        "type": "event",
+        "id": "vvG1zZ9nameless",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9nameless",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-11-08",
+            "localTime": "20:00:00",
+            "dateTime": "2026-11-09T01:00:00Z"
+          },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestDC",
+              "locale": "en-us",
+              "city": { "name": "Washington" },
+              "state": { "name": "District of Columbia", "stateCode": "DC" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ],
+          "attractions": [
+            {
+              "name": "",
+              "type": "attraction",
+              "id": "K8vZ917blankone",
+              "locale": "en-us"
+            },
+            {
+              "name": "Test Headliner",
+              "type": "attraction",
+              "id": "K8vZ917headline",
+              "locale": "en-us"
+            }
+          ]
+        }
+      },
+      {
+        "name": "Test Unbilled Show",
+        "type": "event",
+        "id": "vvG1zZ9nolineup",
+        "test": true,
+        "url": "https://www.ticketmaster.com/event/vvG1zZ9nolineup",
+        "locale": "en-us",
+        "dates": {
+          "start": {
+            "localDate": "2026-11-10",
+            "localTime": "20:00:00",
+            "dateTime": "2026-11-11T01:00:00Z"
+          },
+          "timezone": "America/New_York",
+          "status": { "code": "onsale" }
+        },
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Test Club",
+              "type": "venue",
+              "id": "KovZpZAtestDC",
+              "locale": "en-us",
+              "city": { "name": "Washington" },
+              "state": { "name": "District of Columbia", "stateCode": "DC" },
+              "country": { "name": "United States Of America", "countryCode": "US" }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "page": { "size": 100, "totalElements": 4, "totalPages": 1, "number": 0 }
+}

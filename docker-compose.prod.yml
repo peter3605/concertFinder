@@ -1,5 +1,11 @@
 services:
   api:
+    # Pinned rather than derived from the project directory, because the deploy
+    # tags this image with the commit SHA and scripts/prune-images.sh keeps the
+    # last three by that name. Compose's default (<project>-<service>) would
+    # change if /opt/concertfinder were ever renamed, orphaning every rollback
+    # target with no error.
+    image: concertfinder-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,6 +15,26 @@ services:
     expose:
       - "8080"
     restart: unless-stopped
+    # Docker's default stop timeout is 10s: SIGTERM, then SIGKILL. main.go gives
+    # shutdown a 30s context shared by srv.Shutdown and riverClient.Stop, so the
+    # default kills the process a third of the way into a graceful stop.
+    # For an in-flight ScanConcerts job that is not a lost request, it is a lost
+    # job row: river only reclaims a job whose worker vanished via the rescuer,
+    # which defaults to about an hour, and ScanConcertsArgs' ByState uniqueness
+    # covers every non-terminal state — so that user's next scan is refused for
+    # the whole rescue window while the SWR handler reports refreshing and never
+    # gets a new snapshot. 45s leaves the 30s budget room to actually finish.
+    stop_grace_period: 45s
+    # Cap the json-file log driver. Docker's default is unbounded, and both
+    # containers share the instance's 20 GiB root volume with the build cache
+    # and the Postgres dumps staged by scripts/backup-db.sh. A full root volume
+    # is not a degradation: the api cannot write, Caddy cannot renew, and
+    # nothing in the pipeline reports it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # `docker compose up -d` exits 0 once containers are *started*, not once
     # they stay up. With config.Validate's hard exit on a bad .env and
     # `restart: unless-stopped`, one wrong variable produced a crash-looping
@@ -31,7 +57,12 @@ services:
       start_period: 60s
 
   caddy:
-    image: caddy:2-alpine
+    # Pinned by digest for the same reasons as the Dockerfile's base images —
+    # see the note at the top of that file, including why this must be the
+    # multi-arch index digest and how to re-resolve it. The tag stays in the
+    # reference so a reader can see which Caddy this is; the digest is what
+    # docker actually resolves.
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     # SITE_DOMAIN comes from the same .env the api service reads. Without it
     # the Caddyfile's {$SITE_DOMAIN} expands to nothing, the site block
     # degenerates into a global options block, and Caddy refuses to start
@@ -50,6 +81,16 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    # Cap the json-file log driver. Docker's default is unbounded, and both
+    # containers share the instance's 20 GiB root volume with the build cache
+    # and the Postgres dumps staged by scripts/backup-db.sh. A full root volume
+    # is not a degradation: the api cannot write, Caddy cannot renew, and
+    # nothing in the pipeline reports it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   caddy_data:
