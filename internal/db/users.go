@@ -23,46 +23,22 @@ type User struct {
 	// PushOptIn is deliberately not a reuse of InstantNotifyOptIn: "push me
 	// but do not email me" is an ordinary preference. See migration 0016.
 	PushOptIn bool
-}
-
-// UpsertUserBySpotifyID inserts a new user or updates an existing one keyed by
-// spotify_user_id. Preserves the user's digest preferences on conflict (only
-// touches the fields we own here: display name, token, and — when non-empty
-// — email). Returns the resulting row.
-func UpsertUserBySpotifyID(ctx context.Context, pool *pgxpool.Pool, u User) (User, error) {
-	if u.ID == uuid.Nil {
-		u.ID = uuid.New()
-	}
-	// Email is COALESCE-preserved so a re-login without the scope doesn't
-	// blank out a previously-captured address.
-	const q = `
-INSERT INTO users (id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce, email)
-VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
-ON CONFLICT (spotify_user_id) DO UPDATE SET
-  display_name            = EXCLUDED.display_name,
-  encrypted_refresh_token = EXCLUDED.encrypted_refresh_token,
-  refresh_token_nonce     = EXCLUDED.refresh_token_nonce,
-  email                   = COALESCE(EXCLUDED.email, users.email),
-  updated_at              = now()
-RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-          COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in
-`
-	row := pool.QueryRow(ctx, q, u.ID, u.SpotifyUserID, u.DisplayName, u.EncryptedRefreshToken, u.RefreshTokenNonce, u.Email)
-	var out User
-	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken, &out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn, &out.PushOptIn); err != nil {
-		return User{}, fmt.Errorf("upsert user: %w", err)
-	}
-	return out, nil
+	// InvitedWith is the invite code that admitted this account, empty for
+	// everyone who predates migration 0021 and for everyone admitted while
+	// INVITE_REQUIRED was off. It is provenance, never a permission: nothing
+	// reads it to decide what a user may do.
+	InvitedWith string
 }
 
 // GetUserByID returns the user or (User{}, pgx.ErrNoRows) if none exists.
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, error) {
 	const q = `
 SELECT id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
-       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in
+       COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in,
+       COALESCE(invited_with, '')
 FROM users WHERE id = $1`
 	var u User
-	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.PushOptIn)
+	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.PushOptIn, &u.InvitedWith)
 	if err != nil {
 		return User{}, err
 	}

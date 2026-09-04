@@ -225,6 +225,16 @@ struct SiteInfo: Codable, Sendable {
     /// Oldest build this server supports. The app compares it on launch and
     /// shows a blocking update screen below it.
     let minIosBuild: Int?
+    /// Whether this deployment gates NEW accounts on an invite code. Optional
+    /// so an older server that does not send it decodes cleanly, and absent
+    /// means "do not show the field" -- the same thing every build shipped
+    /// before the gate existed already does.
+    ///
+    /// It only decides whether the sign-in screen offers a text box. The gate
+    /// itself lives in the auth callback, which is the only place that can
+    /// tell a signup from a returning user, so a client that got this wrong
+    /// would show or hide a field and could never admit anybody.
+    let inviteRequired: Bool?
 }
 
 /// A 429 from the refresh endpoint.

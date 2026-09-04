@@ -141,3 +141,41 @@ func TestOutOfRangeHourFallsBackToDefault(t *testing.T) {
 		t.Errorf("DailyScanHourUTC = %d, want the 7 default", cfg.DailyScanHourUTC)
 	}
 }
+
+// The invite gate defaults ON, and that is the whole point of it: a
+// deployment that sets nothing is gated rather than open. Both directions of
+// a wrong default here are silent, and this is the recoverable one -- an
+// ungated deployment spends the shared Ticketmaster allowance and presents to
+// everyone as a half-empty feed, whereas a gated one presents to one person
+// as a message asking for a code.
+func TestInviteGateDefaultsOn(t *testing.T) {
+	// Cleared explicitly: loadDefaults does not clear this one, because the
+	// two tests below need to set it and loadDefaults would overwrite them.
+	t.Setenv("INVITE_REQUIRED", "")
+	if cfg := loadDefaults(t); !cfg.InviteRequired {
+		t.Error("InviteRequired = false with nothing set, want true")
+	}
+}
+
+func TestInviteGateCanBeTurnedOff(t *testing.T) {
+	// Turning it off has to be possible and has to take an explicit value --
+	// this is the switch an operator flips once Extended Quota Mode lands and
+	// the account cap has room.
+	for _, off := range []string{"0", "false", "FALSE", "no", "off"} {
+		t.Setenv("INVITE_REQUIRED", off)
+		if cfg := loadDefaults(t); cfg.InviteRequired {
+			t.Errorf("INVITE_REQUIRED=%q left the gate on", off)
+		}
+	}
+}
+
+// A value nobody can parse keeps the default rather than reading as false.
+// For a gate that defaults on, a typo must not open it.
+func TestUnparseableInviteFlagKeepsTheGateOn(t *testing.T) {
+	for _, junk := range []string{"maybe", "ye", "2", "-"} {
+		t.Setenv("INVITE_REQUIRED", junk)
+		if cfg := loadDefaults(t); !cfg.InviteRequired {
+			t.Errorf("INVITE_REQUIRED=%q opened the gate", junk)
+		}
+	}
+}

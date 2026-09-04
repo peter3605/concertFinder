@@ -325,24 +325,39 @@ to paste.
 the upload. Processing appears to run, App Store Connect then emails ITMS-91053,
 and the build never becomes available. Nothing in Xcode or CI sees it.
 
-### 11. Decide what launch means
+### 11. Decide what launch means — DECIDED, see `docs/admission-policy.md`
 
-A product call, deliberately not decided in the implementation run. The
-arithmetic that constrains it:
+**Settled 2026-09-04 (CF-13). Launch is invite-only.** The mechanism is built:
+`INVITE_REQUIRED` (defaults to **true**), an `invite_codes` table (migration
+0021), and a gate in the auth callback that fires only when a login would
+*create* a user — so returning users and every pre-0021 account are
+unaffected. `docs/admission-policy.md` is the decision, the arithmetic and the
+operator runbook. Mint a code with:
 
-Ticketmaster's ceiling is 5000 calls/day per key. A cold scan costs roughly one
-call per artist up to `spotify.MaxScoredArtists` (200). So ~25 cold scans/day in
-the worst case, and considerably more in the realistic one, because
-`concert_cache` (`DefaultCacheTTL`, 12h) makes the second user in a city nearly
-free.
+```bash
+docker compose exec api /server -mint-invite -note "who it is for"
+```
 
-What changed since `docs/ios-app-plan.md` §3.3 was written is that exceeding it
-is no longer silent: `rate_ledger_account` turns it into a `retry_after` — a
-visible wait, with a reason, in both clients — rather than upstream 403s that
-look exactly like artists with no shows. That is what makes a staged admission
-survivable. It is not a reason to skip staging it: a waitlist with a per-day
-admission cap is the honest version and doubles as capacity control, and it
-wants to exist before Extended Quota Mode lands, not after.
+Two corrections to the arithmetic this section used to carry, both measured
+from the code rather than estimated:
+
+- A cold scan costs **~400 calls, not ~200**. `ticketmaster.CallsPerArtistColdScan`
+  is 2, because attraction resolution is a separate call, and
+  `jobs.scanQuotaFor` reserves `artists * 2` up front. So the account ceiling
+  is **~12 cold scans/day, not ~25**.
+- Concurrency is not the binding constraint. River runs `MaxWorkers: 5`, so at
+  most 2000 of the 5000 is ever reserved at once. What binds is the daily
+  total, and the nightly fanout spends one scan per active user.
+
+The rest of what this section argued still holds: `rate_ledger_account` makes
+exhaustion a visible dated `retry_after` rather than silent upstream 403s,
+which is what makes staged admission survivable and is not a reason to skip
+staging it.
+
+A waitlist was considered and deliberately deferred — it cannot send the "you
+are in" email until §7's SES sandbox request (CF-08) is granted, and a
+waitlist that collects addresses and then goes quiet is worse than none.
+Revisit once that lands.
 
 ---
 

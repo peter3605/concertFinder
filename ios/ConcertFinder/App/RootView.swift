@@ -189,6 +189,7 @@ enum AppStoreLink {
 struct LoginView: View {
     @Environment(AuthController.self) private var auth
     @State private var isSigningIn = false
+    @State private var inviteCode = ""
 
     var body: some View {
         VStack(spacing: Metrics.loose) {
@@ -215,10 +216,27 @@ struct LoginView: View {
             Spacer()
 
             VStack(spacing: Metrics.gutter) {
+                if auth.inviteRequired {
+                    VStack(alignment: .leading, spacing: Metrics.tight) {
+                        TextField("Invite code", text: $inviteCode)
+                            .textFieldStyle(.roundedBorder)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .submitLabel(.done)
+                            .accessibilityLabel("Invite code")
+                        // Names which half of the flow needs a code. Without
+                        // it an existing user reads the field as a wall and
+                        // never presses the button they are entitled to.
+                        Text("New accounts need an invite while ConcertFinder is in early access. Already have an account? Just continue — you don't need a code.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Button {
                     isSigningIn = true
                     Task {
-                        await auth.signIn()
+                        await auth.signIn(inviteCode: inviteCode)
                         isSigningIn = false
                     }
                 } label: {
