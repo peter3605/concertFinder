@@ -47,6 +47,10 @@ type Deps struct {
 	// disables the mobile flow: /login?client=ios is refused rather than
 	// silently completing into a browser session the app cannot read.
 	MobileCallbackURL string
+	// InviteRequired gates signups on an invite code. See
+	// config.Config.InviteRequired for why it defaults on. Logins by
+	// existing users ignore it entirely.
+	InviteRequired bool
 	// OnLoginSuccess is invoked after a successful callback + session
 	// creation. Used by main.go to enqueue a pre-warm concert scan for the
 	// new session's user so the first /me/concerts request finds a snapshot.
@@ -89,6 +93,41 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The code is checked here so somebody with a typo finds out before
+	// being sent through Spotify's consent screen, and it is checked
+	// read-only: redemption happens at /callback, and only if this login
+	// turns out to be a signup. A login started and abandoned must not spend
+	// anyone's invite.
+	//
+	// A blank code is NOT refused here. This handler cannot tell a signup
+	// from a returning user -- that needs the Spotify identity, which only
+	// exists after the round trip -- so refusing one now would lock out every
+	// existing user the moment the gate came on. The callback is the only
+	// place with enough information to require a code, so it is the only
+	// place that does.
+	invite := db.NormalizeInviteCode(r.URL.Query().Get("invite"))
+	if d.InviteRequired && invite != "" {
+		ok, err := db.InviteCodeUsable(r.Context(), d.Pool, invite)
+		if err != nil {
+			slog.Error("invite pre-check failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			// text/plain, matching the Development Mode refusal in the
+			// callback below rather than the JSON writeAuthError used by the
+			// mobile exchange. Both /login and /callback are landed on by a
+			// browser -- the app reaches them through a web view, not
+			// URLSession -- so what belongs here is a sentence, not an
+			// object.
+			http.Error(w,
+				"That invite code is not valid. It may have already been used, or it may have expired. "+
+					"Check it for typos, or ask whoever sent it for another.",
+				http.StatusForbidden)
+			return
+		}
+	}
+
 	verifier, err := GenerateVerifier()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -104,7 +143,13 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := d.Handshakes.Put(r.Context(), handshakeKey, verifier, state, appChallenge, HandshakeTTL); err != nil {
+	if err := d.Handshakes.Put(r.Context(), PendingHandshake{
+		Key:          handshakeKey,
+		Verifier:     verifier,
+		State:        state,
+		AppChallenge: appChallenge,
+		InviteCode:   invite,
+	}, HandshakeTTL); err != nil {
 		slog.Error("handshake put failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -190,14 +235,53 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	user, err := db.UpsertUserBySpotifyID(r.Context(), d.Pool, db.User{
+	// The admission gate. This call updates the row when Spotify's account is
+	// already known and creates one when it is not, and only the second case
+	// consults the invite code -- so a returning user never needs one and
+	// every account predating migration 0021 is grandfathered for free.
+	user, err := db.UpsertUserWithAdmission(r.Context(), d.Pool, db.User{
 		SpotifyUserID:         me.ID,
 		DisplayName:           me.DisplayName,
 		EncryptedRefreshToken: ct,
 		RefreshTokenNonce:     nonce,
 		Email:                 me.Email,
-	})
-	if err != nil {
+	}, hs.InviteCode, d.InviteRequired)
+	switch {
+	case errors.Is(err, db.ErrInviteRequired):
+		// A refusal, not a fault, and the same shape as the Development Mode
+		// branch above: the person did nothing wrong and a retry will not
+		// help, so say what would.
+		// Deliberately identifies nobody. A refused signup writes no user
+		// row, so logging the Spotify ID would retain an identifier for
+		// somebody who does not have an account -- the one case where we
+		// hold Spotify-derived data for a non-user. The event is the useful
+		// part: it tells the operator people are arriving without codes.
+		slog.Info("signup refused: no invite code")
+		http.Error(w,
+			"ConcertFinder is invite-only at the moment, so creating a new account needs an invite code. "+
+				"If you have one, start again from the sign-in page and enter it there. "+
+				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
+				"existing accounts never need a code.",
+			http.StatusForbidden)
+		return
+	case errors.Is(err, db.ErrInviteInvalid):
+		// Distinct from the above on purpose. "Your code did not work" and
+		// "you need a code" send the reader to different places.
+		//
+		// Reachable even after /login accepted the code: the pre-check is
+		// read-only, so the last seat can be taken between the two by someone
+		// else. That race resolves here because this is where the atomic
+		// redemption is.
+		// The code, not the person: it is what the operator needs to answer
+		// "why didn't my invite work", and unlike the Spotify ID it names
+		// something they issued rather than somebody who was turned away.
+		slog.Info("signup refused: invite not redeemable", "code", hs.InviteCode)
+		http.Error(w,
+			"That invite code is no longer valid — it may have just been used up, or expired. "+
+				"Ask whoever sent it for another.",
+			http.StatusForbidden)
+		return
+	case err != nil:
 		slog.Error("upsert user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

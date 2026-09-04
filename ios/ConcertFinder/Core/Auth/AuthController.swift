@@ -24,6 +24,16 @@ final class AuthController: NSObject {
 
     private(set) var state: State = .loading
     private(set) var authError: APIError?
+    /// Whether this deployment gates NEW accounts on an invite code, which
+    /// decides only whether the sign-in screen offers a text box.
+    ///
+    /// Defaults to false and stays false if site-info cannot be reached, for
+    /// the same reason isBuildTooOld() fails open: a blip must not add a
+    /// mandatory-looking field to the sign-in screen of a deployment that
+    /// does not have a gate. Getting it wrong in this direction costs a user
+    /// with a code one extra round trip, since the callback refuses the
+    /// signup and says exactly what is missing.
+    private(set) var inviteRequired = false
 
     private let api: APIClient
     private let tokens: KeychainTokenStore
@@ -55,10 +65,14 @@ final class AuthController: NSObject {
     /// half-working app — and /api/site-info is the one endpoint that is
     /// guaranteed to answer either way.
     func restore() async {
-        if await isBuildTooOld() {
+        // One site-info fetch answers both questions, so they share a call
+        // rather than each making their own on the launch path.
+        let info = try? await api.siteInfo()
+        if isBuildTooOld(info) {
             state = .updateRequired
             return
         }
+        inviteRequired = info?.inviteRequired ?? false
         guard await tokens.currentToken() != nil else {
             state = .signedOut
             return
@@ -81,8 +95,8 @@ final class AuthController: NSObject {
         }
     }
 
-    private func isBuildTooOld() async -> Bool {
-        guard let info = try? await api.siteInfo(), let floor = info.minIosBuild, floor > 0 else {
+    private func isBuildTooOld(_ info: SiteInfo?) -> Bool {
+        guard let info, let floor = info.minIosBuild, floor > 0 else {
             // No floor published, or the check itself failed. Failing open is
             // right: a site-info blip must not brick every installed copy.
             return false
@@ -94,7 +108,7 @@ final class AuthController: NSObject {
 
     /// Runs the full login: PKCE against us, PKCE against Spotify inside the
     /// web context, then a one-time code exchanged for the session.
-    func signIn() async {
+    func signIn(inviteCode: String = "") async {
         authError = nil
 
         // Our half of the handshake. The verifier never leaves the device,
@@ -104,10 +118,20 @@ final class AuthController: NSObject {
 
         var components = URLComponents(url: baseURL.appendingPathComponent("api/auth/login"),
                                        resolvingAgainstBaseURL: false)
-        components?.queryItems = [
+        var query = [
             URLQueryItem(name: "client", value: "ios"),
             URLQueryItem(name: "app_challenge", value: challenge),
         ]
+        // Only sent when the person typed something. An empty `invite=` is
+        // not the same as no parameter to a server deciding whether a signup
+        // presented a code, and sending one would be a lie about what the
+        // user did. The server normalizes case and spacing; trimming here
+        // just keeps a stray space out of the URL.
+        let invite = inviteCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !invite.isEmpty {
+            query.append(URLQueryItem(name: "invite", value: invite))
+        }
+        components?.queryItems = query
         guard let loginURL = components?.url else {
             authError = .unknown("Could not build the sign-in URL.")
             return

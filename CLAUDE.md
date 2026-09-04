@@ -98,6 +98,30 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   5000; unset (0) disables the ceiling and restores the old behaviour exactly.
   Exhaustion reuses the existing `retry_after` path, which is correct because
   the remedy is the same: wait for the UTC day to roll over.
+- **Signups are gated on an invite code; logins are not.** `docs/admission-policy.md`
+  is the decision and the runbook. The gate fires in `db.UpsertUserWithAdmission`
+  only when a callback would **create** a user, which is what grandfathers every
+  pre-0021 account and means a returning user never needs a code. Three things
+  hold it together. `INVITE_REQUIRED` **defaults to true, including when unset** —
+  the opposite of every other flag, because both directions of a wrong default are
+  silent and this is the recoverable one: a gate wrongly on is a message to one
+  person, while a gate wrongly off spends the shared Ticketmaster allowance and
+  presents to everyone as a thinner feed (`main.go` logs the mode at startup in
+  both directions, since the operator already has an account and is the last to
+  notice either). Redemption and user creation share **one transaction** —
+  split apart, redeem-then-insert burns a code and insert-then-redeem admits a
+  user for free, both silently. And the `/login` check is deliberately
+  **read-only**: most logins are abandoned at Spotify's consent screen, which
+  sits between it and `/callback`, so reserving there would let a curious click
+  burn somebody's invite. The resulting race — two people passing the pre-check
+  on a one-use code — resolves at the redemption, whose guard is in the `WHERE`
+  clause rather than a read-then-write. The arithmetic behind all of it: a cold
+  scan reserves `artists * 2` = 400 permits, so `RATE_CAP_TM_ACCOUNT_DAILY`
+  (5000) is ~12 cold scans/day and the nightly fanout spends one per active user.
+  Until Spotify grants Extended Quota Mode their Development Mode allowlist is a
+  second, stricter gate in front of this one; this exists so the day that lifts
+  is not also the day admission becomes unbounded.
+
 - **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less. **A call site charges as many permits as it makes requests**: use `rate.AllowN` where one logical lookup is several requests. Songkick's `SearchArtistEvents` is two (resolve the artist ID, then its calendar) with no cache in between, so charging one permit made `RATE_CAP_SONGKICK_PER_USER_DAILY` mean twice its stated number. `TakeN` is all-or-nothing and hands back an over-draw on refusal, so a refused 2-permit take doesn't strand the last permit.
 - **Endpoints removed by Spotify (Feb 2026) that are NOT available:** `/recommendations`, `/audio-features`, `/audio-analysis`, `/artists/{id}/related-artists`, `/artists/{id}/top-tracks`, batch `/tracks`. Do not write code that calls these. Affinity is constructed entirely from the user's own explicit signals.
 - **`GET /playlists/{id}/items` (Feb 2026 change):** only works for playlists the user owns or collaborates on. Skip merely-followed playlists.
@@ -657,7 +681,7 @@ Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATA
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
-Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`, `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL`, `SITE_DOMAIN`.
 
 iOS (all optional; unset means the web app behaves exactly as before): `MOBILE_CALLBACK_URL`, `IOS_APP_ID`, `MIN_IOS_BUILD`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8_KEY`, `APNS_ENVIRONMENT`. Two things `config.Validate` refuses to start on, because both are silent otherwise: a **partial** APNs set — it wires up successfully and then drops every notification, indistinguishable from nobody having opted in — and a `MOBILE_CALLBACK_URL` whose host disagrees with `SITE_BASE_URL`, since iOS fetches `apple-app-site-association` from the link's own domain and a mismatch ends the login in Safari with the app still waiting. Empty `IOS_APP_ID` makes that route 404 **on purpose**: serving an association naming an empty app is worse, because iOS caches it.
 

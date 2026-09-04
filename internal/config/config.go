@@ -107,6 +107,29 @@ type Config struct {
 	RateCapTMAccountDaily       int
 	RateCapSongkickAccountDaily int
 
+	// InviteRequired gates SIGNUPS -- not logins -- on an invite code.
+	// Existing accounts are unaffected, so turning it on never locks out
+	// somebody who is already here.
+	//
+	// It defaults to TRUE, which is the unusual choice and the deliberate
+	// one. The account-wide Ticketmaster ceiling is what decides whether
+	// signed-in users get a complete feed, and jobs.scanQuotaFor reserves
+	// 400 permits for a full 200-artist scan, so RateCapTMAccountDaily
+	// (5000) is about twelve cold scans a day. The nightly fanout runs one
+	// per active user. Both directions of a wrong default are silent, so
+	// the tie is broken by which is recoverable: refusing a signup is a
+	// message to one person who can be sent a code, while an uncapped
+	// signup window quietly spends the shared allowance and presents to
+	// everyone else as a half-empty feed. main.go logs which mode it is in
+	// at startup, because a gate nobody can see is the other way this goes
+	// wrong.
+	//
+	// Until Spotify grants Extended Quota Mode their Development Mode
+	// allowlist is a second, stricter gate sitting in front of this one.
+	// This exists so that the day that gate is lifted is not also the day
+	// admission becomes unbounded.
+	InviteRequired bool
+
 	// ConcertCacheTTLHours is how long cached per-artist upstream responses
 	// stay trusted. 0 = package default (12h). Longer means fewer quota-
 	// spending scans; shorter means fresher listings.
@@ -240,6 +263,7 @@ func Load() (*Config, error) {
 	// sets nothing is bounded by the real limit rather than by nothing.
 	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
+	c.InviteRequired = boolEnv("INVITE_REQUIRED", true)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
 
@@ -487,6 +511,26 @@ func isLoopbackHost(s string) bool {
 		return true
 	}
 	return false
+}
+
+// boolEnv parses a boolean environment variable with an explicit default.
+// It exists because the older `== "1" || EqualFold("true")` spelling can only
+// express a default of false: with it, "unset" and "set to false" are the same
+// value, which is unusable for a setting whose safe default is on.
+func boolEnv(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	// An unparseable value keeps the default rather than silently reading as
+	// false. For a gate that defaults on, a typo must not open it.
+	return def
 }
 
 func intEnv(key string, def int) int {

@@ -20,6 +20,11 @@ type SiteInfoHandler struct {
 	// survivable once builds are in people's pockets for months — it is
 	// cheap to add now and impossible to add retroactively.
 	MinIOSBuild int
+	// InviteRequired tells a client whether to offer an invite-code box on
+	// its sign-in screen. It is a hint for rendering, never the gate itself
+	// -- the gate is in the auth callback, which is the only place that can
+	// tell a signup from a returning user.
+	InviteRequired bool
 }
 
 func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
@@ -28,8 +33,9 @@ func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
 		effective = time.Now().UTC().Format("2006-01-02")
 	}
 	writeJSON(w, map[string]any{
-		"contact_email":  h.ContactEmail,
-		"effective_date": effective,
-		"min_ios_build":  h.MinIOSBuild,
+		"contact_email":   h.ContactEmail,
+		"effective_date":  effective,
+		"min_ios_build":   h.MinIOSBuild,
+		"invite_required": h.InviteRequired,
 	})
 }
