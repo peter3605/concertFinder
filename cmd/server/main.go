@@ -47,9 +47,30 @@ func main() {
 	// what `healthcheck:` in docker-compose.prod.yml invokes.
 	healthcheck := flag.Bool("healthcheck", false,
 		"probe the running server's /api/healthz and exit 0 (healthy) or 1 (not); for the container healthcheck")
+	// Invite administration, for the same reason: the operator's only way
+	// into a distroless container is this binary, so minting a code is a mode
+	// of it rather than a second command that would have to be added to the
+	// image. Run as
+	//   docker compose exec api /server -mint-invite -note "alex"
+	mintInvite := flag.Bool("mint-invite", false, "mint an invite code, print it, and exit")
+	listInvites := flag.Bool("list-invites", false, "list invite codes and their state, then exit")
+	disableInvite := flag.String("disable-invite", "", "revoke an invite code (keeps it readable) and exit")
+	inviteNote := flag.String("note", "", "with -mint-invite: who the code is for (operator's own reference)")
+	inviteUses := flag.Int("uses", 1, "with -mint-invite: how many signups the code admits")
+	inviteDays := flag.Int("expires-days", 0, "with -mint-invite: days until the code expires (0 = never)")
 	flag.Parse()
 	if *healthcheck {
 		os.Exit(runHealthcheck())
+	}
+	if *mintInvite || *listInvites || *disableInvite != "" {
+		os.Exit(runInviteAdmin(inviteAdminArgs{
+			mint:    *mintInvite,
+			list:    *listInvites,
+			disable: *disableInvite,
+			note:    *inviteNote,
+			uses:    *inviteUses,
+			days:    *inviteDays,
+		}))
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -159,6 +180,9 @@ func main() {
 			// /login?client=ios refuse rather than complete into a session
 			// only a browser could use.
 			MobileCallbackURL: cfg.MobileCallbackURL,
+			// Gates signups, not logins. Defaults on; see
+			// config.Config.InviteRequired.
+			InviteRequired: cfg.InviteRequired,
 		}
 
 		affinitySvc := &affinity.Service{
@@ -227,6 +251,26 @@ func main() {
 				"cap", cfg.RateCapTMPerUserDaily,
 				"cold_scan_cost", coldScanCost,
 				"artists", spotify.MaxScoredArtists)
+		}
+
+		// Admission. Logged unconditionally and in both directions, because
+		// both are silent from outside: a gate left off looks like a working
+		// site right up until the shared Ticketmaster allowance is gone, and
+		// a gate left on looks like a working site to everyone who already
+		// has an account -- which includes the operator, who is therefore the
+		// last person to notice that nobody new can join.
+		if cfg.InviteRequired {
+			coldScansPerDay := 0
+			if scanReservation := spotify.MaxScoredArtists * ticketmaster.CallsPerArtistColdScan; scanReservation > 0 {
+				coldScansPerDay = cfg.RateCapTMAccountDaily / scanReservation
+			}
+			logger.Info("signups require an invite code",
+				"mint", "server -mint-invite -note '<who>'",
+				"cold_scans_per_day", coldScansPerDay)
+		} else {
+			logger.Warn("signups are OPEN: anyone who can reach Spotify's consent screen can create an account",
+				"set", "INVITE_REQUIRED=true to gate signups",
+				"tm_account_daily", cfg.RateCapTMAccountDaily)
 		}
 
 		var fallbackChain concerts.Fallbacker
@@ -593,6 +637,10 @@ func main() {
 			ContactEmail:  cfg.ContactEmail,
 			EffectiveDate: "2026-07-29",
 			MinIOSBuild:   cfg.MinIOSBuild,
+			// Additive field: tells both clients whether to show an invite
+			// box on the sign-in screen. Additive because /api/me/* and this
+			// payload are consumed by builds already on people's phones.
+			InviteRequired: cfg.InviteRequired,
 		}).Get)
 		// No nil guard on authDeps here any more. There used to be one, and it
 		// was the mechanism by which a bad ENCRYPTION_KEY produced a site with

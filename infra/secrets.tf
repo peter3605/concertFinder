@@ -94,6 +94,22 @@ locals {
     RATE_CAP_TM_ACCOUNT_DAILY       = "5000"
     RATE_CAP_SONGKICK_ACCOUNT_DAILY = "5000"
 
+    # Signups need an invite code; logins by existing users do not. This is
+    # the dial on the ceiling directly above: a cold scan reserves 400 permits
+    # (200 artists x 2 calls), so 5000/day is ~12 cold scans and the nightly
+    # fanout spends one per active user.
+    #
+    # Stated here rather than left to the binary's default, even though the
+    # default is the same value. render-env.sh regenerates .env from these
+    # parameters on every deploy, so this is the only place the setting can
+    # live where a deploy will not wipe it -- and an operator looking for
+    # "how do I open signups" should find a line to change, not an absence to
+    # infer a default from.
+    #
+    # Turning this off is a real decision with prerequisites; see
+    # docs/admission-policy.md section 2.
+    INVITE_REQUIRED = "true"
+
     EMAIL_DELIVERY_MODE = var.email_delivery_mode
     SMTP_PORT           = "587"
     CONTACT_EMAIL       = var.ses_verified_recipient
