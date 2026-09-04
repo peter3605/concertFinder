@@ -28,21 +28,43 @@ type InviteCode struct {
 	CreatedAt  time.Time
 }
 
-// Usable reports whether the code would be accepted right now. It mirrors
+// The four words an operator sees for a code's state, and the only four.
+// They are constants rather than literals because two surfaces render them --
+// `-list-invites` in the terminal and the admin console in a browser -- and a
+// code described as "spent" in one place and "used up" in the other is two
+// vocabularies for one table.
+const (
+	InviteUsable   = "usable"
+	InviteDisabled = "disabled"
+	InviteExpired  = "expired"
+	InviteSpent    = "spent"
+)
+
+// State says why a code is or is not acceptable right now. It mirrors
 // inviteUsableSQL; the two exist separately because one runs in Postgres
 // during a redemption and the other renders an operator's list, and keeping
 // them side by side is what stops them drifting.
-func (c InviteCode) Usable(now time.Time) bool {
+//
+// The order of the cases is the order of authority, and it is not arbitrary:
+// a disabled code that has also expired reports disabled, because that is the
+// one a person did on purpose and therefore the one they are looking for.
+func (c InviteCode) State(now time.Time) string {
 	switch {
 	case c.DisabledAt != nil:
-		return false
+		return InviteDisabled
 	case c.ExpiresAt != nil && !c.ExpiresAt.After(now):
-		return false
+		return InviteExpired
 	case c.Redemptions >= c.MaxRedemptions:
-		return false
+		return InviteSpent
 	}
-	return true
+	return InviteUsable
 }
+
+// Usable reports whether the code would be accepted right now. It is defined
+// in terms of State so the boolean and the explanation cannot disagree -- a
+// code the console labels "usable" and the redemption refuses is an
+// unanswerable support question.
+func (c InviteCode) Usable(now time.Time) bool { return c.State(now) == InviteUsable }
 
 // ErrInviteRequired means a signup arrived with no code at all.
 // ErrInviteInvalid means it carried one that is unknown, spent, expired or
@@ -306,13 +328,13 @@ ON CONFLICT (spotify_user_id) DO UPDATE SET
   updated_at              = now()
 RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
           COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in,
-          COALESCE(invited_with, '')`
+          COALESCE(invited_with, ''), is_admin`
 	row := tx.QueryRow(ctx, upsert, u.ID, u.SpotifyUserID, u.DisplayName,
 		u.EncryptedRefreshToken, u.RefreshTokenNonce, u.Email, u.InvitedWith)
 	var out User
 	if err := row.Scan(&out.ID, &out.SpotifyUserID, &out.DisplayName, &out.EncryptedRefreshToken,
 		&out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn,
-		&out.PushOptIn, &out.InvitedWith); err != nil {
+		&out.PushOptIn, &out.InvitedWith, &out.IsAdmin); err != nil {
 		return User{}, fmt.Errorf("upsert user: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

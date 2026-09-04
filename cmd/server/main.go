@@ -58,6 +58,15 @@ func main() {
 	inviteNote := flag.String("note", "", "with -mint-invite: who the code is for (operator's own reference)")
 	inviteUses := flag.Int("uses", 1, "with -mint-invite: how many signups the code admits")
 	inviteDays := flag.Int("expires-days", 0, "with -mint-invite: days until the code expires (0 = never)")
+	// Admin administration, and the bootstrap for the whole authorization
+	// tier: the web console can only be reached by an admin, and migration
+	// 0022 leaves every account a non-admin, so the first grant has to come
+	// from outside the app. Accounts are named by their Spotify user ID
+	// because the internal UUID is not something an operator can look up.
+	//   docker compose exec api /server -grant-admin <spotify_user_id>
+	grantAdmin := flag.String("grant-admin", "", "grant the admin flag to a Spotify user ID and exit")
+	revokeAdmin := flag.String("revoke-admin", "", "remove the admin flag from a Spotify user ID and exit")
+	listAdmins := flag.Bool("list-admins", false, "list admin accounts, then exit")
 	flag.Parse()
 	if *healthcheck {
 		os.Exit(runHealthcheck())
@@ -70,6 +79,21 @@ func main() {
 			note:    *inviteNote,
 			uses:    *inviteUses,
 			days:    *inviteDays,
+		}))
+	}
+	if *grantAdmin != "" || *revokeAdmin != "" || *listAdmins {
+		if *grantAdmin != "" && *revokeAdmin != "" {
+			// Refused rather than resolved by precedence. Both flags name an
+			// account and mean opposite things, so picking one silently is
+			// how somebody revokes the only admin while reading the command
+			// that granted it.
+			fmt.Fprintln(os.Stderr, "server: -grant-admin and -revoke-admin are mutually exclusive")
+			os.Exit(2)
+		}
+		os.Exit(runAdminAdmin(adminArgs{
+			grant:  *grantAdmin,
+			revoke: *revokeAdmin,
+			list:   *listAdmins,
 		}))
 	}
 
@@ -271,6 +295,22 @@ func main() {
 			logger.Warn("signups are OPEN: anyone who can reach Spotify's consent screen can create an account",
 				"set", "INVITE_REQUIRED=true to gate signups",
 				"tm_account_daily", cfg.RateCapTMAccountDaily)
+		}
+
+		// The admin console is unreachable until somebody holds the flag, and
+		// nothing about that failure is legible from the browser: /admin
+		// answers 403, which is the same thing it says to an ordinary user.
+		// One count at boot turns "the page is broken" into a line saying
+		// exactly which command fixes it. Best-effort — an admin-flag count
+		// is not a reason to refuse to serve.
+		adminCtx, cancelAdminCount := context.WithTimeout(context.Background(), 5*time.Second)
+		admins, err := db.ListAdmins(adminCtx, pool)
+		cancelAdminCount()
+		if err != nil {
+			logger.Warn("could not count admin accounts", "err", err)
+		} else if len(admins) == 0 {
+			logger.Warn("no admin accounts exist; /admin is unreachable until one is granted",
+				"grant", "server -grant-admin <spotify_user_id>")
 		}
 
 		var fallbackChain concerts.Fallbacker
@@ -703,6 +743,25 @@ func main() {
 			// 5.1.1(v) asks for a revoke mechanism inside the app, and
 			// account deletion was the only one (plan §10.1.2).
 			r.Delete("/spotify-connection", accountH.DisconnectSpotify)
+		})
+		// The operator's console: mint and revoke invite codes without an SSM
+		// round trip. Web only — no admin field appears in /api/me/* or
+		// /api/auth/me, so the mobile contract does not learn that this tier
+		// exists (see internal/http/admin.go).
+		//
+		// Three middlewares, in this order and all at Route level. RequireUser
+		// resolves the session; CSRF must come after it, because its bearer
+		// exemption reads the mechanism RequireUser recorded; RequireAdmin is
+		// innermost and is installed by AdminHandler.Mount rather than here,
+		// so no route can be registered beside these ones without it.
+		//
+		// One limiter for the process. Minting writes a row per call, and
+		// "behind auth" is not a bound.
+		mintLimiter := auth.NewUserRateLimit(1, 10)
+		api.Route("/admin", func(r chi.Router) {
+			r.Use(auth.RequireUser(pool))
+			r.Use(auth.CSRF(signingKey))
+			(&webhttp.AdminHandler{Pool: pool}).Mount(r, mintLimiter)
 		})
 	})
 

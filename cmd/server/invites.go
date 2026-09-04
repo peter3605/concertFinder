@@ -70,15 +70,10 @@ func runInviteAdmin(a inviteAdminArgs) int {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "CODE\tUSED\tSTATE\tEXPIRES\tNOTE")
 		for _, c := range codes {
-			state := "usable"
-			switch {
-			case c.DisabledAt != nil:
-				state = "disabled"
-			case c.ExpiresAt != nil && !c.ExpiresAt.After(now):
-				state = "expired"
-			case c.Redemptions >= c.MaxRedemptions:
-				state = "spent"
-			}
+			// db.InviteCode.State, not a switch of our own. The admin console
+			// renders the same four words from the same function, so a code
+			// this calls "spent" cannot be "expired" in the browser.
+			state := c.State(now)
 			expires := "never"
 			if c.ExpiresAt != nil {
 				expires = c.ExpiresAt.UTC().Format("2006-01-02")
