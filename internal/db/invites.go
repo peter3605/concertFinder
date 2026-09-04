@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -64,24 +65,92 @@ const inviteUsableSQL = `disabled_at IS NULL
   AND (expires_at IS NULL OR expires_at > now())
   AND redemptions < max_redemptions`
 
-// NormalizeInviteCode is what turns what a person typed into what is stored.
-// Codes are minted uppercase with dashes; people paste them lowercase, with
-// spaces, or with the dashes eaten by a chat client, or with a phone keyboard
-// having capitalised the first letter and nothing else.
+// The minted code format, and the only place that knows it.
 //
-// Every path that accepts a code from a human runs it through here, and there
-// is exactly one of these functions for the same reason there is exactly one
-// HashSessionToken: a second spelling of the normalizer would refuse valid
-// invites, and the person holding one would be told their code is broken.
-func NormalizeInviteCode(s string) string {
-	var sb strings.Builder
-	for _, r := range strings.ToUpper(strings.TrimSpace(s)) {
-		if r == ' ' || r == '\t' || r == '_' {
-			continue
-		}
-		sb.WriteRune(r)
+// Generation used to live in cmd/server while the normalizer lived here, and
+// that split is exactly how they drifted: the generator emitted dashes, the
+// normalizer stripped them, and a code pasted without its dashes stopped
+// matching the row it names. Both halves are here now so a change to one is
+// in front of whoever changes the other.
+//
+// inviteAlphabet omits I, L, O, U, 0 and 1. These codes get read down a phone
+// and typed off screenshots, so the characters that are indistinguishable in
+// a sans-serif font are simply never minted. U is dropped as well, which is
+// Crockford's convention and costs nothing.
+const (
+	inviteAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
+	invitePrefix   = "CF"
+	inviteGroups   = 2
+	inviteGroupLen = 4
+)
+
+// inviteBodyLen is how many alphabet characters a code carries, excluding the
+// prefix and the dashes.
+const inviteBodyLen = inviteGroups * inviteGroupLen
+
+// NewInviteCode returns a fresh code in canonical form, e.g. CF-ABCD-EFGH.
+//
+// It reads from crypto/rand and does not fall back to anything weaker: a
+// math/rand code would be predictable from the mint time, and the failure
+// would look exactly like a working code. 8 characters from a 30-symbol
+// alphabet is ~39 bits, which is far short of a password and does not need to
+// be one -- a guessed code buys a signup slot, not an account, because
+// redeeming it still requires a full Spotify OAuth grant from the guesser.
+func NewInviteCode() (string, error) {
+	buf := make([]byte, inviteBodyLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
 	}
-	return sb.String()
+	body := make([]byte, inviteBodyLen)
+	for i, b := range buf {
+		// Modulo bias across a 30-symbol alphabet over 256 values is
+		// negligible at this entropy level and this is not a key.
+		body[i] = inviteAlphabet[int(b)%len(inviteAlphabet)]
+	}
+	return groupInviteCode(string(body)), nil
+}
+
+// groupInviteCode renders a bare body as PREFIX-XXXX-XXXX.
+func groupInviteCode(body string) string {
+	parts := make([]string, 0, inviteGroups+1)
+	parts = append(parts, invitePrefix)
+	for g := range inviteGroups {
+		parts = append(parts, body[g*inviteGroupLen:(g+1)*inviteGroupLen])
+	}
+	return strings.Join(parts, "-")
+}
+
+// NormalizeInviteCode turns what a person typed into the canonical stored
+// form. Codes are minted uppercase and dashed; they come back lowercased, with
+// the dashes eaten by a chat client, with spaces where the dashes were, or
+// with a phone keyboard having capitalised only the first letter.
+//
+// It works by discarding every separator to get at the body, then putting the
+// canonical dashes back -- NOT by stripping separators and comparing. That
+// distinction is the whole bug this function had: stripping alone made
+// "CFT9CSBFVA" stop matching the stored "CF-T9CS-BFVA" rather than start
+// matching it, so the spelling the doc comment promised to handle was the one
+// spelling that failed. Anything that is not a well-formed code falls through
+// as its stripped uppercase self, which matches nothing and is refused.
+//
+// There is exactly one of these for the same reason there is exactly one
+// HashSessionToken: a second spelling of the normalizer refuses valid invites,
+// and the person holding one is told their code is broken.
+func NormalizeInviteCode(s string) string {
+	var body strings.Builder
+	for _, r := range strings.ToUpper(strings.TrimSpace(s)) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			body.WriteRune(r)
+		}
+	}
+	stripped := body.String()
+	// Re-group only a code shaped like one of ours. A value of any other
+	// shape is returned stripped, so it still normalizes deterministically
+	// and still fails to match a real row.
+	if rest, ok := strings.CutPrefix(stripped, invitePrefix); ok && len(rest) == inviteBodyLen {
+		return groupInviteCode(rest)
+	}
+	return stripped
 }
 
 // CreateInviteCode mints a code. maxRedemptions must be at least 1; expiresAt
