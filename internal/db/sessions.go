@@ -38,10 +38,15 @@ type SessionUser struct {
 
 // sessionUserColumns is shared by every query that returns a SessionUser so
 // the three of them cannot drift out of scan order.
+// u.is_admin is here rather than left to a later lookup because this join is
+// the only thing auth.RequireAdmin reads. Dropping it would not error -- the
+// field would scan as false, every admin request would 403, and the console
+// would be unreachable with nothing in the logs saying why.
 const sessionUserColumns = `s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at,
        u.id, u.spotify_user_id, u.display_name,
        u.encrypted_refresh_token, u.refresh_token_nonce,
-       COALESCE(u.email, ''), u.digest_opt_in, u.instant_notify_opt_in, u.push_opt_in`
+       COALESCE(u.email, ''), u.digest_opt_in, u.instant_notify_opt_in, u.push_opt_in,
+       u.is_admin`
 
 func scanSessionUser(row interface{ Scan(...any) error }) (SessionUser, error) {
 	var out SessionUser
@@ -51,6 +56,7 @@ func scanSessionUser(row interface{ Scan(...any) error }) (SessionUser, error) {
 		&out.User.ID, &out.User.SpotifyUserID, &out.User.DisplayName,
 		&out.User.EncryptedRefreshToken, &out.User.RefreshTokenNonce,
 		&out.User.Email, &out.User.DigestOptIn, &out.User.InstantNotifyOptIn, &out.User.PushOptIn,
+		&out.User.IsAdmin,
 	)
 	if err != nil {
 		return SessionUser{}, err

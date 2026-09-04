@@ -10,12 +10,14 @@ import NotFoundPage from '@/pages/not-found';
 import SavedPage from '@/pages/saved';
 import SettingsPage from '@/pages/settings';
 
-// Split out of the main bundle. None of these four is on the path to the
-// first paint of the feed — the two policy pages are read once, the
-// subscribe page pulls in its own search UI, and /app/auth/callback exists
-// for a browser that reached an iOS universal link — so shipping them in the
-// entry chunk is parse work every signed-in visit pays for nothing.
+// Split out of the main bundle. None of these is on the path to the first
+// paint of the feed — the two policy pages are read once, the subscribe page
+// pulls in its own search UI, /app/auth/callback exists for a browser that
+// reached an iOS universal link, and the admin console has one user — so
+// shipping them in the entry chunk is parse work every signed-in visit pays
+// for nothing.
 // Layout renders the Suspense boundary these need.
+const AdminPage = lazy(() => import('@/pages/admin'));
 const AppCallbackPage = lazy(() => import('@/pages/app-callback'));
 const PrivacyPage = lazy(() => import('@/pages/privacy'));
 const SubscribePage = lazy(() => import('@/pages/subscribe'));
@@ -66,6 +68,20 @@ export default function App() {
                 element={
                   <RequireAuth>
                     <SettingsPage />
+                  </RequireAuth>
+                }
+              />
+              {/* The operator's console. Behind RequireAuth like any other
+                  page, but nothing marks it as an admin route on the client:
+                  the server decides, and the page renders "not yours" on the
+                  403 it gets back. There is deliberately no nav link — adding
+                  one would need the client to be told who is an admin, which
+                  means an admin field in a payload iOS also decodes. */}
+              <Route
+                path="/admin"
+                element={
+                  <RequireAuth>
+                    <AdminPage />
                   </RequireAuth>
                 }
               />
