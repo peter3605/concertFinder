@@ -1,0 +1,29 @@
+-- The first authorization tier in this codebase.
+--
+-- Until now auth.RequireUser was the only gate and every signed-in user was
+-- exactly equivalent: there was no role, no permission, and nothing anywhere
+-- that could answer "may this account do that". So this column is not a
+-- convenience on an existing concept, it introduces the concept. The
+-- consequence worth writing down is what it does to route mounting: an
+-- /api/admin route that misses the check is not a slightly-too-permissive
+-- page, it is an unauthenticated invite mint -- i.e. an unbounded signup path,
+-- which is the exact thing migration 0021's gate exists to prevent. The check
+-- is therefore installed by the function that registers the routes rather than
+-- by the code that calls it (see internal/http/admin.go).
+--
+-- DEFAULT false and NOT NULL: every existing account, including the operator's
+-- own, becomes a non-admin at migration time. There is no way to bootstrap the
+-- first admin from inside the app -- an admin has to grant it and there isn't
+-- one -- so the grant is a mode of the server binary, `-grant-admin`, for the
+-- same reason invite minting is (the api image is distroless: no shell, no
+-- curl, so the binary is the only thing an operator can run in there).
+--
+-- The alternative considered and rejected was an env var listing Spotify user
+-- IDs. It reads simpler and is worse: render-env.sh regenerates .env from SSM
+-- on every deploy, so a hand-added line survives until the next ship and then
+-- silently does not. A column needs no new secret and no terraform apply.
+--
+-- No index. This is read on the session join by primary key and scanned only
+-- by `-list-admins`, which is an operator command against a table of tens.
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;

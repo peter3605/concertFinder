@@ -122,6 +122,49 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   second, stricter gate in front of this one; this exists so the day that lifts
   is not also the day admission becomes unbounded.
 
+- **`users.is_admin` is the only authorization tier, and the gate is welded to
+  the routes rather than to the call site.** Before migration 0022 there was no
+  role, no permission and no `is_admin` anywhere: `auth.RequireUser` was the
+  only gate and every signed-in user was exactly equivalent. What sits behind
+  the new one is an invite mint, so a route that misses it is not a
+  slightly-too-open page — it is an unauthenticated signup path, i.e. the exact
+  hole the invite gate above exists to close. That is why `auth.RequireAdmin`
+  is installed by `webhttp.AdminHandler.Mount` itself, as its first statement,
+  instead of by `main.go`: mounting at the `r.Route` level would already make a
+  later route inherit it, but installing it inside the function that registers
+  the routes means there is no call site that *could* register one beside them
+  without it. `internal/http/admin_gate_test.go` walks the subtree with
+  `chi.Walk` and asserts a 403 for a signed-in non-admin on every route it
+  finds, so a route added later is covered without anyone remembering to
+  extend the test. Three further things hold it together. The flag is read off
+  the `db.User` the session join already produced, which makes
+  `sessionUserColumns` load-bearing in a way that fails silently — drop
+  `is_admin` from that const and nothing errors, every admin request 403s
+  forever, and it is indistinguishable from never having been granted the flag
+  (`invited_with` is *already* missing from it, so partial population is a live
+  precedent, not a hypothetical). `RequireAdmin` fails closed when it is
+  mounted outside `RequireUser`, because `FullUserFromContext` returns a zero
+  `db.User` and a zero user is not an admin. And the first admin cannot be
+  granted through the console — reaching it requires the flag — so
+  `-grant-admin` is a mode of the server binary, the same distroless reasoning
+  as `-mint-invite`, which stays as the break-glass and is not replaced by any
+  of this. The account is named by `spotify_user_id`, never the internal UUID,
+  which an operator cannot look up without the database session this replaces;
+  `main.go` warns at startup when no admin exists, because "never granted" and
+  "page is broken" are both a `403`.
+- **The admin surface is web-only and invisible to the API contract.** No
+  response anywhere says whether a user is an admin. `/api/me/*` and
+  `/api/auth/me` are decoded by iOS builds already on people's phones, so every
+  field in them is additive-only forever, and an operator console has no
+  business taking out that mortgage. `web/src/pages/admin.tsx` instead asks by
+  making the request it wants: `GET /api/admin/invites` renders the console on
+  200 and "not yours" on 403, one round trip either way, with no way for the
+  client to disagree with the server about who is an admin. The cost, accepted
+  deliberately, is that there is no nav link — `/admin` is reached by typing it.
+  Admin payloads are `Cache-Control: no-store`: codes are stored and displayed
+  in the clear on purpose (migration 0021), but that is an argument about
+  blast radius, not a licence to let a shared cache hold them.
+
 - **Every outbound TM/Songkick call spends per-user quota, including attraction resolution.** Quota is taken out per scan as a `rate.Reservations` block on the context (`rate.Allow(ctx, source)`), not one DB round trip per call. A source that runs out returns `errRateCapped`, which **must not** be treated as "no results" — doing so escalates the artist into the far more expensive Phase 2 fallback chain, i.e. spending more because we were trying to spend less. **A call site charges as many permits as it makes requests**: use `rate.AllowN` where one logical lookup is several requests. Songkick's `SearchArtistEvents` is two (resolve the artist ID, then its calendar) with no cache in between, so charging one permit made `RATE_CAP_SONGKICK_PER_USER_DAILY` mean twice its stated number. `TakeN` is all-or-nothing and hands back an over-draw on refusal, so a refused 2-permit take doesn't strand the last permit.
 - **Endpoints removed by Spotify (Feb 2026) that are NOT available:** `/recommendations`, `/audio-features`, `/audio-analysis`, `/artists/{id}/related-artists`, `/artists/{id}/top-tracks`, batch `/tracks`. Do not write code that calls these. Affinity is constructed entirely from the user's own explicit signals.
 - **`GET /playlists/{id}/items` (Feb 2026 change):** only works for playlists the user owns or collaborates on. Skip merely-followed playlists.
