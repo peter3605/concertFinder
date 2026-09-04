@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,17 +13,51 @@ import (
 
 // --- Pure unit tests. These run everywhere, with or without a database. ---
 
-func TestNormalizeInviteCode(t *testing.T) {
+// The test this replaces asserted each spelling's literal output -- which is
+// to say it compared the normalizer against itself, was green, and was
+// meaningless. It pinned the bug as correct: `"CF ABCD EFGH": "CFABCDEFGH"`
+// is what the function did, not what it had to do, and the one spelling its
+// doc comment promised to handle was the one that failed against a real row.
+//
+// What matters is CONVERGENCE: every way a person can mangle a code has to
+// land on the single string that is actually stored. So the assertion is that
+// they all equal the canonical form, not that each equals some expected
+// literal.
+func TestNormalizeInviteCodeConvergesOnTheStoredForm(t *testing.T) {
+	const canonical = "CF-T9CS-BFVA" // a real minted code's shape
 	// Every one of these is a real shape a code arrives in: pasted from a
-	// chat client, typed on a phone keyboard, read off a screenshot.
+	// chat client that ate the dashes, typed on a phone keyboard, read off a
+	// screenshot, or copied with the surrounding whitespace.
+	spellings := []string{
+		"CF-T9CS-BFVA",
+		"cf-t9cs-bfva",
+		"  CF-T9CS-BFVA  ",
+		"CFT9CSBFVA",
+		"cft9csbfva",
+		"cf t9cs bfva",
+		"CF T9CS BFVA",
+		"CF_T9CS_BFVA",
+		"Cf-T9cs-Bfva",
+		"CF--T9CS--BFVA",
+	}
+	for _, in := range spellings {
+		if got := NormalizeInviteCode(in); got != canonical {
+			t.Errorf("NormalizeInviteCode(%q) = %q, want %q", in, got, canonical)
+		}
+	}
+}
+
+// A value that is not shaped like one of our codes must still normalize
+// deterministically -- it simply will not match a row. The point is that it
+// does not panic and does not accidentally become a valid code.
+func TestNormalizeInviteCodeLeavesOtherShapesAlone(t *testing.T) {
 	cases := map[string]string{
-		"CF-ABCD-EFGH":   "CF-ABCD-EFGH",
-		"cf-abcd-efgh":   "CF-ABCD-EFGH",
-		"  CF-ABCD-EFGH": "CF-ABCD-EFGH",
-		"CF ABCD EFGH":   "CFABCDEFGH",
-		"Cf-Abcd-Efgh":   "CF-ABCD-EFGH",
-		"CF_ABCD_EFGH":   "CFABCDEFGH",
-		"":               "",
+		"":                     "",
+		"   ":                  "",
+		"nonsense":             "NONSENSE",
+		"CF-SHORT":             "CFSHORT", // too few body characters to re-group
+		"CF-WAY-TOO-LONG-HERE": "CFWAYTOOLONGHERE",
+		"XX-ABCD-EFGH":         "XXABCDEFGH", // wrong prefix
 	}
 	for in, want := range cases {
 		if got := NormalizeInviteCode(in); got != want {
@@ -32,13 +67,40 @@ func TestNormalizeInviteCode(t *testing.T) {
 }
 
 func TestNormalizeInviteCodeIsIdempotent(t *testing.T) {
-	// The handler normalizes, the db layer normalizes again, and the CLI
-	// normalizes before storing. Applying it twice must not change the
-	// answer or those three would disagree about what got stored.
-	for _, in := range []string{"cf-abcd-efgh", " CF ABCD ", "CF-2345-6789"} {
+	// The handler normalizes, the db layer normalizes again, and CreateInviteCode
+	// normalizes before storing. Applying it twice must not change the answer
+	// or those three would disagree about what got stored.
+	for _, in := range []string{"cf t9cs bfva", " CF-T9CS-BFVA ", "CF-2345-6789", "nonsense"} {
 		once := NormalizeInviteCode(in)
 		if twice := NormalizeInviteCode(once); twice != once {
 			t.Errorf("not idempotent for %q: %q then %q", in, once, twice)
+		}
+	}
+}
+
+// A freshly minted code must survive its own normalizer unchanged, and must
+// be shaped the way the re-grouping branch expects. This is the coupling that
+// broke: generation and normalization used to live in different packages.
+func TestNewInviteCodeIsAlreadyCanonical(t *testing.T) {
+	for range 50 {
+		code, err := NewInviteCode()
+		if err != nil {
+			t.Fatalf("NewInviteCode: %v", err)
+		}
+		if got := NormalizeInviteCode(code); got != code {
+			t.Fatalf("minted %q normalizes to %q -- generation and normalization disagree", code, got)
+		}
+		// And the dash-stripped spelling of it must come back to the same code.
+		if got := NormalizeInviteCode(strings.ReplaceAll(code, "-", "")); got != code {
+			t.Fatalf("minted %q does not survive losing its dashes: got %q", code, got)
+		}
+		if !strings.HasPrefix(code, invitePrefix+"-") {
+			t.Fatalf("minted %q lacks the %q prefix", code, invitePrefix)
+		}
+		for _, r := range strings.ReplaceAll(strings.TrimPrefix(code, invitePrefix+"-"), "-", "") {
+			if !strings.ContainsRune(inviteAlphabet, r) {
+				t.Fatalf("minted %q contains %q, which is outside the unambiguous alphabet", code, r)
+			}
 		}
 	}
 }
@@ -255,7 +317,7 @@ func TestAdmissionAcceptsUnnormalizedCode(t *testing.T) {
 	spotifyID := "spotify-sloppy-" + uuid.NewString()
 	dropUser(t, pool, spotifyID)
 
-	sloppy := "  " + lower(invite.Code) + " "
+	sloppy := "  " + strings.ToLower(strings.ReplaceAll(invite.Code, "-", " ")) + " "
 	u, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), sloppy, true)
 	if err != nil {
 		t.Fatalf("admission with %q: %v", sloppy, err)
@@ -316,14 +378,4 @@ func assertUserCount(t *testing.T, pool *pgxpool.Pool, spotifyID string, want in
 	if got != want {
 		t.Errorf("users with spotify_user_id %s = %d, want %d", spotifyID, got, want)
 	}
-}
-
-func lower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		}
-	}
-	return string(b)
 }

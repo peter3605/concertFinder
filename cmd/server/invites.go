@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -23,49 +21,6 @@ type inviteAdminArgs struct {
 	note    string
 	uses    int
 	days    int
-}
-
-// inviteAlphabet deliberately omits I, L, O, U, 0 and 1. These codes get read
-// down a phone, typed off a screenshot and pasted out of a message with a
-// capitalisation-correcting keyboard in the way, so the characters that are
-// indistinguishable in a sans-serif font are simply not minted. U is dropped
-// as well, which is Crockford's convention and costs nothing.
-const inviteAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
-
-// inviteGroups x inviteGroupLen characters of entropy: 8 characters from a
-// 30-symbol alphabet is ~39 bits. That is far short of a password, and it does
-// not need to be one -- a guessed code buys a signup slot, not an account,
-// because redeeming it still requires a full Spotify OAuth grant from the
-// guesser. What it does need is to survive the /api/auth rate limiter's 5/s
-// standing between an attacker and the guess, which at 39 bits it does by
-// several billion years.
-const (
-	inviteGroups   = 2
-	inviteGroupLen = 4
-)
-
-// newInviteCode returns a code in the form CF-XXXX-XXXX.
-//
-// It reads from crypto/rand and refuses to fall back to anything weaker: a
-// math/rand code would be predictable from the mint time, and the failure
-// would look exactly like a working code.
-func newInviteCode() (string, error) {
-	buf := make([]byte, inviteGroups*inviteGroupLen)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("read random bytes: %w", err)
-	}
-	groups := make([]string, 0, inviteGroups+1)
-	groups = append(groups, "CF")
-	for g := range inviteGroups {
-		var sb strings.Builder
-		for i := range inviteGroupLen {
-			// Modulo bias across a 30-symbol alphabet over 256 values is
-			// negligible at this entropy level and this is not a key.
-			sb.WriteByte(inviteAlphabet[int(buf[g*inviteGroupLen+i])%len(inviteAlphabet)])
-		}
-		groups = append(groups, sb.String())
-	}
-	return strings.Join(groups, "-"), nil
 }
 
 // runInviteAdmin performs one invite operation and returns a process exit
@@ -139,7 +94,7 @@ func runInviteAdmin(a inviteAdminArgs) int {
 			t := time.Now().UTC().AddDate(0, 0, a.days)
 			expiresAt = &t
 		}
-		code, err := newInviteCode()
+		code, err := db.NewInviteCode()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invite: generate: %v\n", err)
 			return 1
