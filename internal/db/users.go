@@ -28,6 +28,19 @@ type User struct {
 	// INVITE_REQUIRED was off. It is provenance, never a permission: nothing
 	// reads it to decide what a user may do.
 	InvitedWith string
+	// IsAdmin is a permission, and the only one -- see migration 0022. It is
+	// deliberately adjacent to InvitedWith so the difference is in front of
+	// whoever reads either: one records how an account got in, the other
+	// decides what it may do, and conflating them would make every invited
+	// user an administrator.
+	//
+	// Every query that scans a whole User must select it. A query that omits
+	// it does not fail; it returns false, which reads as "not an admin" and
+	// locks the operator out of a console with nothing logged. That is why
+	// sessionUserColumns carries it -- that join is what RequireUser runs on
+	// every authenticated request, and it is the only source RequireAdmin
+	// consults.
+	IsAdmin bool
 }
 
 // GetUserByID returns the user or (User{}, pgx.ErrNoRows) if none exists.
@@ -35,10 +48,10 @@ func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, e
 	const q = `
 SELECT id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
        COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in,
-       COALESCE(invited_with, '')
+       COALESCE(invited_with, ''), is_admin
 FROM users WHERE id = $1`
 	var u User
-	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.PushOptIn, &u.InvitedWith)
+	err := pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.SpotifyUserID, &u.DisplayName, &u.EncryptedRefreshToken, &u.RefreshTokenNonce, &u.Email, &u.DigestOptIn, &u.InstantNotifyOptIn, &u.PushOptIn, &u.InvitedWith, &u.IsAdmin)
 	if err != nil {
 		return User{}, err
 	}
