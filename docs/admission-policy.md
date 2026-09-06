@@ -127,6 +127,53 @@ An invite can be sent as a single link — the web login page pre-fills from
 https://concertfinder.app/login?invite=CF-ABCD-EFGH
 ```
 
+### The console at `/admin`
+
+Everything above is also available in the browser, at
+`https://concertfinder.app/admin`, to an account carrying `users.is_admin`
+(migration 0022). It mints, lists and revokes, and it calls the same
+`db.CreateInviteCode` / `db.DisableInviteCode` the CLI does — there is one
+minting path and one normalizer, and a second of either would silently refuse
+valid codes.
+
+**The CLI is not deprecated by it.** It is the break-glass for when the web app
+is down or no admin can sign in, which is precisely when you need a code most.
+
+There is **no link to `/admin` anywhere in the UI**, and that is deliberate
+rather than unfinished. A link means the client has to be told who is an admin,
+which means an admin field in a response — and `/api/me/*` is decoded by iOS
+builds already on people's phones, so every field in it is additive-only
+forever. The page instead asks the server by making the request: `200` renders
+the console, `403` renders "this is not yours". Bookmark it.
+
+### Granting the first admin
+
+Nobody has the flag after migration 0022, including the operator, and the
+console cannot grant it because reaching the console requires it. So the
+bootstrap is a mode of the binary, for the same distroless reason as the rest:
+
+```bash
+# Grant. The argument is a SPOTIFY user ID, not our internal UUID — the UUID is
+# opaque and you cannot look your own up without a database session, which is
+# the thing this replaces. Yours is on the settings page.
+docker compose exec api /server -grant-admin your-spotify-id
+
+# Who holds it.
+docker compose exec api /server -list-admins
+
+# And back off again.
+docker compose exec api /server -revoke-admin some-spotify-id
+```
+
+`-grant-admin` writes to a `users` row, so **the account must have signed in at
+least once** — there is no row before that. Granting an unknown Spotify ID
+exits non-zero and says so, rather than succeeding quietly and leaving you to
+debug a console that 403s.
+
+The server logs a warning at startup when no admin exists, naming this command.
+That line is the only thing standing between "the flag was never granted" and
+"the page is broken", because both present as a `403`.
+
 ---
 
 ## 4. Things that will bite

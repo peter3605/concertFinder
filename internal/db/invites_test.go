@@ -379,3 +379,37 @@ func assertUserCount(t *testing.T, pool *pgxpool.Pool, spotifyID string, want in
 		t.Errorf("users with spotify_user_id %s = %d, want %d", spotifyID, got, want)
 	}
 }
+
+// State's case order is its meaning: a code that is both disabled and expired
+// reports "disabled", because that is the one somebody did on purpose and
+// therefore the one they are looking for in a listing. Usable is defined in
+// terms of State, so this also pins the two to the same answer.
+func TestInviteCodeStatePrefersTheDeliberateReason(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+
+	for _, tc := range []struct {
+		name string
+		code InviteCode
+		want string
+	}{
+		{"fresh", InviteCode{MaxRedemptions: 1}, InviteUsable},
+		{"unexpired with seats left", InviteCode{MaxRedemptions: 2, Redemptions: 1, ExpiresAt: &future}, InviteUsable},
+		{"spent", InviteCode{MaxRedemptions: 1, Redemptions: 1}, InviteSpent},
+		{"expired", InviteCode{MaxRedemptions: 1, ExpiresAt: &past}, InviteExpired},
+		{"disabled", InviteCode{MaxRedemptions: 1, DisabledAt: &past}, InviteDisabled},
+		{"disabled beats expired", InviteCode{MaxRedemptions: 1, DisabledAt: &past, ExpiresAt: &past}, InviteDisabled},
+		{"disabled beats spent", InviteCode{MaxRedemptions: 1, Redemptions: 1, DisabledAt: &past}, InviteDisabled},
+		{"expired beats spent", InviteCode{MaxRedemptions: 1, Redemptions: 1, ExpiresAt: &past}, InviteExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.code.State(now); got != tc.want {
+				t.Errorf("State = %q, want %q", got, tc.want)
+			}
+			if got, want := tc.code.Usable(now), tc.want == InviteUsable; got != want {
+				t.Errorf("Usable = %v, want %v (State says %q)", got, want, tc.code.State(now))
+			}
+		})
+	}
+}
