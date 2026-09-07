@@ -19,6 +19,14 @@ on:
 permissions:
   contents: read
 
+# Group is per-workflow rather than shared with deploy.yml: the two ship on
+# different cadences and must not cancel one another. Unconditional
+# cancel-in-progress is fine here because this workflow only ever builds and
+# tests — it publishes nothing, so an interrupted run leaves nothing half-done.
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
