@@ -545,18 +545,16 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		slog.Info("digest: nothing new", "user", user.ID)
 		return nil
 	}
-	// Idempotency: record the send BEFORE we hit SMTP. If the send fails
-	// we're accepting an at-most-once send (occasional missed emails) over
-	// duplicate-send-on-retry, which is the less annoying failure mode for
-	// end users. A retry would find these keys already in user_digest_sent
-	// and skip them.
-	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, sendKeys); err != nil {
-		return err
-	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
 	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub)
-	if err := w.Sender.Send(ctx, msg); err != nil {
-		slog.Warn("digest: SMTP send failed after recording sent-set", "err", err, "user", user.ID)
+	// Send first, record only what landed. See sendAndRecord for why this
+	// order, and why the earlier one turned a rejected recipient into shows
+	// the user is never told about.
+	if err := sendAndRecord(ctx, w.Sender, msg, sendKeys, func(ctx context.Context, keys []string) error {
+		return db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, keys)
+	}); err != nil {
+		slog.Warn("digest: send failed; sent-set left unrecorded so the retry re-sends",
+			"err", err, "user", user.ID, "concerts", len(sendKeys))
 		return err
 	}
 	// Both counts: the sent-set is per (artist, show) but the email reads one
@@ -634,15 +632,16 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	for _, c := range fresh {
 		sendKeys = append(sendKeys, c.DedupKey)
 	}
-	// Record the send BEFORE hitting SMTP; same at-most-once trade-off as
-	// the daily digest.
-	if err := db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, sendKeys); err != nil {
-		return err
-	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
 	msg := email.RenderInstantNotify(user.DisplayName, user.Email, fresh, unsub)
-	if err := w.Sender.Send(ctx, msg); err != nil {
-		slog.Warn("instant notify: SMTP send failed after recording sent-set", "err", err, "user", user.ID)
+	// Same ordering as the daily digest, through the same helper. These two
+	// are one channel with two triggers and must not drift: a fix applied to
+	// one of them and not the other is the same bug still shipping.
+	if err := sendAndRecord(ctx, w.Sender, msg, sendKeys, func(ctx context.Context, keys []string) error {
+		return db.RecordDigestSent(ctx, w.Pool, user.ID, db.ChannelEmail, keys)
+	}); err != nil {
+		slog.Warn("instant notify: send failed; sent-set left unrecorded so the retry re-sends",
+			"err", err, "user", user.ID, "concerts", len(sendKeys))
 		return err
 	}
 	slog.Info("instant notify sent", "user", user.ID, "concerts", len(fresh), "events", concerts.CountEventKeys(fresh))

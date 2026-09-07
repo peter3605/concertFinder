@@ -361,6 +361,71 @@ Revisit once that lands.
 
 ---
 
+### 12. When SES leaves the sandbox, clear the burned sent-ledger
+
+**Do this after CF-08 is granted, not before, and not instead of it.**
+
+While SES was in sandbox it accepted mail for exactly one verified recipient
+(`var.ses_verified_recipient`) and rejected every other address. Until
+CF-B14 the workers wrote `user_digest_sent` *before* handing the message to
+SMTP, so for every other user those shows were marked delivered and the mail
+was refused. Leaving the sandbox does not undo that: without the step below,
+the first working digest covers only concerts discovered *after* the moment
+SES started delivering, and everything already burned is silently skipped
+forever.
+
+CF-B14 fixed the ordering, so nothing new is being lost. This clears what was
+lost before it.
+
+Check the damage first — this is read-only and tells you whether the step is
+even needed:
+
+```sql
+SELECT u.email, count(*) AS burned_keys, min(s.sent_at), max(s.sent_at)
+FROM user_digest_sent s
+JOIN users u ON u.id = s.user_id
+WHERE s.channel = 'email'
+  AND u.email IS DISTINCT FROM '<the address in ses_verified_recipient>'
+GROUP BY u.email
+ORDER BY burned_keys DESC;
+```
+
+Every row is a user who was told nothing. If it comes back empty, there is
+nothing to do. Then, **once `EMAIL_DELIVERY_MODE=smtp` is actually delivering
+to an unverified address** (send yourself one from a second account to prove
+it):
+
+```sql
+DELETE FROM user_digest_sent
+WHERE channel = 'email'
+  AND user_id IN (
+    SELECT id FROM users
+    WHERE email IS DISTINCT FROM '<the address in ses_verified_recipient>'
+  );
+```
+
+Four things to know before running it:
+
+- **`IS DISTINCT FROM`, not `<>`.** `users.email` is nullable, and `<>` drops
+  every NULL row from the subquery rather than including it. Those users never
+  received mail either.
+- **Only `channel = 'email'`.** The push ledger is a separate channel in the
+  same table (migration 0016) and was never affected — `SendPushWorker` already
+  records after the send. Deleting push rows would re-notify phones for shows
+  that genuinely arrived.
+- **Excluding the verified recipient is what stops a duplicate flood** into
+  the one mailbox that did receive everything.
+- **The next digest for each affected user will be large** — it covers their
+  whole current snapshot rather than one night's new shows. That is the
+  intended outcome and it is a one-off, but it is worth expecting rather than
+  mistaking for a loop. Past shows are dropped by the digest's own floor, so
+  the mail cannot contain concerts that have already happened.
+
+Ordering matters in one direction only: run this while SES is still rejecting
+and the very next nightly run burns the same keys again.
+
+---
+
 ## If you only do one thing today
 
 §1, then §5. The first says whether there are backups at all. The second is the
