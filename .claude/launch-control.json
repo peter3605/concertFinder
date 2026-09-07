@@ -1,0 +1,37 @@
+{
+  "project": "concertFinder",
+  "prefix": "CF",
+  "hub": "https://www.notion.so/3d1074d920fe81b6b40bcd952f1def9e",
+  "projectPageId": "3d1074d9-20fe-81ef-8c4f-c58145988d9f",
+  "stories": {
+    "database": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e",
+    "dataSource": "collection://20111610-fb05-447d-bee2-faa40d009311"
+  },
+  "projects": {
+    "database": "https://www.notion.so/b980271106074cdaa26d921641305d45",
+    "dataSource": "collection://993502bc-6e35-4171-8f53-41c70c0d2fd1"
+  },
+  "views": {
+    "ready": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe8157a76f000c89a152ea",
+    "inProgress": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe81e58111000ca326388d",
+    "waitingExternal": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe811da8eb000c75b14c78",
+    "board": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe8173bfdf000cdef38cd2",
+    "yourTurn": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe818a80f3000c6247c43f",
+    "inReview": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe81748620000c586d8226",
+    "road": "https://www.notion.so/f4f17e2c8b2e489b9b4a1cf324c3ac5e?v=3d1074d920fe81389396000c3e8ed245"
+  },
+  "note": "Prefer query_data_sources in VIEW mode - it has no quota on this Notion plan. SQL mode is metered.",
+  "dependencies": "'Blocked by' is a RELATION (pass page URLs, not story IDs). 'Blocked by IDs' and 'Blocker status' are rollups - they render in Notion's UI but return opaque handles to the API, so resolve blockers by fetching the linked pages. Status=Ready already means unblocked.",
+  "git": {
+    "enabled": true,
+    "baseBranch": "main",
+    "mergeMethod": "squash",
+    "autoMerge": false,
+    "mergeIsDeploy": true,
+    "ciTimeoutMinutes": 20,
+    "extraChecks": [],
+    "notes": "MERGING TO main DEPLOYS TO PRODUCTION. deploy.yml fires on every push to main and concertfinder.app is live. Never merge from a session - push the branch, open the PR, wait for CI, then stop with the story In Review and the PR link recorded. Peter merges when he is ready to ship. Four Dependabot PRs are open; they deploy on merge too, so batch them rather than merging one at a time. ios.yml is path-filtered to the iOS client, so a PR that does not touch it runs only deploy.yml's test and deploy-config jobs - fine, but say so rather than reporting a bare 'all green'."
+  },
+  "viewContract": "Every project has its own 'road' view, filtered to that project and nothing else. Commands MUST scope by views.road - never by a shared browse view, whose filters anyone can change in the Notion UI. The 'Browse - filter this freely' view exists for reading and is deliberately not referenced here.",
+  "notice": "**The GitHub Actions allowance was EXHAUSTED, not merely low.** From 2026-09-04 ~05:16 UTC, GitHub refused to start any job on the private repos: runs ended in 2-4 seconds with zero steps and no logs. **Peter has since added a billing budget**, so CI should run again \u2014 but VERIFY IT before trusting a result. Push one cheap change and confirm the jobs actually execute.\n\n**The trap that will waste your session:** a billing rejection presents as a RED test rollup. `gh pr checks` reports \"fail\" per job with no other signal; only the check-run annotation says why (`gh api repos/<owner>/<repo>/check-runs/<id>/annotations`). A 2-4 second job with steps:0 is the tell. Do not debug a diff that never ran.\n\nMeasured spend, Sep 1-4: Linux 557 min ($3.34), macOS 212 min ($13.16) \u2014 macOS is 27% of minutes and 80% of cost. The 10x multiplier is real on this account. Spend macOS minutes deliberately.\n\n**This repo is PUBLIC, so its Actions are free and unlimited \u2014 it was never blocked.** It is the only one of the five that kept working through the outage.\n\n**CF-B12 is In Review: PR #38 is green and deliberately NOT merged.** Merging here deploys to production, so that call is Peter's, not a session's. All four Done-when clauses were verified including a real browser pass. Do not re-verify and do not merge.\n\nStill open and inherited from CF-13: no invite codes exist in production, and the mint path has never run against the real box. Once #38 merges, Peter must run `docker compose exec api /server -grant-admin <his spotify id>` \u2014 migration 0022 leaves every account, including his, without the flag."
+}
