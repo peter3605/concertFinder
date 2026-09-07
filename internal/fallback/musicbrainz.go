@@ -60,7 +60,15 @@ func NewMusicBrainzClient(userAgent string) *MusicBrainzClient {
 		// Fallback only. main.go passes one built from the deployment's own
 		// base URL and contact address — MusicBrainz 403s anonymous traffic
 		// and expects to be able to reach the operator.
-		userAgent = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
+		//
+		// Share the package default rather than spelling the string out again.
+		// The two are meant to be the same value, and this one sat on a GitHub
+		// URL long after fallback.UserAgent moved to the site's own domain —
+		// which is what two separate literals buys you. A repository URL is a
+		// poor contact address even when it resolves: the operator whose
+		// crawler policy this exists to satisfy wants somewhere to complain,
+		// not somewhere to read code.
+		userAgent = UserAgent
 	}
 	return &MusicBrainzClient{
 		HTTP:      &http.Client{Timeout: 10 * time.Second},
