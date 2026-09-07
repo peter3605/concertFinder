@@ -112,6 +112,13 @@ type SendDigestArgs struct {
 
 func (SendDigestArgs) Kind() string { return "send_digest" }
 
+// InsertOpts bounds retries, for the reason EmailMaxAttempts records: the
+// ledger is now written after a successful send, so a retry is a real SMTP
+// attempt rather than the silent no-op it used to be.
+func (SendDigestArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: EmailMaxAttempts}
+}
+
 // FanoutSendDigestArgs is the periodic-tick counterpart: finds opted-in
 // users with a stored email and enqueues one SendDigestArgs each.
 type FanoutSendDigestArgs struct{}
@@ -135,6 +142,11 @@ type SendInstantNotifyArgs struct {
 }
 
 func (SendInstantNotifyArgs) Kind() string { return "send_instant_notify" }
+
+// InsertOpts bounds retries; see SendDigestArgs.InsertOpts.
+func (SendInstantNotifyArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: EmailMaxAttempts}
+}
 
 // SendPushArgs delivers APNs notifications for a specific set of
 // newly-discovered concerts belonging to subscribed artists. Enqueued by the
