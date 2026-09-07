@@ -18,3 +18,5 @@ dist
 .claude/settings.local.json
 .claude/.current-story
 .claude/.nudged
+.claude/launch-control.local.json
+.claude/_pre-plugin/
