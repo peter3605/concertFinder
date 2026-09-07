@@ -16,3 +16,5 @@ dist
 .idea/
 .vscode/
 .claude/settings.local.json
+.claude/.current-story
+.claude/.nudged

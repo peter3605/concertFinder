@@ -749,3 +749,53 @@ When proposing or implementing work, check which phase it belongs to before expa
 - **Phase 3:** AWS single-instance deployment (EC2 t4g.small + Neon Postgres, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. The database was RDS db.t4g.micro until it became the largest line on the bill (~$14/mo); Neon's free plan replaced it, with nightly `pg_dump` to S3 (`scripts/backup-db.sh`) standing in for the 7-day RDS retention that was given up. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 
 If a request would pull Phase 2/3 work into Phase 1, flag it rather than silently expanding.
+
+---
+
+## Launch Control — work is tracked in Notion
+
+This repo's remaining work lives in the **Launch Control** workspace in Notion, not in the
+markdown plans under `docs/`. Those documents are still the reference for *how* to do
+things; Notion is the record of *what is left* and *what counts as finished*. Where the two
+disagree, Notion wins — several of the docs here are demonstrably stale, and one of the
+stories exists specifically to fix that.
+
+Story IDs for this project are prefixed **`CF-`**. Connection details are in
+`.claude/launch-control.json`.
+
+### The loop
+
+| | |
+|---|---|
+| `/next` | Pull the next unblocked story a session can actually do |
+| `/mine` | The launch blockers only YOU can do, longest lead time first |
+| `/start CF-01` | Claim one, flip it to In Progress, load its Done-when and traps |
+| `/done` | Verify the acceptance criteria, tick it off, unblock what was waiting |
+| `/status` | Where this project stands |
+| `/groom <thing>` | File something you discovered mid-session |
+| `/reconcile` | Re-check open stories against the actual repo and correct the board |
+
+### Rules
+
+- **Bind before you build.** Substantive work should be attached to a story. If the user
+  asks for something that is not on the backlog, `/groom` it first, then `/start` it. One
+  session, one story.
+- **Done means the criteria are met, not that the code is written.** `/done` re-reads the
+  story's **Done when** field and actually runs whatever verifies it. If a clause is not
+  satisfied, say which one and leave the story open. Never tick something off to be tidy.
+- **Read the traps field.** Every story carries a **Notes and traps** field holding what
+  the audit found — the silent failure modes, the ordering traps, the things that already
+  cost days once. It is not decoration.
+- **Code ships through a PR.** `/done` branches as `cf-01-short-slug`, commits with the
+  story ID leading the subject, pushes, opens a PR, and waits for CI. **`/done` never merges here** — merging to `main` deploys to production. It stops at a green PR with the story in `In Review`; you merge when you want to ship.
+  A story stays `In Review` while its PR is open — it is not Done until the code is on `main`,
+  and a story in `In Review` unblocks nothing.
+- **CI is evaluated, not delegated.** Never `gh pr merge --auto`, never `--admin`. Zero checks
+  having run is not a pass.
+- **Keep the tracker honest.** If you learn something that makes another story wrong,
+  update that story too. A stale tracker is the problem this replaced.
+- **Dependencies are a relation, not text.** `Blocked by` holds page links; `Blocked by IDs`
+  and `Blocker status` are rollups that render in Notion but return opaque handles to the API.
+  `Status = Ready` already means unblocked — treat the relation as the check, not the lookup.
+- Prefer Notion `query_data_sources` in **view mode** — it is unquota'd on this plan.
+  SQL mode is metered.
