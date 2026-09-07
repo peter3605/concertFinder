@@ -627,3 +627,28 @@ func TestSearchEventsKeepsEarlierPagesWhenALaterOneFails(t *testing.T) {
 		t.Errorf("got %d events, want the 4 from pages 0 and 1", len(evs))
 	}
 }
+
+// The acceptance criterion for CF-B3, stated literally: more than 100 events
+// in radius are no longer silently truncated. Two full pages at the API's
+// maximum size is the shape the bug actually took -- size=100 with no page
+// parameter returned exactly the first 100 and reported nothing amiss.
+func TestSearchEventsReturnsMoreThanOnePageOfEvents(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 2, eventsPageSize))
+	permits := 0
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if !complete {
+		t.Error("complete = false; both pages were available and permitted")
+	}
+	if len(evs) <= eventsPageSize {
+		t.Fatalf("got %d events, want more than one page (%d) -- this is the truncation CF-B3 fixes", len(evs), eventsPageSize)
+	}
+	if len(evs) != 2*eventsPageSize {
+		t.Errorf("got %d events, want %d", len(evs), 2*eventsPageSize)
+	}
+	if rec.count() != 2 || permits != 1 {
+		t.Errorf("made %d requests having asked %d permits, want 2 and 1", rec.count(), permits)
+	}
+}
