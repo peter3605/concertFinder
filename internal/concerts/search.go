@@ -504,12 +504,48 @@ func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID str
 	if !rate.Allow(ctx, rate.SourceTicketmaster) {
 		return nil, errRateCapped
 	}
-	evs, err := d.TM.SearchEvents(ctx, attractionID, loc.Latitude, loc.Longitude, loc.RadiusMiles)
+	// One permit per upstream request, not one per artist. SearchEvents
+	// follows pagination for an attraction with more than a page of events in
+	// radius, and each of those pages is its own request against the account's
+	// Ticketmaster allowance — charging a single permit for all of them is the
+	// mistake that made RATE_CAP_SONGKICK_PER_USER_DAILY mean half its stated
+	// number. The permit above covers page 0; this covers every page after it.
+	//
+	// A refusal is not an error here: page 0 already succeeded, so there are
+	// real events to return. It is recorded as a denial on the reservation,
+	// which rate.Reservations.AnyExhausted reports at the top of Search and
+	// which becomes IncompleteError.RateCapped — so the snapshot is marked
+	// incomplete and retried after the UTC day rolls over, without this call
+	// site having to say anything.
+	morePages := func() bool { return rate.Allow(ctx, rate.SourceTicketmaster) }
+
+	evs, complete, err := d.TM.SearchEvents(ctx, attractionID, loc.Latitude, loc.Longitude, loc.RadiusMiles, morePages)
 	if err != nil {
-		return nil, fmt.Errorf("tm: %w", err)
+		if len(evs) == 0 {
+			return nil, fmt.Errorf("tm: %w", err)
+		}
+		// Partial: a later page failed after earlier ones succeeded. Keep what
+		// arrived, but it must not be cached below.
+		//
+		// Deliberately not returned as an error, and so not counted toward
+		// scan incompleteness: one artist's transient 5xx would mark the whole
+		// snapshot stale and re-run a 200-artist scan, which is the rescan
+		// loop the fallback-budget note warns about. Skipping the cache write
+		// is the cheaper fix and it self-heals — the next scan re-fetches this
+		// artist from scratch instead of being answered by a truncated entry.
+		// A quota refusal is the case that genuinely cannot self-heal today,
+		// and that one does mark the scan incomplete, via the denial above.
+		slog.Warn("tm events partially fetched",
+			"attraction", attractionID, "events", len(evs), "err", err)
 	}
-	if blob, err := json.Marshal(evs); err == nil {
-		_ = db.SaveCachedConcerts(ctx, d.Pool, key, blob)
+	// Only a complete result may be cached. A truncated one written here would
+	// be served for the whole CacheTTL (12h), which turns a transient quota
+	// refusal or a failed page into a short listing that no later scan can
+	// correct — the cache would keep answering before the fetch is reached.
+	if complete {
+		if blob, err := json.Marshal(evs); err == nil {
+			_ = db.SaveCachedConcerts(ctx, d.Pool, key, blob)
+		}
 	}
 	return evs, nil
 }

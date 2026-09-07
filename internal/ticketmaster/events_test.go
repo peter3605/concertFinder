@@ -2,7 +2,9 @@ package ticketmaster
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +12,7 @@ import (
 
 func TestSearchEventsParsesStartAcrossTimezonesAndTBA(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_dates.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
@@ -83,7 +85,7 @@ func TestSearchEventsParsesStartAcrossTimezonesAndTBA(t *testing.T) {
 // UTC days purely because one has a published time and the other does not.
 func TestSearchEventsStartIsAnInstantNotALocalCalendarDay(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_dates.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
@@ -106,7 +108,7 @@ func TestSearchEventsStartIsAnInstantNotALocalCalendarDay(t *testing.T) {
 
 func TestSearchEventsExtractsTheWholeLineupInOrder(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_lineup.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestSearchEventsExtractsTheWholeLineupInOrder(t *testing.T) {
 
 func TestSearchEventsReadsFestivalFromClassificationNotName(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_festival.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
@@ -233,7 +235,7 @@ func TestSearchEventsReadsFestivalFromClassificationNotName(t *testing.T) {
 
 func TestSearchEventsMapsVenueWithCodeFallbacks(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_venue.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestSearchEventsMapsVenueWithCodeFallbacks(t *testing.T) {
 // not.
 func TestSearchEventsHandlesAnEmptyResultSet(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_empty.json"))
-	evs, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("an empty result set is not an error: %v", err)
 	}
@@ -304,7 +306,7 @@ func TestSearchEventsHandlesAnEmptyResultSet(t *testing.T) {
 // tribute acts under the artist's name.
 func TestSearchEventsFiltersByAttractionIDNotKeyword(t *testing.T) {
 	c, rec := newTestAPI(t, serveFixture(t, "events_empty.json"))
-	if _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius); err != nil {
+	if _, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil); err != nil {
 		t.Fatalf("SearchEvents: %v", err)
 	}
 	reqs := rec.requests()
@@ -340,7 +342,7 @@ func TestSearchEventsSkipsTheCallWhenThereIsNoAttractionID(t *testing.T) {
 		t.Error("SearchEvents contacted the API with an empty attractionId")
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	evs, err := c.SearchEvents(context.Background(), "", testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(context.Background(), "", testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("an empty attractionId is not an error: %v", err)
 	}
@@ -359,7 +361,7 @@ func TestSearchEventsErrorDoesNotLeakTheAPIKey(t *testing.T) {
 	c, _ := newTestAPI(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "denied", http.StatusForbidden)
 	})
-	_, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	_, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -379,7 +381,7 @@ func TestSearchEventsReportsAMalformedBody(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("{not json"))
 	})
-	_, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius)
+	_, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err == nil {
 		t.Fatal("expected a decode error")
 	}
@@ -388,5 +390,240 @@ func TestSearchEventsReportsAMalformedBody(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("api key leaked into error: %q", err)
+	}
+}
+
+// --- pagination (CF-B3) ---------------------------------------------------
+
+// pagedEvents serves a synthetic result set spread over totalPages, reading
+// the requested page from the query string. Generated rather than kept in
+// testdata because these assertions are about how many requests the client
+// makes and what it asks for, not about decoding a recorded body -- and a
+// ten-page fixture set would be ten near-identical files.
+func pagedEvents(t *testing.T, totalPages, perPage int) func(http.ResponseWriter, *http.Request) {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		page := 0
+		if p := r.URL.Query().Get("page"); p != "" {
+			var err error
+			if page, err = strconv.Atoi(p); err != nil {
+				t.Errorf("page parameter %q is not a number", p)
+			}
+		}
+		var b strings.Builder
+		fmt.Fprint(&b, `{"_embedded":{"events":[`)
+		for i := 0; i < perPage; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"id":"p%de%d","name":"Show %d-%d",`, page, i, page, i)
+			fmt.Fprint(&b, `"dates":{"start":{"dateTime":"2026-09-16T03:00:00Z"}},`)
+			fmt.Fprint(&b, `"_embedded":{"venues":[{"name":"Test Room","city":{"name":"Washington"}}]}}`)
+		}
+		fmt.Fprintf(&b, `]},"page":{"size":100,"totalElements":%d,"totalPages":%d,"number":%d}}`,
+			totalPages*perPage, totalPages, page)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(b.String()))
+	}
+}
+
+// allowAll is a PagePermit that never refuses, plus a counter. The count is
+// the assertion that matters most in this file: it is how many permits the
+// production call site would have spent.
+func allowAll(n *int) PagePermit {
+	return func() bool { *n++; return true }
+}
+
+// The bug this story fixes: size=100 with no page parameter meant an
+// attraction with more than one page of events in radius had the remainder
+// dropped with no error and no log. A residency or a festival act is the real
+// case; the failure presented as a short listing that looked complete.
+func TestSearchEventsFollowsPagination(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 3, 2))
+	permits := 0
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if !complete {
+		t.Error("complete = false, want true -- every page was fetched")
+	}
+	if len(evs) != 6 {
+		t.Fatalf("got %d events across 3 pages of 2, want 6", len(evs))
+	}
+	if n := rec.count(); n != 3 {
+		t.Fatalf("made %d requests, want 3 (one per page)", n)
+	}
+	// Page 0 must not carry a page parameter: the first request stays
+	// byte-for-byte what it was before pagination existed.
+	if q := rec.requests()[0].Query(); q.Has("page") {
+		t.Errorf("first request carried page=%q; it should be omitted", q.Get("page"))
+	}
+	for i, want := range []string{"1", "2"} {
+		if got := rec.requests()[i+1].Query().Get("page"); got != want {
+			t.Errorf("request %d asked for page=%q, want %q", i+2, got, want)
+		}
+	}
+	// Every page goes through the same decoder, so a later page's events are
+	// as fully populated as the first one's.
+	byID := eventsByID(evs)
+	last, ok := byID["p2e1"]
+	if !ok {
+		t.Fatal("the last event of the last page is missing")
+	}
+	if last.Venue.Name != "Test Room" || last.Venue.City != "Washington" {
+		t.Errorf("page 2 event decoded thinly: venue=%q city=%q", last.Venue.Name, last.Venue.City)
+	}
+	if last.Start.IsZero() {
+		t.Error("page 2 event has no start time")
+	}
+}
+
+// Quota is charged per upstream request. Every page after the first asks the
+// permit exactly once, which is what keeps RATE_CAP_TM_* meaning the number
+// it states -- the Songkick two-request lookup charging a single permit is
+// the precedent this avoids repeating.
+func TestSearchEventsChargesOnePermitPerExtraPage(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 4, 1))
+	permits := 0
+	if _, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits)); err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	// 4 requests, of which the caller pre-paid the first.
+	if rec.count() != 4 {
+		t.Fatalf("made %d requests, want 4", rec.count())
+	}
+	if permits != 3 {
+		t.Errorf("asked the permit %d times, want 3 (one per request after the first)", permits)
+	}
+}
+
+// A refused permit is the daily cap being reached mid-artist. It must keep the
+// pages already paid for and report the result incomplete -- never discard
+// them, and never report success. complete=false is what stops the caller
+// caching a truncated set for the full 12h TTL.
+func TestSearchEventsStopsAndReportsIncompleteWhenThePermitRefuses(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 5, 2))
+	calls := 0
+	permit := func() bool { calls++; return calls <= 1 } // allow page 1, refuse page 2
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, permit)
+	if err != nil {
+		t.Fatalf("a refused permit is not an error: %v", err)
+	}
+	if complete {
+		t.Error("complete = true after pagination was cut short; the caller would cache a truncated result")
+	}
+	if rec.count() != 2 {
+		t.Fatalf("made %d requests, want 2 (page 0 pre-paid, page 1 permitted, page 2 refused)", rec.count())
+	}
+	if len(evs) != 4 {
+		t.Errorf("got %d events, want 4 -- the pages already fetched must be kept", len(evs))
+	}
+}
+
+// A nil permit fetches the first page only. The safe default direction: an
+// unpermitted caller under-reads one artist rather than silently overspending
+// an allowance shared by every user of the deployment. It is still not silent
+// -- complete is false.
+func TestSearchEventsWithNilPermitFetchesOnePageAndSaysSo(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 3, 2))
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if complete {
+		t.Error("complete = true with 2 pages left unfetched")
+	}
+	if rec.count() != 1 {
+		t.Errorf("made %d requests with a nil permit, want 1", rec.count())
+	}
+	if len(evs) != 2 {
+		t.Errorf("got %d events, want the 2 on page 0", len(evs))
+	}
+}
+
+// A single-page result is complete and costs exactly one request. This is the
+// overwhelmingly common case -- an ordinary touring artist -- and it must not
+// have become more expensive: CallsPerArtistColdScan (2) is sized on it.
+func TestSearchEventsSinglePageIsCompleteAndCostsOneRequest(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 1, 3))
+	permits := 0
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if !complete {
+		t.Error("a single-page result must report complete")
+	}
+	if rec.count() != 1 || permits != 0 {
+		t.Errorf("made %d requests and asked %d permits, want 1 and 0", rec.count(), permits)
+	}
+	if len(evs) != 3 {
+		t.Errorf("got %d events, want 3", len(evs))
+	}
+}
+
+// totalPages is 0 on an empty result set. Reading that as "keep going" would
+// loop to MaxEventPages spending a permit each time, for an artist with no
+// shows at all -- the most common outcome of a cold scan.
+func TestSearchEventsEmptyResultDoesNotPaginate(t *testing.T) {
+	c, rec := newTestAPI(t, serveFixture(t, "events_empty.json"))
+	permits := 0
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if !complete {
+		t.Error("an empty result set is complete, not truncated")
+	}
+	if len(evs) != 0 {
+		t.Errorf("got %d events, want 0", len(evs))
+	}
+	if rec.count() != 1 || permits != 0 {
+		t.Errorf("made %d requests and asked %d permits on an empty result, want 1 and 0", rec.count(), permits)
+	}
+}
+
+// MaxEventPages is the Discovery API's own deep-paging ceiling (page*size <=
+// 1000). A server claiming more pages than that must not drag the client past
+// it: page 10 would spend a permit to be refused by TM.
+func TestSearchEventsStopsAtMaxEventPages(t *testing.T) {
+	c, rec := newTestAPI(t, pagedEvents(t, 999, 1))
+	permits := 0
+	_, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if complete {
+		t.Error("complete = true after stopping at the page bound")
+	}
+	if rec.count() != MaxEventPages {
+		t.Errorf("made %d requests, want MaxEventPages (%d)", rec.count(), MaxEventPages)
+	}
+}
+
+// A later page failing keeps the earlier pages. Discarding them would throw
+// away results already paid for in quota, and would turn a partial answer into
+// "TM has nothing" -- which escalates the artist into the far more expensive
+// Phase 2 fallback chain.
+func TestSearchEventsKeepsEarlierPagesWhenALaterOneFails(t *testing.T) {
+	serve := pagedEvents(t, 4, 2)
+	c, _ := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		serve(w, r)
+	})
+	permits := 0
+	evs, complete, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, allowAll(&permits))
+	if err == nil {
+		t.Fatal("a failed page must be reported, not swallowed")
+	}
+	if complete {
+		t.Error("complete = true despite a failed page")
+	}
+	if len(evs) != 4 {
+		t.Errorf("got %d events, want the 4 from pages 0 and 1", len(evs))
 	}
 }
