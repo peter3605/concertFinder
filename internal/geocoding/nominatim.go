@@ -24,10 +24,13 @@ const NominatimEndpoint = "https://nominatim.openstreetmap.org/search"
 // UA they can't act on is a block, which would take venue geocoding down
 // with no error we control.
 //
-// The previous default named a repository that does not exist
-// (github.com/peterho/... — the real one is peter3605), so it satisfied the
-// letter of the policy and none of its purpose.
-const defaultUserAgent = "ConcertFinder/1.0 (+https://github.com/peter3605/concertFinder)"
+// It names the site rather than the source repository, and the distinction is
+// the whole point: the policy wants somewhere an operator can complain BEFORE
+// they block us, and a repository is somewhere to read code. An earlier
+// version of this string was worse still: it was go.mod's module path pasted
+// into a URL, and that path's owner has never existed — but correcting the
+// owner only made the link resolve, not answer.
+const defaultUserAgent = "ConcertFinder/1.0 (+https://concertfinder.app)"
 
 // ErrNotFound signals a successful call that yielded no match.
 var ErrNotFound = errors.New("geocoding: not found")
