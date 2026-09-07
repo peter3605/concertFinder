@@ -147,13 +147,38 @@ jobs:
 
       # The database-backed tests skip silently without TEST_DATABASE_URL, so
       # assert they actually ran rather than trusting a green suite.
+      #
+      # The package list is DISCOVERED, not written down. This step used to
+      # name one test in internal/db, which was correct when that was the only
+      # database-backed package and quietly stopped being correct twice:
+      # internal/http gained the admin-gate tests and internal/jobs the
+      # sent-ledger ones, and neither was covered. A skipped test and a passing
+      # test are the same colour, so nothing said so.
+      #
+      # Every one of these helpers skips with the same string, so grepping the
+      # sources for it finds the packages, and grepping the output for it
+      # catches a skip. A package that gains a database-backed test later is
+      # covered without anyone remembering this step exists.
+      #
+      # -count=1 because a cached result replays the previous run's output, and
+      # this check is about what happened on this run.
       - name: Assert the database-backed tests were not skipped
         run: |
           set -euo pipefail
-          out=$(go test ./internal/db/ -run TestBothChannelsDeliverTheSameShow -v)
-          echo "$out"
-          if echo "$out" | grep -q -- "--- SKIP"; then
-            echo "::error::internal/db tests skipped — TEST_DATABASE_URL is not reaching the job, so the ledger channel guard did not run"
+          marker='TEST_DATABASE_URL not set'
+          # grep -rl already returns ./-prefixed paths; normalise rather
+          # than prepend, or the list reads as ././internal/db.
+          pkgs=$(grep -rl "$marker" --include='*_test.go' . \
+                 | xargs -n1 dirname | sort -u | sed -e 's|^\./||' -e 's|^|./|')
+          if [ -z "$pkgs" ]; then
+            echo "::error::found no database-backed tests to assert on; the skip marker changed"
+            exit 1
+          fi
+          echo "database-backed packages: $pkgs"
+          out=$(go test $pkgs -v -count=1)
+          if echo "$out" | grep -q -- "$marker"; then
+            echo "$out" | grep -B2 -- "$marker" || true
+            echo "::error::database-backed tests skipped — TEST_DATABASE_URL is not reaching the job, so those guards did not run"
             exit 1
           fi
 
