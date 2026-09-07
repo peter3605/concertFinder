@@ -192,3 +192,40 @@ func TestSongkickUserAgent(t *testing.T) {
 		t.Errorf("hand-built client sent %q, want the package default", got)
 	}
 }
+
+// The MusicBrainz default is the one that drifted. fallback.UserAgent and
+// songkickUserAgent both moved to the site's own domain while this one kept a
+// GitHub URL, because all three were separate string literals with nothing
+// holding them together.
+func TestMusicBrainzUserAgent(t *testing.T) {
+	if got := NewMusicBrainzClient("").UserAgent; got != UserAgent {
+		t.Errorf("empty UA = %q, want the package default %q", got, UserAgent)
+	}
+	const ua = "ConcertFinder/1.0 (+https://example.test; ops@example.test)"
+	if got := NewMusicBrainzClient(ua).UserAgent; got != ua {
+		t.Errorf("UA = %q, want %q", got, ua)
+	}
+}
+
+// Every last-resort default in this package must name the same reachable
+// address. This is the guard the drift got past: MusicBrainz 403s a UA it
+// cannot act on and Nominatim's stated remedy for one is a block, so a default
+// that slips back to something unreachable produces no error and no log — just
+// artists that quietly stop resolving.
+func TestPackageUserAgentDefaultsAgree(t *testing.T) {
+	mb := NewMusicBrainzClient("").UserAgent
+	if songkickUserAgent != UserAgent {
+		t.Errorf("songkick default %q != package default %q", songkickUserAgent, UserAgent)
+	}
+	if mb != UserAgent {
+		t.Errorf("musicbrainz default %q != package default %q", mb, UserAgent)
+	}
+	for _, ua := range []string{UserAgent, songkickUserAgent, mb} {
+		if strings.Contains(ua, "github.com") {
+			t.Errorf("default UA %q points at a code repository, not a contact address", ua)
+		}
+		if !strings.Contains(ua, "concertfinder.app") {
+			t.Errorf("default UA %q names no address anyone can actually reach", ua)
+		}
+	}
+}
