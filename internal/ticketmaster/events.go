@@ -87,14 +87,62 @@ type eventsResp struct {
 			} `json:"_embedded"`
 		} `json:"events"`
 	} `json:"_embedded"`
+	// Page is Ticketmaster's own paging metadata. Decoding it is what makes
+	// truncation observable: without it the client cannot tell a complete
+	// 40-event answer from the first 100 of 250.
+	Page struct {
+		Size          int `json:"size"`
+		TotalElements int `json:"totalElements"`
+		TotalPages    int `json:"totalPages"`
+		Number        int `json:"number"`
+	} `json:"page"`
 }
+
+// MaxEventPages bounds how many events.json pages one SearchEvents will
+// fetch. Ten is not an arbitrary safety valve: the Discovery API refuses deep
+// paging past 1000 results, and at size=100 that is exactly pages 0-9. A loop
+// that trusted totalPages would spend a permit on page 10 to be told no.
+const MaxEventPages = 10
+
+// eventsPageSize is the API maximum. Kept as a constant because MaxEventPages
+// is derived from it -- the two only mean what they say together.
+const eventsPageSize = 100
+
+// PagePermit is consulted before each events.json request after the first.
+// Returning false stops pagination and hands back the pages already
+// collected.
+//
+// It exists because quota is charged per upstream request, and this package
+// deliberately knows nothing about the rate ledger -- the same split as
+// fallback.SongkickClient, which makes two requests while fallback.Chain is
+// what charges for them. The production caller passes a closure over
+// rate.Allow, so a refused page is recorded as a denial and surfaces as an
+// incomplete scan through the machinery that already exists.
+//
+// A nil PagePermit fetches the first page only. That is the safe direction to
+// default: an unpermitted caller under-reads one artist's listing, where the
+// alternative silently overspends an allowance shared by every user of the
+// deployment. Nothing is hidden either way -- complete is false whenever
+// pagination stopped early.
+type PagePermit func() bool
 
 // SearchEvents queries /events.json filtered by attraction, latlong, radius
 // (in miles), and classificationName=Music. Returns [] if the attractionId
 // is empty (caller pre-filtered).
-func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng float64, radiusMiles int) ([]Event, error) {
+//
+// complete reports whether the full result set was retrieved. It is false
+// when pagination stopped early -- the permit refused, MaxEventPages was
+// reached, or a later page failed -- and a caller that caches this result
+// must not cache it when false, or it stores the truncation for the life of
+// the cache entry.
+//
+// Before this followed pagination it set size=100 and read the first page
+// only, so an attraction with more than 100 dated events in radius (a
+// residency, a festival act) had the remainder silently dropped: no error, no
+// log, just a short listing.
+func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng float64, radiusMiles int, permit PagePermit) (events []Event, complete bool, err error) {
 	if attractionID == "" {
-		return nil, nil
+		return nil, true, nil
 	}
 	q := url.Values{}
 	q.Set("attractionId", attractionID)
@@ -102,21 +150,57 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 	q.Set("radius", strconv.Itoa(radiusMiles))
 	q.Set("unit", "miles")
 	q.Set("classificationName", "Music")
-	q.Set("size", "100")
+	q.Set("size", strconv.Itoa(eventsPageSize))
 	q.Set("countryCode", "US")
 	q.Set("apikey", c.APIKey)
-	u := APIBase + "/events.json?" + q.Encode()
 
-	body, _, err := c.doGETRetry(ctx, u)
-	if err != nil {
-		return nil, fmt.Errorf("tm events: %w", err)
+	var out []Event
+	for page := 0; page < MaxEventPages; page++ {
+		if page > 0 && (permit == nil || !permit()) {
+			return out, false, nil
+		}
+		// page=0 is the default; omitting it keeps the first request
+		// byte-for-byte what it has always been.
+		if page > 0 {
+			q.Set("page", strconv.Itoa(page))
+		}
+		u := APIBase + "/events.json?" + q.Encode()
+
+		body, _, err := c.doGETRetry(ctx, u)
+		if err != nil {
+			if page == 0 {
+				return nil, false, fmt.Errorf("tm events: %w", err)
+			}
+			// Later pages already cost permits and page 0 is real data.
+			// Report it incomplete rather than discarding the lot.
+			return out, false, fmt.Errorf("tm events page %d: %w", page, err)
+		}
+		var resp eventsResp
+		if err := json.Unmarshal(body, &resp); err != nil {
+			if page == 0 {
+				return nil, false, fmt.Errorf("decode tm events: %w", err)
+			}
+			return out, false, fmt.Errorf("decode tm events page %d: %w", page, err)
+		}
+		out = append(out, decodeEvents(resp)...)
+
+		// totalPages is 0 on an empty result set, which the loop must read as
+		// "nothing further", not as "keep going".
+		if resp.Page.TotalPages <= page+1 {
+			return out, true, nil
+		}
 	}
-	var out eventsResp
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode tm events: %w", err)
-	}
-	events := make([]Event, 0, len(out.Embedded.Events))
-	for _, e := range out.Embedded.Events {
+	// Fell out at MaxEventPages with pages still outstanding.
+	return out, false, nil
+}
+
+// decodeEvents turns one decoded page into Events, skipping the rows that
+// cannot be used. Split out of SearchEvents so every page goes through the
+// identical mapping -- a second copy for subsequent pages is how a field
+// stops being populated past the first 100 results.
+func decodeEvents(resp eventsResp) []Event {
+	events := make([]Event, 0, len(resp.Embedded.Events))
+	for _, e := range resp.Embedded.Events {
 		var start time.Time
 		if e.Dates.Start.DateTime != "" {
 			if t, err := time.Parse(time.RFC3339, e.Dates.Start.DateTime); err == nil {
@@ -175,5 +259,5 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 			Venue:      v,
 		})
 	}
-	return events, nil
+	return events
 }

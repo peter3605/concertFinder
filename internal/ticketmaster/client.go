@@ -27,6 +27,15 @@ const APIBase = "https://app.ticketmaster.com/discovery/v2"
 // exactly 250/250, writing a snapshot with 65 shows and complete=false. Cap
 // checks should measure against MaxScoredArtists * CallsPerArtistColdScan,
 // which is the cost of the scan that actually matters: a new user's first one.
+//
+// It is a typical cost, not a ceiling. SearchEvents follows pagination, so an
+// attraction with more than one page of events in radius costs a permit per
+// extra page — up to MaxEventPages. That is deliberately NOT folded into this
+// constant: doing so would multiply every cap by 10 to pay for the residency
+// acts and festival attractions that are the rare case, when the ordinary
+// artist still costs exactly two. The extra pages are permitted individually
+// at the call site, so they are charged honestly and a scan that runs out
+// stops paging instead of overspending.
 const CallsPerArtistColdScan = 2
 
 const (

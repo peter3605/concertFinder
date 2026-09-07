@@ -151,7 +151,7 @@ func TestArtistResolutionIsTwoStageAndNeverKeywordSearchesEvents(t *testing.T) {
 	if id == "" {
 		t.Fatal("stage 1 resolved nothing; the rest of the flow cannot run")
 	}
-	evs, err := c.SearchEvents(ctx, id, testLat, testLng, testRadius)
+	evs, _, err := c.SearchEvents(ctx, id, testLat, testLng, testRadius, nil)
 	if err != nil {
 		t.Fatalf("stage 2: %v", err)
 	}
