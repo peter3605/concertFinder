@@ -9,13 +9,28 @@ name: Deploy
 # nothing to deploy — without the filter it would still rebuild the image on
 # the 2 GB EC2 box and cycle the containers for a change the server cannot
 # see. ios.yml is what checks that directory.
+#
+# `.github/workflows/ios.yml` is excluded for exactly that reason and was
+# simply missed: it is the iOS workflow, but it does not live under `ios/`, so
+# the pattern above never caught it. Editing the iOS build was therefore
+# enough to redeploy the backend — which is the same wasted rebuild the
+# paragraph above exists to prevent, arriving through the one path it did not
+# cover.
+#
+# Note this is `paths-ignore`, not `paths`. Ignoring a directory the server
+# cannot see is safe; filtering *in* a list of backend paths would produce a
+# green merge whose checks never ran on what changed.
 on:
   push:
     branches: [main]
-    paths-ignore: ['ios/**']
+    paths-ignore:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
   pull_request:
     branches: [main]
-    paths-ignore: ['ios/**']
+    paths-ignore:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
   workflow_dispatch:
 
 # Least privilege by default. `id-token: write` is granted to the deploy job
