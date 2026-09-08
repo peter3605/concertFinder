@@ -8,11 +8,12 @@ import (
 func act(name string, hour int, venue string) Concert {
 	d := time.Date(2026, 7, 18, hour, 0, 0, 0, time.UTC)
 	return Concert{
-		Artist:   ArtistRef{ID: name, Name: name},
-		Date:     d,
-		Venue:    venue,
-		City:     "Chicago",
-		DedupKey: DedupKey(name, d, venue, "Chicago"),
+		Artist:    ArtistRef{ID: name, Name: name},
+		Date:      d,
+		LocalDate: "2026-07-18",
+		Venue:     venue,
+		City:      "Chicago",
+		DedupKey:  DedupKey(name, "2026-07-18", venue, "Chicago"),
 	}
 }
 
@@ -40,8 +41,8 @@ func TestGroupEventsMergesOneBill(t *testing.T) {
 // Different set times must NOT split a bill — the reason EventKey is
 // day-granular rather than using the full timestamp.
 func TestGroupEventsIgnoresSetTimes(t *testing.T) {
-	if EventKey(act("A", 14, "Union Park").Date, "Union Park", "Chicago") !=
-		EventKey(act("B", 22, "Union Park").Date, "Union Park", "Chicago") {
+	if EventKey(act("A", 14, "Union Park").LocalDay(), "Union Park", "Chicago") !=
+		EventKey(act("B", 22, "Union Park").LocalDay(), "Union Park", "Chicago") {
 		t.Error("acts on the same day at the same venue must share an event key")
 	}
 }

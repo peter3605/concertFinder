@@ -558,6 +558,7 @@ func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 	c := Concert{
 		Artist:    artistRefFromScored(a),
 		Date:      e.Start,
+		LocalDate: e.LocalDate,
 		Venue:     e.Venue.Name,
 		City:      e.Venue.City,
 		State:     e.Venue.State,
@@ -574,6 +575,6 @@ func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
 		names = append(names, at.Name)
 	}
 	c.Billing = billingOf(names, a.Name)
-	c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
+	c.DedupKey = DedupKey(c.Artist.Name, c.LocalDay(), c.Venue, c.City)
 	return c
 }

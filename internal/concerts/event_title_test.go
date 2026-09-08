@@ -9,12 +9,13 @@ func titled(artist, eventName string, festival bool) Concert {
 	c := Concert{
 		Artist:     ArtistRef{Name: artist},
 		Date:       time.Date(2026, 9, 12, 20, 0, 0, 0, time.UTC),
+		LocalDate:  "2026-09-12",
 		Venue:      "9:30 Club",
 		City:       "Washington",
 		EventName:  eventName,
 		IsFestival: festival,
 	}
-	c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
+	c.DedupKey = DedupKey(c.Artist.Name, c.LocalDay(), c.Venue, c.City)
 	return c
 }
 

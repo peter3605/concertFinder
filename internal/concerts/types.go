@@ -90,7 +90,11 @@ type Event struct {
 	// Date is the earliest act's start time. Acts at one festival have
 	// their own set times, so this is a representative instant for sorting
 	// and month-grouping, not a claim about when any given act plays.
-	Date      time.Time    `json:"date"`
+	Date time.Time `json:"date"`
+	// LocalDate is the venue's calendar day, shared by every act here --
+	// it is half of EventKey, so acts that disagreed about it would not
+	// have grouped. See Concert.LocalDate.
+	LocalDate string       `json:"local_date,omitempty"`
 	Venue     string       `json:"venue"`
 	City      string       `json:"city"`
 	State     string       `json:"state,omitempty"`
@@ -114,8 +118,16 @@ type Event struct {
 // Concert is the canonical shape returned to the frontend. One row per
 // deduped (artist, date, venue, city).
 type Concert struct {
-	Artist    ArtistRef    `json:"artist"`
-	Date      time.Time    `json:"date"`
+	Artist ArtistRef `json:"artist"`
+	Date   time.Time `json:"date"`
+	// LocalDate is the calendar day at the venue, "2006-01-02", and is what
+	// DedupKey is built from. Date is the instant, which is a different
+	// question: a 20:00 Pacific show is on the 15th locally and the 16th in
+	// UTC, and it is the local answer that identifies the show.
+	//
+	// Additive on /api/me/* responses, so safe for iOS builds already
+	// shipped -- they ignore it and keep rendering Date.
+	LocalDate string       `json:"local_date,omitempty"`
 	Venue     string       `json:"venue"`
 	City      string       `json:"city"`
 	State     string       `json:"state,omitempty"`

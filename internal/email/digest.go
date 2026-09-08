@@ -70,9 +70,9 @@ func groupByMonth(es []concerts.Event) []monthGroup {
 	buckets := map[string][]concerts.Event{}
 	labels := map[string]string{}
 	for _, e := range es {
-		key := e.Date.Format("2006-01")
+		key := e.LocalDayTime().Format("2006-01")
 		buckets[key] = append(buckets[key], e)
-		labels[key] = e.Date.Format("January 2006")
+		labels[key] = e.LocalDayTime().Format("January 2006")
 	}
 	keys := make([]string, 0, len(buckets))
 	for k := range buckets {
@@ -97,7 +97,7 @@ func renderDigestText(displayName string, es []concerts.Event, unsub string) str
 		for _, e := range g.items {
 			fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
 				actsLine(e.Acts),
-				e.Date.Format("Mon Jan 2"),
+				e.LocalDayTime().Format("Mon Jan 2"),
 				e.Venue, e.City, stateSuffix(e.State),
 			)
 			for _, l := range e.Links {
@@ -127,7 +127,7 @@ func renderDigestHTML(displayName string, es []concerts.Event, unsub string) str
 					`<strong>%s</strong> · %s<br>`+
 					`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
 				html.EscapeString(actsLine(e.Acts)),
-				html.EscapeString(e.Date.Format("Mon Jan 2")),
+				html.EscapeString(e.LocalDayTime().Format("Mon Jan 2")),
 				html.EscapeString(e.Venue),
 				html.EscapeString(e.City),
 				html.EscapeString(stateSuffix(e.State)),
@@ -194,7 +194,7 @@ func renderInstantText(displayName string, es []concerts.Event, unsub string) st
 	for _, e := range es {
 		fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
 			actsLine(e.Acts),
-			e.Date.Format("Mon Jan 2, 2006"),
+			e.LocalDayTime().Format("Mon Jan 2, 2006"),
 			e.Venue, e.City, stateSuffix(e.State),
 		)
 		for _, l := range e.Links {
@@ -233,7 +233,7 @@ func renderInstantHTML(displayName string, es []concerts.Event, unsub string) st
 				`<strong>%s</strong> · %s<br>`+
 				`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
 			html.EscapeString(actsLine(e.Acts)),
-			html.EscapeString(e.Date.Format("Mon Jan 2, 2006")),
+			html.EscapeString(e.LocalDayTime().Format("Mon Jan 2, 2006")),
 			html.EscapeString(e.Venue),
 			html.EscapeString(e.City),
 			html.EscapeString(stateSuffix(e.State)),
