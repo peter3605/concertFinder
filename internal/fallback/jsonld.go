@@ -157,15 +157,16 @@ func toConcert(m map[string]any, pageURL, artistName string) (concerts.Concert, 
 		}
 	}
 	c := concerts.Concert{
-		Artist:  concerts.ArtistRef{Name: artistName},
-		Date:    start,
-		Venue:   venueName,
-		City:    city,
-		State:   state,
-		Country: country,
-		Links:   []concerts.TicketLink{{Source: concerts.SourceOfficial, URL: ticketURL}},
+		Artist:    concerts.ArtistRef{Name: artistName},
+		Date:      start,
+		LocalDate: concerts.LocalDateOf(start),
+		Venue:     venueName,
+		City:      city,
+		State:     state,
+		Country:   country,
+		Links:     []concerts.TicketLink{{Source: concerts.SourceOfficial, URL: ticketURL}},
 	}
-	c.DedupKey = concerts.DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
+	c.DedupKey = concerts.DedupKey(c.Artist.Name, c.LocalDay(), c.Venue, c.City)
 	return c, true
 }
 

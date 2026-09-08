@@ -448,7 +448,7 @@ func computeFacets(cs []concerts.Concert) facetSet {
 	venueEvents := map[string]map[string]struct{}{}
 	spellings := map[string]map[string]int{}
 	for _, c := range cs {
-		ek := concerts.EventKey(c.Date, c.Venue, c.City)
+		ek := concerts.EventKey(c.LocalDay(), c.Venue, c.City)
 		seen := map[string]bool{}
 		for _, g := range c.Artist.Genres {
 			if seen[g] {

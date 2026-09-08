@@ -280,9 +280,9 @@ func notificationFor(ev concerts.Event) push.Notification {
 	if len(ev.Acts) > 1 {
 		title = fmt.Sprintf("%s and %d more", title, len(ev.Acts)-1)
 	}
-	body := fmt.Sprintf("%s · %s", ev.Venue, ev.Date.Format("Mon, Jan 2"))
+	body := fmt.Sprintf("%s · %s", ev.Venue, ev.LocalDayTime().Format("Mon, Jan 2"))
 	if ev.City != "" {
-		body = fmt.Sprintf("%s, %s · %s", ev.Venue, ev.City, ev.Date.Format("Mon, Jan 2"))
+		body = fmt.Sprintf("%s, %s · %s", ev.Venue, ev.City, ev.LocalDayTime().Format("Mon, Jan 2"))
 	}
 	dedupKey := ev.Acts[0].DedupKey
 	return push.Notification{
@@ -295,11 +295,14 @@ func notificationFor(ev concerts.Event) push.Notification {
 				Sound:    "default",
 				ThreadID: "new-concerts",
 			},
-			EventKey:  ev.EventKey,
-			DedupKey:  dedupKey,
-			Artist:    ev.Acts[0].Artist.Name,
-			Venue:     ev.Venue,
-			EventDate: ev.Date.Format("2006-01-02"),
+			EventKey: ev.EventKey,
+			DedupKey: dedupKey,
+			Artist:   ev.Acts[0].Artist.Name,
+			Venue:    ev.Venue,
+			// The venue's calendar day, not the instant's. Formatting
+			// ev.Date named the UTC day, so a 20:00 Pacific show on the
+			// 15th pushed a notification reading the 16th.
+			EventDate: ev.LocalDay(),
 		},
 	}
 }

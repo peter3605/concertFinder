@@ -436,3 +436,49 @@ ships code, `terraform apply` ships infrastructure, and they are separate
 actions with separate failure modes. The hardening branch fixes the `.env`
 quoting that breaks the backup script; the apply installs the timer that runs
 it. Neither alone gives you a working nightly backup.
+
+### 13. Re-star your one saved show after CF-B1 deploys
+
+**One click, and only for you — no other user is affected.**
+
+CF-B1 changed how `dedup_key` is derived: from the UTC day of the event's
+instant to the venue's own calendar day. That fix is the point, but the key
+is the primary key of `concerts` and half of `user_saved_concerts`', so a
+show already saved under the old key stops matching once the next scan
+re-keys it. Migration 0003 records how that presents: "orphan saves (concert
+no longer in the snapshot) are invisible to the user without any proactive
+cleanup." The star does not error. It just quietly stops being there.
+
+No backfill was written, and the counts are why. Measured on 2026-09-08,
+immediately before the change:
+
+| table | rows |
+|---|---|
+| `user_saved_concerts` | 1 |
+| distinct users holding a save | 1 (the operator) |
+| `user_digest_sent` | 0 |
+
+With an empty sent-ledger there is nothing to re-notify, so the expensive
+half of the problem does not exist yet. A re-key backfill would have been new
+code on the save path, untestable against the single row it existed for, to
+protect one star belonging to the person who could re-add it in a second.
+That trade is only correct at these numbers — it is the same "cheapest to fix
+while there are almost no saves" argument the story was filed under, and it
+expires the moment real users start saving things.
+
+Check whether it actually orphaned (read-only):
+
+```sql
+SELECT s.dedup_key, s.saved_at, c.dedup_key IS NOT NULL AS still_resolves
+FROM user_saved_concerts s
+LEFT JOIN concerts c ON c.dedup_key = s.dedup_key;
+```
+
+`still_resolves = false` means the show has been re-keyed and the star is
+gone from the feed. Open the app and star it again — there is nothing to run.
+
+**If this section is ever reached with more than a handful of saves, stop and
+write the backfill instead.** The mechanism is a one-shot job matching saved
+keys to freshly-scanned rows on (artist, venue, city) within ±1 day, since
+the venue-local day is either the stored UTC day or the one before it. It was
+not built because it was not yet worth building, not because it is hard.

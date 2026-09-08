@@ -43,10 +43,10 @@ func TestSearchEventsParsesStartAcrossTimezonesAndTBA(t *testing.T) {
 			why:  "timeTBA events carry no dateTime at all, so localDate is the only signal",
 		},
 		{
-			name: "an undecodable dateTime falls back to localDate rather than dropping the show",
+			name: "an undecodable dateTime is recovered from localTime and the venue's zone",
 			id:   "vvG1zZ9malformed",
-			want: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
-			why:  "the RFC3339 parse error is swallowed on purpose; a bad time must not cost us the date",
+			want: time.Date(2026, 10, 3, 0, 30, 0, 0, time.UTC),
+			why:  "19:30 Chicago on 2026-10-02 is 00:30Z the next day; the RFC3339 parse error is still swallowed, but localTime+timezone now recover the instant instead of settling for midnight",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,18 +72,22 @@ func TestSearchEventsParsesStartAcrossTimezonesAndTBA(t *testing.T) {
 	}
 }
 
-// Start is an instant, not a calendar day, and the two disagree for almost
-// every US evening show. concerts.DedupKey and concerts.EventKey both bucket
-// by date.UTC().Format("2006-01-02"), so the Pacific event below is keyed to
-// 2026-09-16 while Ticketmaster's own localDate for it is 2026-09-15.
+// Start is an instant and LocalDate is a calendar day, and the two disagree
+// for almost every US evening show. This test is the reason LocalDate exists.
 //
-// This test pins the behaviour rather than blessing it: the divergence is
-// reported separately, and the fix (if there is one) belongs downstream in
-// concerts, not here -- this package's job is to report the instant the API
-// gave us. What matters for a regression is that these two events, which are
-// the same local calendar day at the same venue, currently land on different
-// UTC days purely because one has a published time and the other does not.
-func TestSearchEventsStartIsAnInstantNotALocalCalendarDay(t *testing.T) {
+// It replaces one that pinned the opposite behaviour: Start was the only
+// date this package reported, concerts.DedupKey bucketed by
+// date.UTC().Format("2006-01-02"), and so the Pacific show below was keyed
+// to 2026-09-16 while Ticketmaster's own localDate for it was 2026-09-15.
+// The old test asserted that the timed and TBA shows landed on *different*
+// days and failed loudly if they ever agreed, precisely so that fixing it
+// could not pass unnoticed.
+//
+// Both events are the same night at the same venue, distinguished only by
+// whether TM has published a set time. Their instants still differ, which is
+// correct -- one is 03:00Z and the other is midnight. Their LocalDates must
+// not, because that is what identifies the show.
+func TestSearchEventsLocalDateIsTheVenuesCalendarDay(t *testing.T) {
 	c, _ := newTestAPI(t, serveFixture(t, "events_dates.json"))
 	evs, _, err := c.SearchEvents(context.Background(), "K8vZ917headline", testLat, testLng, testRadius, nil)
 	if err != nil {
@@ -91,18 +95,52 @@ func TestSearchEventsStartIsAnInstantNotALocalCalendarDay(t *testing.T) {
 	}
 	byID := eventsByID(evs)
 
-	const day = "2006-01-02"
-	timed := byID["vvG1zZ9pacific"].Start.UTC().Format(day)
-	tba := byID["vvG1zZ9timetba"].Start.UTC().Format(day)
+	timed := byID["vvG1zZ9pacific"]
+	tba := byID["vvG1zZ9timetba"]
 
-	if timed != "2026-09-16" {
-		t.Errorf("timed Pacific show buckets to %s, want 2026-09-16 (TM localDate is 2026-09-15)", timed)
+	if timed.LocalDate != "2026-09-15" {
+		t.Errorf("timed Pacific show has LocalDate %q, want 2026-09-15 (its instant is 03:00Z on the 16th, which is what used to key it)", timed.LocalDate)
 	}
-	if tba != "2026-09-15" {
-		t.Errorf("TBA show at the same venue buckets to %s, want 2026-09-15", tba)
+	if tba.LocalDate != "2026-09-15" {
+		t.Errorf("TBA show has LocalDate %q, want 2026-09-15", tba.LocalDate)
 	}
-	if timed == tba {
-		t.Error("this test has stopped describing the code; re-read the divergence it documents")
+	if timed.LocalDate != tba.LocalDate {
+		t.Error("two shows on the same local night at the same venue disagree about the day; publishing a set time has moved the dedup key again")
+	}
+	// The instants are still allowed -- required, even -- to differ.
+	if timed.Start.Equal(tba.Start) {
+		t.Error("Start has stopped being an instant; LocalDate is the calendar day, Start is not")
+	}
+	// Every datable event carries one, or DedupKey silently falls back to
+	// rendering the instant and the bug returns for that row alone.
+	for _, e := range evs {
+		if e.LocalDate == "" {
+			t.Errorf("event %s has no LocalDate", e.ID)
+		}
+	}
+}
+
+// A timeTBA event gaining a published set time must not move its dedup key.
+//
+// This is the half of the bug with teeth: dedup_key is the primary key of
+// `concerts` and half of user_saved_concerts', so a key that moves orphans
+// the user's save and re-notifies them through user_digest_sent about a show
+// they were already told about. Before LocalDate the key was derived from
+// Start, which jumps from midnight UTC to 03:00Z the next day the moment TM
+// publishes the time.
+func TestLocalDateSurvivesATBAEventGainingASetTime(t *testing.T) {
+	const (
+		localDate = "2026-09-15"
+		tz        = "America/Los_Angeles"
+	)
+	before, beforeDay := startAndLocalDate("", localDate, "", tz)
+	after, afterDay := startAndLocalDate("2026-09-16T03:00:00Z", localDate, "20:00:00", tz)
+
+	if beforeDay != localDate || afterDay != localDate {
+		t.Fatalf("local day moved: %q -> %q, want %q both times", beforeDay, afterDay, localDate)
+	}
+	if before.Equal(after) {
+		t.Error("the instant should sharpen from midnight to 20:00 local; if it does not, the set time was ignored")
 	}
 }
 

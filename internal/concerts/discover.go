@@ -109,6 +109,7 @@ func discoverConcerts(e ticketmaster.Event) []Concert {
 		c := Concert{
 			Artist:    ArtistRef{Name: name},
 			Date:      e.Start,
+			LocalDate: e.LocalDate,
 			Venue:     e.Venue.Name,
 			City:      e.Venue.City,
 			State:     e.Venue.State,
@@ -121,7 +122,7 @@ func discoverConcerts(e ticketmaster.Event) []Concert {
 			IsFestival: e.IsFestival,
 		}
 		c.Billing = billingOf(names, name)
-		c.DedupKey = DedupKey(c.Artist.Name, c.Date, c.Venue, c.City)
+		c.DedupKey = DedupKey(c.Artist.Name, c.LocalDay(), c.Venue, c.City)
 		out = append(out, c)
 	}
 	return out

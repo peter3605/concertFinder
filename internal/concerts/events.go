@@ -11,13 +11,14 @@ func GroupEvents(cs []Concert) []Event {
 	events := make([]Event, 0, len(cs))
 	idx := make(map[string]int, len(cs))
 	for _, c := range cs {
-		key := EventKey(c.Date, c.Venue, c.City)
+		key := EventKey(c.LocalDay(), c.Venue, c.City)
 		i, ok := idx[key]
 		if !ok {
 			idx[key] = len(events)
 			events = append(events, Event{
 				EventKey:   key,
 				Date:       c.Date,
+				LocalDate:  c.LocalDay(),
 				Venue:      c.Venue,
 				City:       c.City,
 				State:      c.State,
@@ -110,7 +111,7 @@ func actOf(c Concert) Act {
 func CountEventKeys(cs []Concert) int {
 	seen := make(map[string]struct{}, len(cs))
 	for _, c := range cs {
-		seen[EventKey(c.Date, c.Venue, c.City)] = struct{}{}
+		seen[EventKey(c.LocalDay(), c.Venue, c.City)] = struct{}{}
 	}
 	return len(seen)
 }

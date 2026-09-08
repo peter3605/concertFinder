@@ -508,11 +508,44 @@ the quota guard, since that scan is guaranteed to come back capped.
 ## Deduplication (design §6)
 
 ```
-dedup_key = sha256(normalize(artist) + iso_date(dt) + normalize(venue) + normalize(city))
+dedup_key = sha256(normalize(artist) + local_date + normalize(venue) + normalize(city))
 normalize = lowercase → strip_punctuation → strip leading "the "/"a "/"an " → collapse whitespace
+local_date = the venue's calendar day, "2006-01-02", NOT the UTC day of the instant
 ```
 
 Records sharing a key merge into one canonical event with multiple ticket links sorted by source priority: artist's official site → Ticketmaster/Live Nation → Songkick/other → anything unrecognized (see `priorityOf`).
+
+**`local_date` is a string, carried from the source, and never derived from
+an instant at key time.** This read `iso_date(dt)` over `date.UTC()` until
+CF-B1, and the two ways that broke are the reason the rule is stated this
+firmly. Ticketmaster sends `dates.start.dateTime` in UTC, so a 20:00 Pacific
+show on the 15th is 03:00Z on the 16th and was filed, grouped, emailed and
+pushed under a day it is not on. Worse, a `timeTBA` event has no `dateTime`
+at all, so it keyed off `localDate` until TM published a set time — and then
+the key *moved*. `dedup_key` is the primary key of `concerts` and half of
+`user_saved_concerts`', so a moved key orphans the save silently (migration
+0003: "orphan saves are invisible to the user without any proactive
+cleanup"), and `user_digest_sent` is keyed on it, so the user is re-notified
+about a show they were already told about.
+
+Three things hold the fix together. The day is a **string** because the key
+must survive JSONB *and* `TIMESTAMPTZ` unchanged — an offset on a
+`time.Time` survives the first and not the second, and a single `.UTC()`
+added downstream would reinstate the whole bug with no test failing.
+`concerts.LocalDay()` **falls back to the instant's own wall clock**, which
+reproduces the key a pre-`LocalDate` row was already stored under, so old
+snapshots keep grouping and old saves keep matching instead of every date at
+a venue folding into one event. And a timezone that will not load is
+**never** allowed to reach the day: the runtime image is distroless, so a
+missing zoneinfo would degrade every event at once and only in production —
+`localTime`+`dates.timezone` place `Start` on the venue's clock and nothing
+else, because losing the wall clock costs display precision while letting it
+reach the key costs saves.
+
+The rendering side is the same bug wearing a different hat: the digest and
+the push body format a calendar day, and formatting the instant announced
+evening shows under tomorrow's date. `Event.LocalDayTime()` exists for that
+and is display-only — never key off it.
 
 ## Event grouping (multi-artist bills)
 
@@ -523,7 +556,7 @@ date, venue, and city — one night out rendered as most of a screen. The
 `events[]`, not `concerts[]`: `concerts.GroupEvents` folds rows sharing
 
 ```
-event_key = sha256(iso_date(dt) + normalize(venue) + normalize(city))
+event_key = sha256(local_date + normalize(venue) + normalize(city))
 ```
 
 into one `Event` carrying an `Acts[]` list, with ticket links unioned and
@@ -539,9 +572,13 @@ deduped by URL.
   `dedup_key`, `saved`, and `subscribed`, and the card renders one
   star + bell pair per act. Subscribing patches that artist across *every*
   event in the list, since an artist can appear on several bills.
-- **`event_key` is day-granular on purpose.** Acts at one festival have
+- **`event_key` is day-granular on purpose, and it is the venue's day.**
+  Acts at one festival have
   different set times, so keying on the full timestamp would split exactly
-  the bills this exists to merge. The cost is that a venue string naming a
+  the bills this exists to merge — and keying on the *UTC* day did the same
+  thing to any festival whose sets straddle local midnight, since a 19:00
+  and a 23:30 slot on the west coast land on two different UTC days. The
+  cost is that a venue string naming a
   multi-room complex merges genuinely separate shows on the same night;
   that is the accepted trade, because the alternative loses every festival.
 - **Facets and `count` are counts of events, not artist matches.** The

@@ -166,15 +166,16 @@ func (c *SongkickClient) SearchArtistEvents(ctx context.Context, artistName stri
 			continue
 		}
 		concert := concerts.Concert{
-			Artist:  concerts.ArtistRef{Name: artistName},
-			Date:    dt,
-			Venue:   e.Venue.DisplayName,
-			City:    e.Venue.MetroArea.DisplayName,
-			State:   e.Venue.MetroArea.State.DisplayName,
-			Country: e.Venue.MetroArea.Country.DisplayName,
-			Links:   []concerts.TicketLink{{Source: concerts.SourceSongkick, URL: e.URI}},
+			Artist:    concerts.ArtistRef{Name: artistName},
+			Date:      dt,
+			LocalDate: concerts.LocalDateOf(dt),
+			Venue:     e.Venue.DisplayName,
+			City:      e.Venue.MetroArea.DisplayName,
+			State:     e.Venue.MetroArea.State.DisplayName,
+			Country:   e.Venue.MetroArea.Country.DisplayName,
+			Links:     []concerts.TicketLink{{Source: concerts.SourceSongkick, URL: e.URI}},
 		}
-		concert.DedupKey = concerts.DedupKey(concert.Artist.Name, concert.Date, concert.Venue, concert.City)
+		concert.DedupKey = concerts.DedupKey(concert.Artist.Name, concert.LocalDay(), concert.Venue, concert.City)
 		out = append(out, concert)
 	}
 	return out, nil
