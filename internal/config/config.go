@@ -158,8 +158,14 @@ type Config struct {
 	// emailed links point at. Validate checks both.
 	SiteDomain string
 
-	// ContactEmail is rendered on Privacy/Terms pages and used as the SES
-	// operator contact. Defaults to peter.ho433@gmail.com for local dev.
+	// ContactEmail is rendered on Privacy/Terms pages, used as the SES
+	// operator contact, and interpolated into the User-Agent sent to
+	// MusicBrainz and Nominatim. It has no default, deliberately: the one it
+	// used to have was a maintainer's personal address, so an unset variable
+	// in production published a private mailbox as the operator contact of a
+	// public, deployed service. There is no address that is correct for
+	// someone else's deployment, so Validate requires this rather than
+	// substituting anything.
 	ContactEmail string
 
 	// --- iOS client (docs/ios-app-plan.md Appendix A) ---
@@ -281,10 +287,7 @@ func Load() (*Config, error) {
 		c.SiteBaseURL = "https://127.0.0.1:3000"
 	}
 	c.SiteDomain = strings.TrimSpace(os.Getenv("SITE_DOMAIN"))
-	c.ContactEmail = os.Getenv("CONTACT_EMAIL")
-	if c.ContactEmail == "" {
-		c.ContactEmail = "peter.ho433@gmail.com"
-	}
+	c.ContactEmail = strings.TrimSpace(os.Getenv("CONTACT_EMAIL"))
 	c.APNSKeyID = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
 	c.APNSTeamID = strings.TrimSpace(os.Getenv("APNS_TEAM_ID"))
 	c.APNSBundleID = strings.TrimSpace(os.Getenv("APNS_BUNDLE_ID"))
@@ -418,6 +421,18 @@ func (c Config) Validate() []error {
 				"SITE_DOMAIN (%q) and the host in SITE_BASE_URL (%q) disagree — Caddy would serve a certificate for one name while every emailed link and the MusicBrainz/Nominatim User-Agent point at the other",
 				c.SiteDomain, base))
 		}
+	}
+
+	// Removing CONTACT_EMAIL's default is only half the fix. main.go
+	// interpolates this into the MusicBrainz/Nominatim User-Agent
+	// unconditionally, so an empty value sends
+	// "ConcertFinder/1.0 (+https://example.com; )" — and the sanction for a
+	// User-Agent they cannot act on is a block, which arrives as silence
+	// rather than as an error we raise. Load stays permissive for tests and
+	// half-configured checkouts; this is where a real boot is refused.
+	if strings.TrimSpace(c.ContactEmail) == "" {
+		errs = append(errs, errors.New(
+			"CONTACT_EMAIL is required — it is the operator contact shown on /privacy and /terms and the address in the MusicBrainz/Nominatim User-Agent, and both fail silently when it is empty"))
 	}
 
 	if c.EmailDeliveryMode == "smtp" {

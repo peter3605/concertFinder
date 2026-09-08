@@ -2,7 +2,7 @@
 # terraform.tfvars is gitignored — it holds real config, not example values.
 
 domain                  = "your-domain.example"        # apex you registered
-ses_verified_recipient  = "peter.ho433@gmail.com"     # gets the SES sandbox verification email
+ses_verified_recipient  = "you@your-domain.com"       # gets the SES sandbox verification email
 
 # Leave false for the first apply. The SES verification token does not exist
 # until that apply creates the identity, so the record proving the domain
