@@ -451,6 +451,34 @@ sub-second backoff (that turns a soft limit into a ban). Exponential
 backoff with jitter only when there is no usable `Retry-After`; 5xx exp
 backoff capped at 3 retries; never retry other 4xx.
 
+**"Usable" means both RFC 9110 §10.2.3 forms**, and the second one is easy
+to lose: `Retry-After` is *either* delta-seconds *or* an HTTP-date, and every
+client here read only the integer until CF-B2. A date parsed to zero, which
+is the same value as an absent header, so the response fell through to the
+very sub-second backoff the clamp above exists to prevent — the identical
+ban, reached by a different route and with nothing in the logs to tell them
+apart. The date form is not exotic: it is what a CDN or proxy in front of an
+API emits. Three properties hold the fix together. Parsing is measured
+against an explicitly passed `now` rather than calling `time.Now()` inside,
+so the date cases are testable as arithmetic. A date **in the past yields
+zero, never a negative duration** — negative fires the timer immediately,
+hot-looping the limiter that just refused us. And `http.ParseTime` is what
+does the work because it accepts all three spellings RFC 9110 requires a
+recipient to understand (IMF-fixdate, the obsolete RFC 850 form, asctime),
+which hand-rolling one layout would silently narrow. Note HTTP-date carries
+whole seconds only, so a date *n* seconds out is really in (*n*−1, *n*] —
+tests need margins wider than that truncation or they measure it instead.
+
+The parser is deliberately **duplicated** rather than shared: `retryAfter` in
+`internal/ticketmaster` and `internal/spotify`, `parseRetryAfter` in
+`internal/fallback` (one copy for Songkick and MusicBrainz, which share a
+package). Each external API owns its own client, per the no-shared-models
+rule, so nothing but a matching set of tests keeps the copies honest — there
+is one in each package, and they are meant to stay in step. Clamping stays at
+the call site because the ceilings differ: 30s for Ticketmaster, Spotify and
+Songkick, `mbMaxRetryAfter` (15s) for MusicBrainz, whose lookups are
+serialized behind a 1 req/sec turnstile inside a scan-wide budget.
+
 Frontend polling is bounded: `MAX_REFRESH_POLLS` caps a refresh at ~10
 minutes of 10s polls, and transient fetch errors retry with backoff instead
 of killing the loop or replacing already-loaded data with an error screen.
