@@ -1246,7 +1246,7 @@ environments.
 | `EMAIL_DELIVERY_MODE` | `log` | `log` writes to slog; `smtp` sends |
 | `SMTP_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `FROM` | — | SES SMTP credentials |
 | `SITE_BASE_URL` | `https://127.0.0.1:3000` | Base for unsubscribe links in email |
-| `CONTACT_EMAIL` | — | Operator contact shown on `/privacy` and `/terms` |
+| `CONTACT_EMAIL` | — | Operator contact shown on `/privacy` and `/terms`, and the address in the MusicBrainz/Nominatim User-Agent. **Required** — it has no default, because the only address that could serve as one belongs to a particular operator, and `config.Validate` refuses to start without it |
 
 **iOS client (§10.5)** — all optional. Unset, the web app behaves exactly as
 before: `/api/auth/login?client=ios` returns 501, the association file 404s,

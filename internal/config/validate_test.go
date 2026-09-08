@@ -16,6 +16,7 @@ func prodConfig() Config {
 		SiteBaseURL:         "https://concerts.example.com",
 		SiteDomain:          "concerts.example.com",
 		EmailDeliveryMode:   "log",
+		ContactEmail:        "operator@concerts.example.com",
 	}
 }
 
@@ -272,5 +273,29 @@ func TestFullyConfiguredMobileFlowPasses(t *testing.T) {
 
 	if errs := c.Validate(); len(errs) != 0 {
 		t.Fatalf("a complete mobile config must validate, got %v", errs)
+	}
+}
+
+// CONTACT_EMAIL used to default to a maintainer's personal address, so an
+// unset variable in production published a private mailbox as the operator
+// contact of a public service. The fix is to have no default at all —
+// substituting a different constant would only move the bug — which makes
+// this check the thing standing between an unset variable and a User-Agent
+// MusicBrainz and Nominatim answer with a block rather than an error.
+func TestContactEmailHasNoDefaultAndIsRequired(t *testing.T) {
+	t.Setenv("CONTACT_EMAIL", "")
+	if got := loadDefaults(t).ContactEmail; got != "" {
+		t.Fatalf("Load must not substitute an address for an unset CONTACT_EMAIL, got %q", got)
+	}
+
+	c := prodConfig()
+	c.ContactEmail = ""
+	if !problemsContaining(t, c, "CONTACT_EMAIL") {
+		t.Errorf("an empty CONTACT_EMAIL must be rejected by name, got %v", c.Validate())
+	}
+
+	c.ContactEmail = "   "
+	if !problemsContaining(t, c, "CONTACT_EMAIL") {
+		t.Errorf("a whitespace-only CONTACT_EMAIL must be rejected by name, got %v", c.Validate())
 	}
 }
