@@ -29,25 +29,67 @@ final class SavedModel {
         isLoading = false
     }
 
-    /// Unsave is by dedup_key in the path — per act, not per card.
-    func unsave(act: Act) async {
-        let previous = events
-        removeAct(dedupKey: act.dedupKey)
+    /// Save and unsave are per act — by dedup_key, not per card — and the
+    /// change is applied optimistically, the same contract `FeedModel` offers
+    /// so that `EventDetailView` behaves identically whichever list pushed it.
+    ///
+    /// The tap used to *remove* the act instead of clearing its flag, and
+    /// removal cannot drive a detail screen: unsaving from one would delete
+    /// the row under the user's finger and, on a single-act show, the event
+    /// with it — leaving the screen to fall back to the copy the list pushed,
+    /// whose bookmark is still filled. So both surfaces now mean one thing by
+    /// the gesture, and a card the unsave empties is dropped by the next
+    /// `load()` rather than mid-gesture. The row that lingers until then reads
+    /// "Not saved" and can be tapped again, which is also how an accidental
+    /// unsave gets undone; removal offered no way back short of finding the
+    /// show again in the feed.
+    func toggleSave(act: Act) async {
+        let target = !act.isSaved
+        setSaved(target, for: act.dedupKey)
         do {
-            try await api.unsave(dedupKey: act.dedupKey)
+            if target {
+                try await api.save(dedupKey: act.dedupKey)
+            } else {
+                try await api.unsave(dedupKey: act.dedupKey)
+            }
         } catch {
-            events = previous
+            setSaved(!target, for: act.dedupKey)
             self.error = error as? APIError ?? .unknown(error.localizedDescription)
         }
     }
 
-    /// Dropping an act can empty its card, in which case the card goes too —
-    /// an event with no saved acts is not a saved event.
-    private func removeAct(dedupKey: String) {
-        for i in events.indices {
-            events[i].acts.removeAll { $0.dedupKey == dedupKey }
+    /// Subscribing patches the artist across every event here, for the reason
+    /// `FeedModel` does it: one artist can appear on several bills, and
+    /// leaving the others stale makes the bell look broken.
+    func toggleSubscribe(act: Act) async {
+        let target = !act.isSubscribed
+        setSubscribed(target, forArtist: act.artist.id)
+        do {
+            if target {
+                try await api.subscribe(artistID: act.artist.id)
+            } else {
+                try await api.unsubscribe(artistID: act.artist.id)
+            }
+        } catch {
+            setSubscribed(!target, forArtist: act.artist.id)
+            self.error = error as? APIError ?? .unknown(error.localizedDescription)
         }
-        events.removeAll { $0.acts.isEmpty }
+    }
+
+    private func setSaved(_ saved: Bool, for dedupKey: String) {
+        for i in events.indices {
+            for j in events[i].acts.indices where events[i].acts[j].dedupKey == dedupKey {
+                events[i].acts[j].saved = saved
+            }
+        }
+    }
+
+    private func setSubscribed(_ subscribed: Bool, forArtist artistID: String) {
+        for i in events.indices {
+            for j in events[i].acts.indices where events[i].acts[j].artist.id == artistID {
+                events[i].acts[j].subscribed = subscribed
+            }
+        }
     }
 
     /// Sign-out. Saves belong to an account, and the next one on this device
@@ -58,6 +100,11 @@ final class SavedModel {
         error = nil
     }
 }
+
+/// Declared, not just satisfied by coincidence: `EventDetailView` resolves one
+/// of these per event and both reads and writes through it, so the two models
+/// have to be substitutable rather than merely similar.
+extension SavedModel: EventStore {}
 
 struct SavedView: View {
     @Environment(SavedModel.self) private var model
@@ -114,7 +161,7 @@ struct SavedView: View {
                 ForEach(model.events) { event in
                     NavigationLink(value: event) {
                         SavedCard(event: event) { act in
-                            Task { await model.unsave(act: act) }
+                            Task { await model.toggleSave(act: act) }
                         }
                     }
                     .buttonStyle(.plain)
@@ -130,7 +177,7 @@ struct SavedView: View {
 
 private struct SavedCard: View {
     let event: Event
-    var onUnsave: (Act) -> Void
+    var onToggleSave: (Act) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.tight) {
@@ -146,14 +193,22 @@ private struct SavedCard: View {
                 HStack {
                     Text(act.artist.name).font(.subheadline.weight(.medium))
                     Spacer()
+                    // Rendered from the act's own flag and labelled exactly as
+                    // `ActRow` does it, because the same act is reachable
+                    // through both: a hardcoded filled bookmark here would
+                    // contradict the detail screen the moment an unsave there
+                    // cleared the flag, and would go on telling VoiceOver
+                    // "Saved" about a show that is not.
                     Button {
-                        onUnsave(act)
+                        onToggleSave(act)
                     } label: {
-                        Image(systemName: "bookmark.fill")
+                        Image(systemName: act.isSaved ? "bookmark.fill" : "bookmark")
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityLabel("Remove \(act.artist.name) from saved")
+                    .foregroundStyle(act.isSaved ? Color.accentColor : Color.secondary)
+                    .accessibilityLabel("Save \(act.artist.name)")
+                    .accessibilityValue(act.isSaved ? "Saved" : "Not saved")
+                    .accessibilityAddTraits(act.isSaved ? [.isButton, .isSelected] : .isButton)
                 }
                 .contentShape(Rectangle())
             }

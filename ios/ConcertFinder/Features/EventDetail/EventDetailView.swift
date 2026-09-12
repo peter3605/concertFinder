@@ -13,7 +13,8 @@ struct EventDetailView: View {
     /// The event as the list that pushed this screen had it. Identity and
     /// fallback, never the source of the save/subscribe state — see `event`.
     private let pushed: Event
-    @Environment(FeedModel.self) private var model
+    @Environment(FeedModel.self) private var feed
+    @Environment(SavedModel.self) private var saved
     @State private var safariURL: URL?
     @State private var calendarError: String?
 
@@ -21,18 +22,34 @@ struct EventDetailView: View {
         self.pushed = event
     }
 
-    /// Read through the model rather than copied into `@State`.
+    /// The list that actually holds this event, and therefore the one both the
+    /// bookmark's current value and the tap on it have to go through.
     ///
-    /// The copy was optimistic in its own right, and the model rolls a failed
-    /// save back in its copy only — so a save that failed reverted in the
-    /// list behind this screen and stayed lit here, which is the one place
-    /// the user was looking. Reading through means there is a single answer.
+    /// This screen is pushed from two of them. Reading one model while writing
+    /// to the same one is what makes the controls optimistic at all: the model
+    /// flips the flag before the request and puts it back if the request
+    /// fails, and this screen re-renders off that. Reading a model that does
+    /// not hold the event gets neither half — the write lands somewhere the
+    /// screen is not looking, so the bookmark sits still through a save that
+    /// is succeeding *and* through one that fails.
     ///
-    /// The fallback covers a card pushed from the Saved tab for a show that
-    /// is not in the loaded feed: it renders what the list gave it, which is
-    /// what this screen showed before, minus the optimism.
+    /// Feed first only because a show can legitimately be in both lists and
+    /// the feed is the busier screen; either answers correctly when both do.
+    private var store: any EventStore {
+        // Neither holding it is the one case with no optimism available —
+        // there is no observable copy to flip — but the screen still renders
+        // from `pushed` and the write still reaches the server.
+        EventStores.owner(of: pushed.eventKey, among: [feed, saved]) ?? feed
+    }
+
+    /// Read through the store rather than copied into `@State`.
+    ///
+    /// The copy was optimistic in its own right, and a model rolls a failed
+    /// save back in its own copy only — so a save that failed reverted in the
+    /// list behind this screen and stayed lit here, which is the one place the
+    /// user was looking. Reading through means there is a single answer.
     private var event: Event {
-        model.events.first { $0.eventKey == pushed.eventKey } ?? pushed
+        store.event(withKey: pushed.eventKey) ?? pushed
     }
 
     var body: some View {
@@ -82,8 +99,8 @@ struct EventDetailView: View {
             ForEach(event.acts) { act in
                 ActRow(
                     act: act,
-                    onToggleSave: { Task { await model.toggleSave(act: act) } },
-                    onToggleSubscribe: { Task { await model.toggleSubscribe(act: act) } }
+                    onToggleSave: { Task { await store.toggleSave(act: act) } },
+                    onToggleSubscribe: { Task { await store.toggleSubscribe(act: act) } }
                 )
                 .padding(.vertical, 4)
                 if act.id != event.acts.last?.id { Divider() }

@@ -153,6 +153,26 @@ struct SessionLifecycleTests {
     }
     """
 
+    /// A saved show the feed does not contain — the ordinary case, not an edge
+    /// one: the feed is a filtered window on the next few months near one
+    /// location, and a save outlives all three of those. This is the shape
+    /// CF-B4 was about, so the fixture keeps its key deliberately distinct
+    /// from `concertsJSON`'s `evt-1`.
+    private static let savedOnlyJSON = """
+    {
+      "count": 1,
+      "events": [{
+        "event_key": "evt-saved-only",
+        "date": "2099-07-04T20:00:00Z",
+        "venue": "Black Cat",
+        "city": "Washington",
+        "state": "DC",
+        "acts": [{"artist": {"id": "a9", "name": "Bikini Kill"}, "dedup_key": "d9", "saved": true}],
+        "links": []
+      }]
+    }
+    """
+
     private static let artistsJSON = """
     {"artists": [{"id": "a1", "name": "Turnstile", "genres": ["hardcore punk"]}]}
     """
@@ -439,5 +459,120 @@ struct SessionLifecycleTests {
         // introduced to the pair too.
         HintStore.reset()
         #expect(!HintStore.isDismissed(.saveVersusSubscribe))
+    }
+
+    // MARK: - CF-B4: the detail screen reads and writes the same list
+
+    /// Both models loaded, holding different shows — the arrangement the whole
+    /// bug lived in.
+    @MainActor
+    private static func loadedModels() async -> (feed: FeedModel, saved: SavedModel) {
+        signedInRoutes()
+        StubURLProtocol.routes["/api/me/saved-concerts"] = .init(status: 200, json: savedOnlyJSON)
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+        let saved = SavedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+        await feed.load()
+        await saved.load()
+        return (feed, saved)
+    }
+
+    /// The resolution rule itself. `EventDetailView` used to read `FeedModel`
+    /// unconditionally, so a card pushed from Saved for a show the feed does
+    /// not carry resolved to nothing and rendered the immutable copy the list
+    /// had handed it.
+    @Test @MainActor func aShowOnlyTheSavedListHoldsResolvesToTheSavedList() async {
+        let (feed, saved) = await Self.loadedModels()
+
+        let owner = EventStores.owner(of: "evt-saved-only", among: [feed, saved])
+
+        #expect(owner === saved)
+        // And the feed still wins for its own, so this did not simply move the
+        // bug to the other screen.
+        #expect(EventStores.owner(of: "evt-1", among: [feed, saved]) === feed)
+        // An event no loaded list holds resolves to nothing rather than being
+        // quietly handed to one of them.
+        #expect(EventStores.owner(of: "evt-nowhere", among: [feed, saved]) == nil)
+    }
+
+    /// The bug itself, kept as a test rather than as prose.
+    ///
+    /// This is exactly what the detail screen used to do — write the save into
+    /// `FeedModel` because that is the only model it held — and it is silent
+    /// from every angle: the request goes out, the server agrees, `FeedModel`
+    /// reports no error, and the one list that could have shown the user
+    /// anything never hears about it. Nothing here fails; that was the problem.
+    @Test @MainActor func writingASavedOnlyShowIntoTheFeedMovesNothing() async throws {
+        let (feed, saved) = await Self.loadedModels()
+        StubURLProtocol.routes["/api/me/saved-concerts/d9"] = .init(status: 200)
+        let act = try #require(saved.event(withKey: "evt-saved-only")?.acts.first)
+
+        await feed.toggleSave(act: act)
+
+        #expect(feed.event(withKey: "evt-saved-only") == nil)
+        #expect(feed.error == nil)
+        // Still filled. A screen reading the feed renders this, so the
+        // bookmark sat still through a save that was succeeding.
+        #expect(saved.event(withKey: "evt-saved-only")?.acts.first?.isSaved == true)
+    }
+
+    /// The Done-when, checked the way the screen actually reads: resolve the
+    /// store, toggle through it, read the bookmark back out of it.
+    ///
+    /// Asserting on `saved.events` directly would pass even with the bug
+    /// restored — the bug was never that `SavedModel` could not flip a flag,
+    /// it was that the screen was looking at `FeedModel` while it did.
+    @Test @MainActor func unsavingFromASavedOnlyShowFlipsItsBookmark() async throws {
+        let (feed, saved) = await Self.loadedModels()
+        StubURLProtocol.routes["/api/me/saved-concerts/d9"] = .init(status: 200)
+
+        let store = EventStores.owner(of: "evt-saved-only", among: [feed, saved])
+        let act = try #require(store?.event(withKey: "evt-saved-only")?.acts.first)
+        #expect(act.isSaved)
+
+        await store?.toggleSave(act: act)
+
+        let after = store?.event(withKey: "evt-saved-only")?.acts.first
+        #expect(after?.isSaved == false)
+        // The card has to survive its own unsave. Clearing the flag used to be
+        // spelled as removing the act, which on a single-act show takes the
+        // event with it — and a detail screen whose event vanishes falls back
+        // to the pushed copy, whose bookmark is still filled.
+        #expect(saved.events.contains { $0.eventKey == "evt-saved-only" })
+        #expect(saved.error == nil)
+    }
+
+    /// The other half of optimism: a flip the server refuses has to come back.
+    /// A control that says it saved something it did not is worse than a slow
+    /// one, and this path had no rollback at all because it had no flip.
+    @Test @MainActor func aRefusedUnsavePutsTheBookmarkBack() async throws {
+        let (feed, saved) = await Self.loadedModels()
+        StubURLProtocol.routes["/api/me/saved-concerts/d9"] = .init(status: 500)
+
+        let store = EventStores.owner(of: "evt-saved-only", among: [feed, saved])
+        let act = try #require(store?.event(withKey: "evt-saved-only")?.acts.first)
+
+        await store?.toggleSave(act: act)
+
+        #expect(store?.event(withKey: "evt-saved-only")?.acts.first?.isSaved == true)
+        // Silent rollback is the failure mode the banner exists for: without
+        // an error the bookmark springing back is the only thing the user sees.
+        #expect(saved.error != nil)
+    }
+
+    /// The bell sits on the same row and had the identical fault. Fixing only
+    /// the bookmark would leave one of the two controls writing into a list
+    /// the screen is not reading.
+    @Test @MainActor func subscribingFromASavedOnlyShowFlipsItsBell() async throws {
+        let (feed, saved) = await Self.loadedModels()
+        StubURLProtocol.routes["/api/me/subscribed-artists/a9"] = .init(status: 200)
+
+        let store = EventStores.owner(of: "evt-saved-only", among: [feed, saved])
+        let act = try #require(store?.event(withKey: "evt-saved-only")?.acts.first)
+        #expect(!act.isSubscribed)
+
+        await store?.toggleSubscribe(act: act)
+
+        #expect(store?.event(withKey: "evt-saved-only")?.acts.first?.isSubscribed == true)
+        #expect(saved.error == nil)
     }
 }

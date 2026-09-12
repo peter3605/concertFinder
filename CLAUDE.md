@@ -277,6 +277,30 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   digests deliberately keep **text-only** attribution: remote images are
   blocked by default in most mail clients, so an `<img>` there would attribute
   nothing most of the time while the words always land.
+- **An optimistic control must read and write the same list, and on iOS that
+  list is not always the feed.** `EventDetailView` is pushed from two of them
+  — `FeedModel` and `SavedModel` — each holding its own copy of the events,
+  and optimism is entirely a property of binding to one model for both halves:
+  the model flips the flag before the request and puts it back if the request
+  fails, and the screen re-renders off that. Reading a model that does not hold
+  the event gets neither half. It held `FeedModel` alone, so a card opened from
+  Saved for a show outside the loaded feed — the ordinary case, since the feed
+  is a filtered window on one location and a save outlives all of that — fell
+  through to the immutable copy the list had pushed, while the write went into
+  a list nothing was rendering. The request succeeded, the server agreed, no
+  error was raised, and the bookmark sat still through a save that worked *and*
+  through one that failed. `EventStores.owner` resolves the owning list once
+  and the screen uses that one object for the value and the tap, because
+  choosing a store to read and a model to write as two decisions is the same
+  bug with more steps. Two consequences. A third list — Discover — joins by
+  conforming to `EventStore` and being added to the candidates, not by adding
+  another branch. And save state on these screens is a **flag on the act**,
+  never membership of a list: `SavedModel` used to spell unsave as removal,
+  which cannot drive a detail screen, because deleting the act — and on a
+  single-act show the event with it — leaves that screen falling back to the
+  pushed copy whose bookmark is still filled. The Saved tab therefore keeps an
+  unsaved card until the next `load()`, reading "Not saved", which is also the
+  only way an accidental unsave is undoable.
 - **`GET /api/discover` is the one concert endpoint a stranger can call, and
   what makes that safe is what it cannot do.** It is served entirely from
   `concert_cache` (`db.ScanCachedConcerts` over the `tm:` prefix that
