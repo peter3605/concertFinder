@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -61,7 +62,7 @@ func (c *Client) doGETRetry(ctx context.Context, url, accessToken string) ([]byt
 			// sub-second backoff: an upstream asking for 120s used to fall
 			// into the `d > maxRetryAfter` branch and get retried in ~100ms,
 			// which is the fastest way to turn a soft limit into a ban.
-			if d := retryAfter(resp.Header.Get("Retry-After")); d > 0 {
+			if d := retryAfter(resp.Header.Get("Retry-After"), time.Now()); d > 0 {
 				if d > maxRetryAfter {
 					d = maxRetryAfter
 				}
@@ -91,12 +92,39 @@ func (c *Client) doGETRetry(ctx context.Context, url, accessToken string) ([]byt
 	return nil, lastErr
 }
 
-func retryAfter(v string) time.Duration {
+// retryAfter parses a Retry-After header measured against now. RFC 9110
+// §10.2.3 defines two forms and a recipient has to understand both:
+// delay-seconds, and an HTTP-date. Zero means "nothing usable here", which
+// sends the caller to its exponential backoff.
+//
+// The date form is not an exotic spelling — it is what a CDN or proxy in
+// front of the API emits — and dropping it was not a no-op: an upstream
+// asking for a 90-second pause fell through to the sub-second backoff and got
+// retried in ~100ms, which is the same failure the clamp above exists to
+// prevent, arriving by a different route.
+//
+// A date already in the past yields zero rather than a negative duration.
+// Negative would make sleepFor fire immediately, i.e. hot-loop against the
+// limiter that just refused us.
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
 		return time.Duration(secs) * time.Second
+	}
+	// http.ParseTime accepts all three formats RFC 9110 requires: IMF-fixdate,
+	// the obsolete RFC 850 form, and asctime.
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	if d := t.Sub(now); d > 0 {
+		return d
 	}
 	return 0
 }

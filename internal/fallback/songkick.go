@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -271,16 +270,11 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 			return body, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
 			lastErr = errors.New("429")
-			d := time.Duration(0)
-			if raw := resp.Header.Get("Retry-After"); raw != "" {
-				if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-					d = time.Duration(secs) * time.Second
-				}
-			}
-			// Honor Retry-After, clamped to songkickMaxRetryAfter — clamping
-			// shortens the wait toward 30s, it does not discard it. See
-			// spotify/http.go for why the previous form was wrong.
-			if d > 0 {
+			// Honor Retry-After in either RFC 9110 form, clamped to
+			// songkickMaxRetryAfter — clamping shortens the wait toward 30s,
+			// it does not discard it. See spotify/http.go for why the previous
+			// form was wrong.
+			if d := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); d > 0 {
 				if d > songkickMaxRetryAfter {
 					d = songkickMaxRetryAfter
 				}

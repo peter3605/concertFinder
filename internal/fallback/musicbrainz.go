@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -214,6 +213,13 @@ func (c *MusicBrainzClient) officialHomepage(ctx context.Context, mbid string) (
 // limit, so retry is not optional.
 const mbMaxAttempts = 4
 
+// mbMaxRetryAfter caps how long a Retry-After from MusicBrainz can stall one
+// request. Lower than the 30s the metered sources allow, because these
+// lookups are globally serialized behind a 1 req/sec turnstile inside a
+// scan-wide FallbackBudget: time spent waiting here is time no other artist's
+// resolution can use.
+const mbMaxRetryAfter = 15 * time.Second
+
 func (c *MusicBrainzClient) get(ctx context.Context, u string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < mbMaxAttempts; attempt++ {
@@ -272,14 +278,12 @@ func mbSleepBackoff(ctx context.Context, attempt int, retryAfter string) bool {
 		return false
 	}
 	d := 2 * time.Second << attempt
-	if retryAfter != "" {
-		// Retry-After is typically seconds. Cap at 15s so we don't stall the
-		// whole search on a single misbehaving artist.
-		if secs, err := strconv.Atoi(retryAfter); err == nil && secs > 0 {
-			d = time.Duration(secs) * time.Second
-			if d > 15*time.Second {
-				d = 15 * time.Second
-			}
+	// Either RFC 9110 form. Cap at 15s so we don't stall the whole search on a
+	// single misbehaving artist.
+	if ra := parseRetryAfter(retryAfter, time.Now()); ra > 0 {
+		d = ra
+		if d > mbMaxRetryAfter {
+			d = mbMaxRetryAfter
 		}
 	}
 	t := time.NewTimer(d)

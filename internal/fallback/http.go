@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -190,6 +191,46 @@ func (f *Fetcher) wait(ctx context.Context, host string) error {
 	f.last.Set(host, now)
 	f.limMu.Unlock()
 	return nil
+}
+
+// --- Retry-After ---
+
+// parseRetryAfter parses a Retry-After header measured against now, for every
+// client in this package. RFC 9110 §10.2.3 defines two forms and a recipient
+// has to understand both: delay-seconds, and an HTTP-date. Zero means
+// "nothing usable here", which sends the caller to its own backoff.
+//
+// The date form is what a CDN or proxy in front of an API emits, and dropping
+// it was not a no-op: Songkick's caller fell through to a 200ms backoff on a
+// response that had asked for minutes. Clamping the result is the caller's
+// job — the two clients here cap at different values — but discarding it is
+// not, because a rate limiter answered in a spelling we chose not to read is
+// still a rate limiter.
+//
+// A date already in the past yields zero rather than a negative duration,
+// which would fire a timer immediately and hot-loop the limiter that just
+// refused us.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	// http.ParseTime accepts all three formats RFC 9110 requires: IMF-fixdate,
+	// the obsolete RFC 850 form, and asctime.
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	if d := t.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // --- outbound address guard ---

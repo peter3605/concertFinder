@@ -145,6 +145,32 @@ func TestDoGETRetry429PrefersRetryAfterOverBackoff(t *testing.T) {
 		}
 	})
 
+	// The same assertion for the HTTP-date form. This is the case that used to
+	// fail: the header parsed to zero, so a server asking to be left alone
+	// until a wall-clock instant got hammered again ~100ms later.
+	t.Run("an HTTP-date Retry-After suppresses the fast retry", func(t *testing.T) {
+		c, n, u := newRetryServer(t, func(w http.ResponseWriter, _ *http.Request, _ int32) {
+			// Two minutes out, expressed as a date rather than a delta. Beyond
+			// maxRetryAfter, so the clamp applies and 30s still overruns the
+			// window comfortably.
+			w.Header().Set("Retry-After", time.Now().UTC().Add(2*time.Minute).Format(http.TimeFormat))
+			w.WriteHeader(http.StatusTooManyRequests)
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), window)
+		defer cancel()
+
+		_, status, err := c.doGETRetry(ctx, u)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want the context deadline (the client should still have been waiting)", err)
+		}
+		if status != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want 429", status)
+		}
+		if got := n.Load(); got != 1 {
+			t.Errorf("made %d requests in %v, want 1 -- an HTTP-date Retry-After fell through to the sub-second backoff", got, window)
+		}
+	})
+
 	t.Run("no Retry-After falls back to sub-second backoff", func(t *testing.T) {
 		c, n, u := newRetryServer(t, func(w http.ResponseWriter, _ *http.Request, _ int32) {
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -214,21 +240,36 @@ func TestDoGETRetryStopsBeforeTheFirstRequestOnACancelledContext(t *testing.T) {
 	}
 }
 
-func TestRetryAfterParsesOnlyDeltaSeconds(t *testing.T) {
+// RFC 9110 §10.2.3 gives Retry-After two forms and a recipient has to
+// understand both. The date form used to return 0 here, which sent the caller
+// to a ~100ms backoff against an upstream that had just asked for minutes.
+func TestRetryAfterParsesBothRFC9110Forms(t *testing.T) {
+	// A fixed reference instant so the date cases are arithmetic, not a race
+	// with the wall clock.
+	now := time.Date(2026, 10, 21, 7, 28, 0, 0, time.UTC)
+
 	for _, tc := range []struct {
 		header string
 		want   time.Duration
 		why    string
 	}{
 		{"", 0, "absent header; the caller falls back to backoff"},
-		{"5", 5 * time.Second, "the normal shape"},
+		{"5", 5 * time.Second, "delta-seconds, the normal shape"},
 		{"120", 120 * time.Second, "clamping to maxRetryAfter is the caller's job, not this function's"},
 		{"0", 0, "zero is indistinguishable from absent here, so the caller backs off instead of hot-looping"},
 		{"-3", 0, "a negative delay would make sleepFor fire immediately, which is a hot loop against a rate limiter"},
-		{"3.5", 0, "RFC 7231 delta-seconds is an integer"},
-		{"Wed, 21 Oct 2026 07:28:00 GMT", 0, "the HTTP-date form is legal and is NOT parsed; such a response backs off instead"},
+		{"3.5", 0, "delta-seconds is an integer; a float is neither form and means nothing"},
+		{"not a date either", 0, "unparseable as both forms; the caller backs off"},
+
+		// The HTTP-date form. All three spellings http.ParseTime accepts,
+		// because RFC 9110 requires a recipient to understand all three.
+		{"Wed, 21 Oct 2026 07:30:00 GMT", 2 * time.Minute, "IMF-fixdate, the form everything actually emits"},
+		{"Wednesday, 21-Oct-26 07:30:00 GMT", 2 * time.Minute, "the obsolete RFC 850 form"},
+		{"Wed Oct 21 07:30:00 2026", 2 * time.Minute, "the asctime form"},
+		{"Wed, 21 Oct 2026 07:28:00 GMT", 0, "a date equal to now is not a wait"},
+		{"Wed, 21 Oct 2026 07:00:00 GMT", 0, "a date in the past yields zero, never a negative duration"},
 	} {
-		if got := retryAfter(tc.header); got != tc.want {
+		if got := retryAfter(tc.header, now); got != tc.want {
 			t.Errorf("retryAfter(%q) = %v, want %v (%s)", tc.header, got, tc.want, tc.why)
 		}
 	}
