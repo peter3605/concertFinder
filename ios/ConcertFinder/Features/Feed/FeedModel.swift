@@ -529,3 +529,7 @@ final class FeedModel {
 
     func clearError() { error = nil }
 }
+
+/// See `SavedModel`'s conformance: `EventDetailView` is pushed from both lists
+/// and has to read and write through whichever one holds the event.
+extension FeedModel: EventStore {}
