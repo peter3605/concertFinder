@@ -309,9 +309,17 @@ pass "watchdog.sh is executable"
 #     forever for a reason that has nothing to do with the application. Neither
 #     terraform validate nor a deploy can see the mismatch — it is two string
 #     literals in two languages. Same reasoning as the PG_IMAGE pin above.
-wd_ns=$(grep -o 'WATCHDOG_NAMESPACE:-[^}]*' "$repo/scripts/watchdog.sh" | head -1 | cut -d- -f2-)
+#
+#     The `|| true` on each extraction is load-bearing, not defensive habit.
+#     Under `set -euo pipefail` a grep that matches nothing exits 1, pipefail
+#     carries that out of the pipeline, and set -e kills the script *at the
+#     assignment* -- so the emptiness guard below would never run, and a renamed
+#     variable would show a bare exit 1 with no FAIL line. That is precisely the
+#     "this check stopped comparing anything" outcome the message exists to
+#     explain, arriving with the message suppressed.
+wd_ns=$(grep -o 'WATCHDOG_NAMESPACE:-[^}]*' "$repo/scripts/watchdog.sh" | head -1 | cut -d- -f2- || true)
 tf_ns=$(grep -o 'app_metric_namespace[[:space:]]*=[[:space:]]*"[^"]*"' "$repo/infra/cloudwatch.tf" |
-    head -1 | sed 's/.*"\(.*\)"/\1/')
+    head -1 | sed 's/.*"\(.*\)"/\1/' || true)
 if [ -z "$wd_ns" ] || [ -z "$tf_ns" ]; then
     fail "could not read the metric namespace out of scripts/watchdog.sh ($wd_ns) and
       infra/cloudwatch.tf ($tf_ns) — one of them changed shape, so this check
@@ -356,13 +364,22 @@ wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.ym
     echo "$wd_out" | sed 's/^/    /' >&2
     fail "scripts/watchdog.sh exited non-zero against the test project"
 }
-wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1)
+wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
 if [ "${wd_count:-0}" -lt 1 ]; then
     echo "$wd_out" | sed 's/^/    /' >&2
     fail "watchdog.sh reported unhealthy=${wd_count:-<none>} for a crash-looping container.
       That is the exact state it exists to catch — a container that exits on
       every start while the host stays healthy — so the alarm in
       infra/cloudwatch.tf would never fire for the failure it was built for."
+fi
+# A count alone is not enough: 2 would also pass, and 2 is what a watchdog that
+# found no containers at all reports. Naming the crashing service is what
+# distinguishes "noticed the crash loop" from "could not see the project".
+if ! echo "$wd_out" | grep -q 'api:'; then
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "watchdog.sh reported unhealthy=$wd_count but never named the api service.
+      A run that cannot see the project at all also reports a non-zero count,
+      so the count on its own does not show that the crash loop was detected."
 fi
 pass "watchdog.sh detects a crash-looping container (unhealthy=$wd_count)"
 
@@ -391,7 +408,7 @@ wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.ym
     echo "$wd_out" | sed 's/^/    /' >&2
     fail "scripts/watchdog.sh exited non-zero against the healthy test project"
 }
-wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1)
+wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
 if [ "${wd_count:-1}" -ne 0 ]; then
     echo "$wd_out" | sed 's/^/    /' >&2
     fail "watchdog.sh reported unhealthy=$wd_count for a project where every container

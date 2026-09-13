@@ -61,6 +61,12 @@ the Cloudflare dashboard. See "DNS records" below.
   `ConcertFinder/App ServicesUnhealthy`. The role grants `PutMetricData` for
   that namespace and no other.
 
+  Applying this against an instance that is not yet running the timer creates
+  an alarm with no metric behind it, which goes to ALARM within three minutes
+  and mails — see `docs/aws-deploy.md` §7b, and do the hand-install in the same
+  sitting. The running instance predates the watchdog, so this is the live case,
+  not a hypothetical.
+
   Its `treat_missing_data` is `"breaching"`, which is deliberate and is the
   part to leave alone: the watchdog runs on the machine it watches, so the
   states that stop it reporting — a wedged docker daemon, a disabled timer, a

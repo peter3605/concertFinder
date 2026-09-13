@@ -624,10 +624,19 @@ Three things about it are deliberate:
   successful deploy passes through that window, and an alarm that fires on
   every deploy is an alarm the operator learns to delete.
 
+**Do the apply and the install below in one sitting.** Because absent data
+alarms, `terraform apply` against an instance that is not yet publishing creates
+an alarm with no metric behind it — it goes to ALARM about three minutes later
+and mails you, and stays there until the timer is running. That is the setting
+working as intended, but it is worth knowing before it happens rather than
+after, and it is the one ordering that makes the first alert a false one.
+
 The units are installed and enabled by `infra/ec2.tf`'s `user_data`, like the
 backup timer. **`user_data` does not re-run, and `lifecycle { ignore_changes =
 [user_data] }` keeps an edit to it from replacing the instance**, so an
-instance built before this existed has no watchdog and nothing says so. Check:
+instance built before this existed has no watchdog and nothing says so — which
+is exactly the case the paragraph above describes, since the running instance
+predates this. Check:
 
 ```
 systemctl list-timers concertfinder-watchdog --no-pager

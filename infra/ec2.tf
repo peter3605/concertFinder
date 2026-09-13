@@ -86,10 +86,12 @@ resource "aws_instance" "app" {
   # IMDSv1 answering, any SSRF that can issue a plain GET to 169.254.169.254
   # walks out with role credentials. Requiring the PUT-issued token closes that.
   #
-  # hop_limit 1 keeps the response on the host, which is where the only
-  # consumer is -- render-env.sh curls IMDS for the region, and it runs on the
-  # box, not in a container. Nothing in /internal talks to AWS at all.
-  # http_endpoint stays explicitly enabled for that same render-env.sh call.
+  # hop_limit 1 keeps the response on the host, which is where both consumers
+  # are -- render-env.sh curls IMDS for the region, and scripts/watchdog.sh
+  # curls it for the region and instance id before publishing its metric. Both
+  # run on the box, not in a container, so one hop is enough; a container would
+  # need two and deliberately does not get them. Nothing in /internal talks to
+  # AWS at all. http_endpoint stays explicitly enabled for those two calls.
   metadata_options {
     http_tokens                 = "required"
     http_endpoint               = "enabled"

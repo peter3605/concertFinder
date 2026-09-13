@@ -123,9 +123,12 @@ resource "aws_cloudwatch_metric_alarm" "ec2_system_status_check" {
 # PutMetricData. Treating absent data as healthy would make the monitoring's
 # own failure the one thing it cannot report -- which is the bug this alarm
 # exists to close, reproduced one level up. The EC2 status-check alarm above
-# made the same choice for the same reason, so this is the house rule and not
-# a preference. The cost is that tearing the watchdog down deliberately mails
-# somebody; that is the correct direction to be wrong in.
+# made the same choice for the same reason -- note its *system* counterpart did
+# not, because a flapping system check triggers an ec2:recover and a recovery
+# for a blip costs a reboot to fix nothing. Absent data means different things
+# in the two cases, which is why the setting is per alarm rather than a default.
+# The cost here is that tearing the watchdog down deliberately mails somebody;
+# that is the correct direction to be wrong in.
 #
 # Three consecutive minutes rather than one. A deploy recreates both
 # containers, and the api's healthcheck start_period is 60s -- the watchdog

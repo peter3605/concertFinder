@@ -109,13 +109,25 @@ for svc in $services; do
     # JSON array and newline-delimited objects from that flag depending on its
     # version, and AL2023 ships no jq to paper over the difference. A Go
     # template is stable across both and needs nothing installed.
-    read -r status health restarts <<< "$(
-        docker inspect --format \
-            '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' \
-            "$cid" 2>/dev/null || echo "missing none 0"
-    )"
-
-    new_state+="$svc $restarts"$'\n'
+    #
+    # The failure is a branch rather than an `|| echo "... 0"` fallback, because
+    # a fabricated zero would be *written to the state file* and read next run
+    # as a baseline -- reporting a restart from 0 to the container's real count
+    # and inventing a crash loop out of one transient inspect failure. On
+    # failure this service contributes no state line at all, and re-baselines
+    # next run.
+    if inspect=$(docker inspect --format \
+        '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' \
+        "$cid" 2>/dev/null); then
+        read -r status health restarts <<< "$inspect"
+        new_state+="$svc $restarts"$'\n'
+    else
+        # compose just listed this container, so a daemon that will not describe
+        # it is not a healthy state.
+        status=unreadable
+        health=none
+        restarts=0
+    fi
 
     # "starting" is the healthcheck's start_period, which is 60s for the api
     # container and covers app + river migrations against a cold database. A
@@ -141,6 +153,11 @@ for svc in $services; do
     # A deploy recreates the container, which resets the counter to 0 against a
     # previous sample's higher number -- that is a decrease, not an increase,
     # so a deploy does not read as a loop.
+    #
+    # It is skipped on the first run after a service was absent or unreadable,
+    # since there is no baseline to compare against. That window is covered by
+    # the status check above: a container in that situation reads `restarting`
+    # or `exited` anyway.
     prev=$(prev_restarts_for "$svc")
     if [ -n "$prev" ] && [ "$restarts" -gt "$prev" ]; then
         unhealthy=$((unhealthy + 1))
@@ -151,12 +168,32 @@ done
 # Written whole via a temp file: a half-written state file read by the next run
 # would compare this run's counts against a truncated line and could miss a
 # restart exactly once, which is unreproducible and looks like a flake.
-tmp_state=$(mktemp "${STATE_FILE}.XXXXXX")
-printf '%s' "$new_state" > "$tmp_state"
-mv -f "$tmp_state" "$STATE_FILE"
+#
+# And it is non-fatal, which matters more than it looks. This file feeds only
+# the restart-delta heuristic -- a secondary signal, behind status and health --
+# so it must never be able to stop the metric going out. /var/tmp is sticky, so
+# one `sudo ./watchdog.sh` run leaves the file owned by root, after which `mv`
+# fails with EPERM for the service user. Under bare `set -e` that would kill the
+# run before it published, every minute, forever: treat_missing_data =
+# "breaching" would turn a bookkeeping file nobody thinks about into a permanent
+# alarm about nothing, and it would strand an orphaned temp file per minute on
+# the way. Losing the delta is the correct price; losing the metric is not.
+if tmp_state=$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null); then
+    if ! { printf '%s' "$new_state" > "$tmp_state" && mv -f "$tmp_state" "$STATE_FILE"; }; then
+        rm -f "$tmp_state"
+        log "could not update $STATE_FILE; restart-delta detection disabled until it is writable"
+    fi
+else
+    log "could not create a temp file beside $STATE_FILE; restart-delta detection disabled"
+fi
 
 if [ "$unhealthy" -gt 0 ]; then
-    log "UNHEALTHY ($unhealthy): ${reasons[*]}"
+    # :- because bash 3.2 treats ${empty[*]} under `set -u` as an unbound
+    # variable and aborts. Every site that increments the counter also appends a
+    # reason, so this is unreachable today -- and one careless edit away from
+    # killing the watchdog on exactly the runs where something is wrong, and
+    # only on a Mac.
+    log "UNHEALTHY ($unhealthy): ${reasons[*]:-no detail}"
 else
     log "all $service_count services healthy"
 fi
