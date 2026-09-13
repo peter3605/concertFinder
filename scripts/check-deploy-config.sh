@@ -20,7 +20,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$PWD"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# The watchdog check below brings a throwaway compose project up; cleaning it
+# from the same trap means a failed assertion cannot leave containers running
+# on the developer's machine or the runner.
+wd_project="cfwatchdogcheck$$"
+cleanup() {
+    docker compose -p "$wd_project" -f "$work/watchdog-test.yml" down -t 1 >/dev/null 2>&1 || true
+    rm -rf "$work"
+}
+trap cleanup EXIT
 
 # Work on copies with a synthetic .env: never read the developer's real one,
 # and never print it — `docker compose config` echoes every variable it
@@ -278,5 +286,135 @@ if PATH="$envwork/bin:$PATH" AWS_REGION=us-east-1 \
       so it has to fail here, by name, not on the instance mid-deploy."
 fi
 pass "render-env.sh refuses a value it cannot encode for both parsers"
+
+# 14. The watchdog is in the same family as the scripts above — it only ever
+#     runs on the instance, from a systemd timer, where a syntax error would
+#     surface as a missing CloudWatch datapoint rather than as an error anyone
+#     reads.
+if ! out=$(bash -n "$repo/scripts/watchdog.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/watchdog.sh has a syntax error"
+fi
+pass "watchdog.sh parses"
+
+if [ ! -x "$repo/scripts/watchdog.sh" ]; then
+    fail "scripts/watchdog.sh is not executable — run: chmod +x scripts/watchdog.sh"
+fi
+pass "watchdog.sh is executable"
+
+# 15. The watchdog publishes into a namespace and infra/cloudwatch.tf alarms on
+#     one. If they disagree the metric lands somewhere nothing watches, the
+#     alarm sees no data at all, and because it is configured
+#     treat_missing_data = "breaching" the result is an alert that fires
+#     forever for a reason that has nothing to do with the application. Neither
+#     terraform validate nor a deploy can see the mismatch — it is two string
+#     literals in two languages. Same reasoning as the PG_IMAGE pin above.
+#
+#     The `|| true` on each extraction is load-bearing, not defensive habit.
+#     Under `set -euo pipefail` a grep that matches nothing exits 1, pipefail
+#     carries that out of the pipeline, and set -e kills the script *at the
+#     assignment* -- so the emptiness guard below would never run, and a renamed
+#     variable would show a bare exit 1 with no FAIL line. That is precisely the
+#     "this check stopped comparing anything" outcome the message exists to
+#     explain, arriving with the message suppressed.
+wd_ns=$(grep -o 'WATCHDOG_NAMESPACE:-[^}]*' "$repo/scripts/watchdog.sh" | head -1 | cut -d- -f2- || true)
+tf_ns=$(grep -o 'app_metric_namespace[[:space:]]*=[[:space:]]*"[^"]*"' "$repo/infra/cloudwatch.tf" |
+    head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+if [ -z "$wd_ns" ] || [ -z "$tf_ns" ]; then
+    fail "could not read the metric namespace out of scripts/watchdog.sh ($wd_ns) and
+      infra/cloudwatch.tf ($tf_ns) — one of them changed shape, so this check
+      stopped comparing anything."
+fi
+if [ "$wd_ns" != "$tf_ns" ]; then
+    fail "watchdog.sh publishes to '$wd_ns' but infra/cloudwatch.tf alarms on '$tf_ns'.
+      The alarm would never see a datapoint, and treat_missing_data =
+      \"breaching\" turns that into a permanent alert about nothing."
+fi
+pass "watchdog.sh and cloudwatch.tf agree on the metric namespace ($wd_ns)"
+
+# 16. And the detection itself, against real containers. This is the one
+#     assertion here that tests behaviour rather than config, and it earns the
+#     seconds it costs: the whole point of the watchdog is to notice a state
+#     that every other signal in this deployment reports as healthy, so
+#     "does it actually notice" cannot be taken on faith. A crash loop under
+#     `restart: unless-stopped` is a specific thing docker does, and the
+#     matching assertion is that a *healthy* project still scores zero —
+#     a watchdog that always alarms gets muted, and then reports nothing.
+cat > "$work/watchdog-test.yml" <<'YML'
+services:
+  api:
+    image: alpine:3
+    command: ["sh", "-c", "echo booting; exit 1"]
+    restart: unless-stopped
+  caddy:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+    restart: unless-stopped
+YML
+
+if ! docker compose -p "$wd_project" -f "$work/watchdog-test.yml" up -d >/dev/null 2>&1; then
+    fail "could not start the throwaway compose project for the watchdog check"
+fi
+# Long enough for docker to have restarted the crashing container at least once.
+sleep 4
+
+wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.yml" \
+    WATCHDOG_PUBLISH=0 WATCHDOG_STATE_FILE="$work/wd.state" \
+    "$repo/scripts/watchdog.sh" 2>&1) || {
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "scripts/watchdog.sh exited non-zero against the test project"
+}
+wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
+if [ "${wd_count:-0}" -lt 1 ]; then
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "watchdog.sh reported unhealthy=${wd_count:-<none>} for a crash-looping container.
+      That is the exact state it exists to catch — a container that exits on
+      every start while the host stays healthy — so the alarm in
+      infra/cloudwatch.tf would never fire for the failure it was built for."
+fi
+# A count alone is not enough: 2 would also pass, and 2 is what a watchdog that
+# found no containers at all reports. Naming the crashing service is what
+# distinguishes "noticed the crash loop" from "could not see the project".
+if ! echo "$wd_out" | grep -q 'api:'; then
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "watchdog.sh reported unhealthy=$wd_count but never named the api service.
+      A run that cannot see the project at all also reports a non-zero count,
+      so the count on its own does not show that the crash loop was detected."
+fi
+pass "watchdog.sh detects a crash-looping container (unhealthy=$wd_count)"
+
+docker compose -p "$wd_project" -f "$work/watchdog-test.yml" down -t 1 >/dev/null 2>&1 || true
+
+cat > "$work/watchdog-test.yml" <<'YML'
+services:
+  api:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+    restart: unless-stopped
+  caddy:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+    restart: unless-stopped
+YML
+
+if ! docker compose -p "$wd_project" -f "$work/watchdog-test.yml" up -d >/dev/null 2>&1; then
+    fail "could not start the healthy compose project for the watchdog check"
+fi
+sleep 2
+
+wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.yml" \
+    WATCHDOG_PUBLISH=0 WATCHDOG_STATE_FILE="$work/wd-healthy.state" \
+    "$repo/scripts/watchdog.sh" 2>&1) || {
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "scripts/watchdog.sh exited non-zero against the healthy test project"
+}
+wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
+if [ "${wd_count:-1}" -ne 0 ]; then
+    echo "$wd_out" | sed 's/^/    /' >&2
+    fail "watchdog.sh reported unhealthy=$wd_count for a project where every container
+      is running. A watchdog that alarms on a healthy stack gets muted, and a
+      muted alarm reports nothing at all."
+fi
+pass "watchdog.sh scores a healthy project clean"
 
 printf '\n\033[32mDeployment config OK\033[0m\n'

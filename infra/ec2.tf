@@ -86,10 +86,12 @@ resource "aws_instance" "app" {
   # IMDSv1 answering, any SSRF that can issue a plain GET to 169.254.169.254
   # walks out with role credentials. Requiring the PUT-issued token closes that.
   #
-  # hop_limit 1 keeps the response on the host, which is where the only
-  # consumer is -- render-env.sh curls IMDS for the region, and it runs on the
-  # box, not in a container. Nothing in /internal talks to AWS at all.
-  # http_endpoint stays explicitly enabled for that same render-env.sh call.
+  # hop_limit 1 keeps the response on the host, which is where both consumers
+  # are -- render-env.sh curls IMDS for the region, and scripts/watchdog.sh
+  # curls it for the region and instance id before publishing its metric. Both
+  # run on the box, not in a container, so one hop is enough; a container would
+  # need two and deliberately does not get them. Nothing in /internal talks to
+  # AWS at all. http_endpoint stays explicitly enabled for those two calls.
   metadata_options {
     http_tokens                 = "required"
     http_endpoint               = "enabled"
@@ -206,14 +208,63 @@ resource "aws_instance" "app" {
     WantedBy=timers.target
     UNIT
 
+    # The application watchdog. Every alarm in infra/cloudwatch.tf except the
+    # one this feeds watches the *instance*, and a crash-looping container
+    # behind a healthy host trips none of them -- the box is up, both status
+    # checks pass, and the site is down. scripts/verify-deploy.sh notices that
+    # at deploy time and never again, so this is the between-deploys half.
+    #
+    # It runs on the host rather than in a container on purpose: a watchdog
+    # that lives inside the stack it watches cannot report the stack being
+    # down.
+    cat > /etc/systemd/system/concertfinder-watchdog.service <<'UNIT'
+    [Unit]
+    Description=Publish ConcertFinder container health to CloudWatch
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    User=concertfinder
+    ExecStart=/opt/concertfinder/scripts/watchdog.sh
+    # A hung `docker inspect` against a wedged daemon would otherwise block the
+    # unit forever, and OnUnitActiveSec below only re-arms once the service has
+    # finished -- so one hang would stop the watchdog permanently. Timing out
+    # keeps it firing; the missed datapoints are what raise the alarm.
+    TimeoutStartSec=45s
+    UNIT
+
+    cat > /etc/systemd/system/concertfinder-watchdog.timer <<'UNIT'
+    [Unit]
+    Description=Run the ConcertFinder application watchdog every minute
+
+    [Timer]
+    # One minute, matching the alarm's 60s period. OnUnitActiveSec rather than
+    # OnCalendar because it re-arms from the end of the last run, so a slow
+    # sample delays the next one instead of overlapping it.
+    #
+    # Deliberately no Persistent=true: unlike the nightly backup, a missed
+    # liveness sample is worthless after the fact, and replaying a backlog of
+    # them on boot would publish stale datapoints under current timestamps.
+    OnBootSec=2min
+    OnUnitActiveSec=1min
+    AccuracySec=5s
+
+    [Install]
+    WantedBy=timers.target
+    UNIT
+
     # The heredocs above are indented to match this file; systemd unit files
     # tolerate leading whitespace on directives but not on section headers, so
     # strip it rather than trusting that.
     sed -i 's/^[[:space:]]*//' /etc/systemd/system/concertfinder-backup.service \
-      /etc/systemd/system/concertfinder-backup.timer
+      /etc/systemd/system/concertfinder-backup.timer \
+      /etc/systemd/system/concertfinder-watchdog.service \
+      /etc/systemd/system/concertfinder-watchdog.timer
 
     systemctl daemon-reload
     systemctl enable --now concertfinder-backup.timer
+    systemctl enable --now concertfinder-watchdog.timer
   EOT
 
   tags = {

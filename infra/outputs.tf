@@ -117,7 +117,7 @@ output "breakglass_private_key_path" {
 # the resource created either way — so a green apply proves the topic exists,
 # not that anything will ever arrive. Check these in the SNS console once.
 output "alerts_topic_arn" {
-  description = "SNS topic for the EC2 status-check alarms. Confirm the email subscription once, by hand."
+  description = "SNS topic for the EC2 status-check and application-health alarms. Confirm the email subscription once, by hand."
   value       = aws_sns_topic.alerts.arn
 }
 

@@ -587,6 +587,129 @@ See `ios/README.md`.
 
 ---
 
+## 7b. Application health watchdog
+
+The alarms in `infra/cloudwatch.tf` watch the instance. This one watches the
+application, and it exists because the gap between those two is not a corner
+case — it is the outage this deployment actually has.
+
+`restart: unless-stopped` means a container that exits on every start
+crash-loops forever, and the host sees nothing wrong: both EC2 status checks
+pass, the instance is up, and the box reads as busy rather than broken.
+`config.Validate` exits hard on a bad `.env` by design, so one wrong variable
+produced exactly that once — a crash-looping api container, an SSM `Success`,
+a green workflow, and the site down throughout. `scripts/verify-deploy.sh`
+catches it at deploy time. Nothing caught it *after* a deploy, which is where
+an OOM kill, a rotated credential, or a suspended Neon compute land.
+
+`scripts/watchdog.sh` runs every minute from `concertfinder-watchdog.timer`,
+walks the services declared in `docker-compose.prod.yml`, and counts the ones
+that are missing, stopped, failing their healthcheck, or restarting. It
+publishes that count to CloudWatch as `ConcertFinder/App ServicesUnhealthy`,
+and `aws_cloudwatch_metric_alarm.app_services_unhealthy` mails the alerts topic
+when it stays at 1 or more for three minutes.
+
+Three things about it are deliberate:
+
+- **It runs on the host, not in a container.** A watchdog inside the stack it
+  watches cannot report the stack being down.
+- **`treat_missing_data = "breaching"`.** The watchdog runs on the machine it
+  is watching, so the states that stop it reporting — a wedged docker daemon, a
+  disabled timer, a rebuilt instance that never got the unit, an IAM change
+  that revoked `PutMetricData` — are the same states worth reporting. Absent
+  data alarms rather than reassuring. Tearing the timer down on purpose will
+  mail you; that is the correct direction to be wrong in. It is also the choice
+  the EC2 status-check alarm already made.
+- **A container inside its healthcheck `start_period` is not counted.** Every
+  successful deploy passes through that window, and an alarm that fires on
+  every deploy is an alarm the operator learns to delete.
+
+**Do the apply and the install below in one sitting.** Because absent data
+alarms, `terraform apply` against an instance that is not yet publishing creates
+an alarm with no metric behind it — it goes to ALARM about three minutes later
+and mails you, and stays there until the timer is running. That is the setting
+working as intended, but it is worth knowing before it happens rather than
+after, and it is the one ordering that makes the first alert a false one.
+
+The units are installed and enabled by `infra/ec2.tf`'s `user_data`, like the
+backup timer. **`user_data` does not re-run, and `lifecycle { ignore_changes =
+[user_data] }` keeps an edit to it from replacing the instance**, so an
+instance built before this existed has no watchdog and nothing says so — which
+is exactly the case the paragraph above describes, since the running instance
+predates this. Check:
+
+```
+systemctl list-timers concertfinder-watchdog --no-pager
+```
+
+If it is absent, install it by hand — this is the same copy-paste `user_data`
+performs:
+
+```
+sudo tee /etc/systemd/system/concertfinder-watchdog.service >/dev/null <<'EOF'
+[Unit]
+Description=Publish ConcertFinder container health to CloudWatch
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=concertfinder
+ExecStart=/opt/concertfinder/scripts/watchdog.sh
+TimeoutStartSec=45s
+EOF
+
+sudo tee /etc/systemd/system/concertfinder-watchdog.timer >/dev/null <<'EOF'
+[Unit]
+Description=Run the ConcertFinder application watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now concertfinder-watchdog.timer
+```
+
+Verify it end to end rather than waiting for the next minute to prove itself:
+
+```
+sudo -u concertfinder /opt/concertfinder/scripts/watchdog.sh
+journalctl -u concertfinder-watchdog.service -n 20 --no-pager
+
+# IMDSv2, the same way the script reads it — `ec2-metadata` is a separate
+# package and is not something to depend on mid-incident.
+TOKEN=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+IID=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+
+aws cloudwatch get-metric-statistics --namespace ConcertFinder/App \
+  --metric-name ServicesUnhealthy --statistics Maximum --period 60 \
+  --start-time "$(date -u -d '10 min ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --dimensions "Name=InstanceId,Value=$IID"
+```
+
+A healthy stack prints `unhealthy=0`. If `put-metric-data` fails with
+`AccessDenied`, the instance profile predates
+`aws_iam_role_policy.ec2_publish_app_metrics` — apply the Terraform.
+
+**The alarm cannot alert anyone until the SNS email subscription is
+confirmed**, which is a click in a mail AWS sends on the first apply and which
+Terraform reports as created either way. That applies to all four alarms; see
+§10 and `terraform output alerts_topic_arn`.
+
+Cost: one custom metric, one alarm, and ~44k `PutMetricData` calls a month, all
+inside CloudWatch's standing free-tier allowances (10 custom metrics, 10
+alarms, 1M API requests). Past those it would be roughly $0.30 + $0.10 +
+$0.44/month.
+
 ## 8. First automated deploy
 
 ```
@@ -806,18 +929,25 @@ Deliberately kept out to keep the year-1 bill at ~$16:
   ALB would add $16/mo.
 - **No auto-scaling.** Single-instance; if it dies, restart it. Fine for
   personal-project scale.
-- **No CloudWatch dashboards, and no application-level alerting.**
-  `infra/cloudwatch.tf` defines three metric alarms — EC2 status check, EC2
+- **No CloudWatch dashboards, and no log shipping.**
+  `infra/cloudwatch.tf` defines four metric alarms — EC2 status check, EC2
   *system* status check (whose action is `ec2:recover`, so it fixes rather than
-  reports), and estimated billing — and all three now publish to an SNS topic
-  with an email subscription on `var.alert_email`. Two things to know about
-  that: an email subscription stays **PendingConfirmation** until you click the
-  link AWS mails on the first apply, and Terraform reports the resource created
-  either way, so confirm it once in the SNS console rather than assuming a green
-  apply means alerts arrive. And these alarms watch the *instance*, not the app:
-  a crash-looping api container behind a healthy EC2 host fires nothing.
-  Application logs are slog to Docker logs (capped at 3 × 10 MB per container);
-  `docker compose logs -f` over SSM when you need them.
+  reports), estimated billing, and application services unhealthy — all
+  publishing to an SNS topic with an email subscription on `var.alert_email`.
+  The thing to know about that: an email subscription stays
+  **PendingConfirmation** until you click the link AWS mails on the first
+  apply, and Terraform reports the resource created either way, so confirm it
+  once in the SNS console rather than assuming a green apply means alerts
+  arrive.
+
+  The first three alarms watch the *instance*, not the app — a crash-looping
+  api container behind a healthy EC2 host trips none of them. That gap is what
+  the fourth closes; see §7b for how, and for why absent data from it alarms
+  rather than reassures. What is still missing is everything below the
+  yes/no: there is no dashboard and no metric history beyond that one count,
+  and application logs are slog to Docker logs (capped at 3 × 10 MB per
+  container), read with `docker compose logs -f` over SSM. The alarm tells you
+  something is wrong and roughly where; it does not tell you why.
 - **Nothing on the AWS side can see the database.** Neon publishes no
   CloudWatch metrics, so storage and the compute-hour budget — the line that
   actually binds on the free plan — are visible only in the Neon console. Set
