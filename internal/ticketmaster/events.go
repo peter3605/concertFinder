@@ -166,8 +166,37 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 	if attractionID == "" {
 		return nil, true, nil
 	}
-	q := url.Values{}
+	q := c.eventsQuery(lat, lng, radiusMiles)
 	q.Set("attractionId", attractionID)
+	return c.pagedEvents(ctx, q, permit)
+}
+
+// SearchEventsNear queries /events.json for music events near a coordinate
+// with no attraction filter -- everything on sale in a city rather than one
+// artist's dates.
+//
+// This is the signed-out discover view's supply. That view reads
+// concert_cache and nothing else, so it can only show what somebody's scan
+// already paid for, and a scan is filtered to one user's artists in one
+// user's city: until real accounts scan real places, the landing page is
+// empty everywhere. Seeding those places is what this exists for, and it is
+// deliberately the only query in this package that is not about a specific
+// artist.
+//
+// Same paging, permit and `complete` contract as SearchEvents. A caller that
+// caches the result must not cache it when complete is false, for the reason
+// loadOrFetchTM records: a truncated listing written to the cache is served
+// for the life of the entry and no later fetch can correct it.
+func (c *Client) SearchEventsNear(ctx context.Context, lat, lng float64, radiusMiles int, permit PagePermit) (events []Event, complete bool, err error) {
+	return c.pagedEvents(ctx, c.eventsQuery(lat, lng, radiusMiles), permit)
+}
+
+// eventsQuery builds the parameters every /events.json request shares. Kept
+// in one place so the city-wide query cannot drift from the per-artist one --
+// a differing classificationName or countryCode would quietly seed the
+// discover view with a different population than a scan produces.
+func (c *Client) eventsQuery(lat, lng float64, radiusMiles int) url.Values {
+	q := url.Values{}
 	q.Set("latlong", strconv.FormatFloat(lat, 'f', 4, 64)+","+strconv.FormatFloat(lng, 'f', 4, 64))
 	q.Set("radius", strconv.Itoa(radiusMiles))
 	q.Set("unit", "miles")
@@ -175,7 +204,17 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 	q.Set("size", strconv.Itoa(eventsPageSize))
 	q.Set("countryCode", "US")
 	q.Set("apikey", c.APIKey)
+	return q
+}
 
+// pagedEvents runs the /events.json paging loop for an already-composed query.
+//
+// Shared by both callers on purpose. Every property the comments above defend
+// -- one permit per request after the first, page 0 failing hard while a later
+// page degrades to incomplete, totalPages==0 reading as "nothing further",
+// MaxEventPages matching the API's 1000-result deep-paging refusal -- is
+// stated once here rather than in two copies that agree today.
+func (c *Client) pagedEvents(ctx context.Context, q url.Values, permit PagePermit) (events []Event, complete bool, err error) {
 	var out []Event
 	for page := 0; page < MaxEventPages; page++ {
 		if page > 0 && (permit == nil || !permit()) {

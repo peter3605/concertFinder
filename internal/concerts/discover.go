@@ -15,6 +15,40 @@ import (
 // see in a log.
 const CachePrefixTicketmaster = "tm:"
 
+// DiscoverSeedArtistID occupies the artist slot in the cache key the
+// city-wide discover seed writes under, giving those rows a name of their own
+// inside the tm: namespace.
+//
+// It has to be inside that namespace: FromCachedTicketmaster reads by the
+// CachePrefixTicketmaster prefix, so a seed row written outside it is a row
+// the view it exists to fill will never see, and the janitor's concert_cache
+// prune would stop expiring it. It has to be distinguishable within it, so an
+// operator reading the table can tell a city seed from an artist's listing.
+//
+// A literal collides with nothing: every other value in that slot is a
+// Spotify artist ID, which is always 22 characters of base62.
+const DiscoverSeedArtistID = "seed"
+
+// DiscoverSeedRadiusMiles is how far around each seeded city the daily seed
+// fetches. It must be at least the radius the signed-out view serves by
+// default (webhttp.DiscoverDefaultRadius), or a visitor at the edge of the
+// requested circle is filtered against events that were never fetched -- a
+// thinner list with nothing to say why. internal/http pins the two equal.
+const DiscoverSeedRadiusMiles = 50
+
+// DiscoverSeedLocation is the seed's Location for one city, so the fetch and
+// the cache key cannot disagree about the radius they describe.
+func DiscoverSeedLocation(lat, lng float64) Location {
+	return Location{Latitude: lat, Longitude: lng, RadiusMiles: DiscoverSeedRadiusMiles}
+}
+
+// DiscoverSeedCacheKey is the concert_cache key for one seeded city. Composed
+// with the same cacheKey a scan uses, so the two cannot drift into different
+// shapes under one prefix.
+func DiscoverSeedCacheKey(loc Location) string {
+	return cacheKey(CachePrefixTicketmaster, DiscoverSeedArtistID, loc)
+}
+
 // DiscoverMaxActs caps how many acts one cached event contributes. A festival
 // bill can run to dozens of attractions; the signed-out card is a teaser, and
 // the ones after the fourth are neither useful there nor free to carry.
