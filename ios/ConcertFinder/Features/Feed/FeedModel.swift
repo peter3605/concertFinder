@@ -42,6 +42,9 @@ final class FeedModel {
     private(set) var searchOrigin: UserLocation?
     private(set) var computedAt: Date?
     private(set) var complete = true
+    /// When the upstream allowance resets. Written only through
+    /// `setRetryAfter`, which arms the timer that retires it — a bare
+    /// assignment leaves `canRescan` disabled past its own deadline.
     private(set) var retryAfter: Date?
     private(set) var isRefreshing = false
     private(set) var isLoading = false
@@ -77,6 +80,9 @@ final class FeedModel {
 
     private let api: APIClient
     private var pollTask: Task<Void, Never>?
+    /// Fires once, at `retryAfter`. See `setRetryAfter` for why a guard
+    /// built on a bare `Date()` comparison needs one.
+    private var throttleTask: Task<Void, Never>?
     private var pollCount = 0
     /// Guards the `filters` didSet during `reset()`. Clearing filters on
     /// sign-out would otherwise fire a fetch against a session that has just
@@ -278,7 +284,8 @@ final class FeedModel {
     ///
     /// `retryAfter` outranks everything: it is the server's own statement that
     /// today's upstream allowance is spent, and a scan started before it lifts
-    /// comes back capped by construction.
+    /// comes back capped by construction. It is retired by a timer rather
+    /// than by this comparison noticing the clock — see `setRetryAfter`.
     var canRescan: Bool {
         guard !isRescanning, !isRefreshing else { return false }
         if let retryAfter = retryAfter, retryAfter > Date() { return false }
@@ -303,7 +310,7 @@ final class FeedModel {
         } catch APIError.throttled(let until, let reason) {
             // Expected, not exceptional. Kept out of `error` so the feed does
             // not present a refusal to spend quota as a failure to load.
-            retryAfter = until ?? retryAfter
+            setRetryAfter(until ?? retryAfter)
             rescanRefusal = RescanRefusal(until: until, reason: reason)
         } catch is CancellationError {
             // Same reasoning as `load()`: a cancelled task is navigation, not
@@ -316,6 +323,65 @@ final class FeedModel {
     }
 
     func dismissRescanRefusal() { rescanRefusal = nil }
+
+    // MARK: - Throttle expiry
+
+    /// The only way `retryAfter` is written, because every write has to arm
+    /// the timer that retires it.
+    ///
+    /// `canRescan` compares `retryAfter` against `Date()`, and a clock
+    /// reaching an instant is not a change Observation can see: the
+    /// comparison happens inside a computed property, so the view is redrawn
+    /// when some *other* observed value changes and not when the wait is
+    /// actually over. The button sat disabled past its own deadline until a
+    /// tab switch, a pull-to-refresh or a relaunch happened to redraw it —
+    /// the user waited out the window and was told to keep waiting.
+    ///
+    /// An instant already in the past is stored as `nil` rather than kept:
+    /// it guards nothing, and holding one puts "Daily limit reached" over a
+    /// feed whose limit has already reset.
+    private func setRetryAfter(_ value: Date?) {
+        let effective = value.flatMap { $0 > Date() ? $0 : nil }
+        guard effective != retryAfter else { return }
+        retryAfter = effective
+        armThrottleExpiry()
+    }
+
+    /// Schedules the single moment `retryAfter` stops meaning anything.
+    private func armThrottleExpiry() {
+        throttleTask?.cancel()
+        throttleTask = nil
+        guard let retryAfter else { return }
+        let remaining = retryAfter.timeIntervalSinceNow
+        guard remaining > 0 else { return expireThrottleIfElapsed() }
+        throttleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remaining))
+            guard let self, !Task.isCancelled else { return }
+            self.expireThrottleIfElapsed()
+        }
+    }
+
+    /// Re-reads the clock before unlocking anything.
+    ///
+    /// `Task.sleep` promises to wait *at least* the duration, not to wake at
+    /// a given instant, and this guard must never fail open: a rescan asked
+    /// for before the window lifts is capped by construction, so it spends a
+    /// request to learn nothing and comes back as another 429. Waking early
+    /// costs one more sleep; unlocking early costs the user their answer.
+    private func expireThrottleIfElapsed() {
+        guard let retryAfter else { return }
+        guard retryAfter <= Date() else { return armThrottleExpiry() }
+        throttleTask?.cancel()
+        throttleTask = nil
+        self.retryAfter = nil
+        // The refusal banner names the same instant ("you can search again
+        // after 14:32"), so leaving it up would contradict the button above
+        // it. A refusal carrying no instant is the 15-minute interval with no
+        // stated end, and stays for the user to dismiss.
+        if let until = rescanRefusal?.until, until <= Date() {
+            rescanRefusal = nil
+        }
+    }
 
     // MARK: - Deep links
 
@@ -354,6 +420,11 @@ final class FeedModel {
     /// poll task keeps fetching against a token that no longer exists.
     func reset() {
         stopPolling()
+        // Unconditionally, not via `setRetryAfter(nil)`: that returns early
+        // when the value is already nil, which leaves this depending on the
+        // invariant that no timer outlives its instant rather than saying so.
+        throttleTask?.cancel()
+        throttleTask = nil
         pollCount = 0
         path = NavigationPath()
         events = []
@@ -363,7 +434,7 @@ final class FeedModel {
         searchOrigin = nil
         computedAt = nil
         complete = true
-        retryAfter = nil
+        setRetryAfter(nil)
         isRefreshing = false
         isLoading = false
         isRescanning = false
@@ -385,7 +456,7 @@ final class FeedModel {
         location = response.location
         computedAt = response.computedAt
         complete = response.complete
-        retryAfter = response.retryAfter
+        setRetryAfter(response.retryAfter)
         isRefreshing = response.refreshing
     }
 

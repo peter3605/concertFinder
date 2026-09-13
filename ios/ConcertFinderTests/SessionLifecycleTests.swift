@@ -358,6 +358,73 @@ struct SessionLifecycleTests {
         #expect(!feed.events.isEmpty)
     }
 
+    /// The bug: `canRescan` compares `retryAfter` against `Date()` inside a
+    /// computed property, and a clock reaching an instant is not a change
+    /// Observation can see. Nothing was published, so the view was never
+    /// asked to redraw and the button sat disabled past its own deadline
+    /// until a tab switch or a relaunch happened along — the user waited out
+    /// the window and was told to keep waiting.
+    ///
+    /// Asserted the way SwiftUI reads it: inside `withObservationTracking`,
+    /// waiting to be *told*. Polling `feed.canRescan` in a loop passes
+    /// against the bug — a direct read re-evaluates `Date()` every time, so
+    /// the model's answer was always right and only the screen was wrong.
+    @Test @MainActor func theRescanButtonReEnablesWhenTheThrottleLifts() async throws {
+        Self.signedInRoutes()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let until = formatter.string(from: Date().addingTimeInterval(0.3))
+        StubURLProtocol.routes["/api/me/concerts/refresh"] = .init(
+            status: 429,
+            json: #"{"retry_after": "\#(until)", "reason": "you just refreshed"}"#
+        )
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+
+        await feed.requestRescan()
+        #expect(!feed.canRescan)
+        #expect(feed.rescanRefusal != nil)
+
+        // Nothing below touches the model: no request, no property set. The
+        // timer is the only thing that can redraw the button.
+        let redrawn = ExpiryFlag()
+        withObservationTracking { _ = feed.canRescan } onChange: { redrawn.fire() }
+
+        let deadline = Date().addingTimeInterval(5)
+        while !redrawn.didFire, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(redrawn.didFire)
+        #expect(feed.canRescan)
+        // Retired, not merely stepped over: a past instant guards nothing, and
+        // holding one keeps "Daily limit reached" over a feed that has reset.
+        #expect(feed.retryAfter == nil)
+        // The banner named the same instant, so it goes when the instant does
+        // rather than contradicting the button above it.
+        #expect(feed.rescanRefusal == nil)
+    }
+
+    /// The other half, and the one that must not regress: the guard may wake
+    /// late, never early. A rescan asked for before the window lifts is
+    /// capped by construction and comes back as another 429.
+    @Test @MainActor func anUnexpiredThrottleStillBlocksTheRescan() async throws {
+        Self.signedInRoutes()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let until = formatter.string(from: Date().addingTimeInterval(3))
+        StubURLProtocol.routes["/api/me/concerts/refresh"] = .init(
+            status: 429,
+            json: #"{"retry_after": "\#(until)", "reason": "daily upstream quota exhausted"}"#
+        )
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+
+        await feed.requestRescan()
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(!feed.canRescan)
+        #expect(feed.retryAfter != nil)
+    }
+
     // MARK: - P3-1
 
     /// Nothing may sit waiting on a scan of a city the user never named.
