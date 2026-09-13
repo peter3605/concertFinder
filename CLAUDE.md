@@ -782,6 +782,26 @@ surface. Two mechanisms now close it, and they cover different halves:
   step that explains a bad deploy. A `--wait` failure is swallowed in the
   workflow on purpose so this still runs and produces that output.
 
+**Both of those run once per deploy; `scripts/watchdog.sh` is what watches the
+rest of the time.** Every alarm in `infra/cloudwatch.tf` except the one it
+feeds watches the *instance*, and `restart: unless-stopped` means a container
+that exits on every start is a crash loop the host cannot see: both EC2 status
+checks pass, the box is up and busy, and the site is down. A systemd timer
+samples the compose services every minute and publishes the number that are
+missing, stopped, unhealthy or restarting to `ConcertFinder/App
+ServicesUnhealthy`. Three things hold it together. The alarm's
+`treat_missing_data` is **`"breaching"`**, because the watchdog runs on the
+machine it watches — a wedged daemon, a disabled timer, a rebuilt instance, a
+revoked `PutMetricData` all stop the datapoints, and an alerting path whose own
+failure reads as "healthy" is the bug it exists to close, one level up. A
+container inside its healthcheck `start_period` is **not** counted, or every
+successful deploy would alarm and the address would get muted. And the
+namespace is a string literal in both a shell script and HCL, which nothing at
+apply time can compare — `check-deploy-config.sh` pins them equal, the same way
+it pins `PG_IMAGE` across the backup and drill scripts. Note `user_data` carries
+`ignore_changes`, so the units it installs never reach the running instance;
+`docs/aws-deploy.md` §7b has the by-hand install, as it does for the backup timer.
+
 Deploys build the image **on the instance**, but `build` and `up -d` are
 separate SSM steps: `up -d --build` tears down running containers as part of
 the same command, so a failed or OOM-killed build took the site with it. Keep

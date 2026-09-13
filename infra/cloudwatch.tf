@@ -5,8 +5,10 @@
 # something went wrong, not a notification that it did. The topic below is what
 # turns them into the second thing.
 #
-# Three alarms, all about AWS-side resources. The database is not one of them:
-# see the note below the EC2 alarms.
+# Four alarms. Three watch AWS-side resources; the fourth watches the
+# application, and it is the only one here that could not be built out of a
+# metric AWS publishes on its own. The database is not among them: see the note
+# below the EC2 alarms.
 
 # The address is the operator's, and it is the same one CONTACT_EMAIL already
 # carries — an alert that arrives somewhere nobody reads is the failure mode
@@ -14,6 +16,14 @@
 # rather than to empty.
 locals {
   alert_email = var.alert_email != "" ? var.alert_email : var.ses_verified_recipient
+
+  # Shared with scripts/watchdog.sh, which publishes into it. The two strings
+  # must agree and nothing at apply time can tell that they do -- a metric
+  # published into an unwatched namespace produces an alarm with no data, which
+  # reads as whatever treat_missing_data says rather than as an error.
+  # scripts/check-deploy-config.sh compares them, the way it pins PG_IMAGE
+  # across the backup and restore-drill scripts.
+  app_metric_namespace = "ConcertFinder/App"
 }
 
 resource "aws_sns_topic" "alerts" {
@@ -90,6 +100,81 @@ resource "aws_cloudwatch_metric_alarm" "ec2_system_status_check" {
   dimensions = {
     InstanceId = aws_instance.app.id
   }
+}
+
+# The application alarm. Everything above watches the instance, and the gap
+# that leaves is not a corner case -- it is the failure this deployment
+# actually has. `restart: unless-stopped` means a container that exits on
+# every start crash-loops forever, and from the host's point of view nothing
+# is wrong: both EC2 status checks pass, the instance is up, and the box is
+# busy rather than broken. config.Validate exits hard on a bad .env by design,
+# so one wrong variable produced exactly that -- a crash-looping api container,
+# an SSM "Success" and a green workflow, with the site down throughout.
+#
+# scripts/verify-deploy.sh catches it at deploy time. Nothing caught it after,
+# which is where an OOM kill, a rotated credential or a suspended Neon compute
+# land. scripts/watchdog.sh is the minute-by-minute half, and this is what
+# turns its number into mail.
+#
+# treat_missing_data = "breaching" is the load-bearing line. The watchdog runs
+# on the box it is watching, so the states that stop it reporting are the same
+# states worth reporting: a wedged docker daemon, a disabled timer, a rebuilt
+# instance that never got the unit, an IAM change that silently revoked
+# PutMetricData. Treating absent data as healthy would make the monitoring's
+# own failure the one thing it cannot report -- which is the bug this alarm
+# exists to close, reproduced one level up. The EC2 status-check alarm above
+# made the same choice for the same reason, so this is the house rule and not
+# a preference. The cost is that tearing the watchdog down deliberately mails
+# somebody; that is the correct direction to be wrong in.
+#
+# Three consecutive minutes rather than one. A deploy recreates both
+# containers, and the api's healthcheck start_period is 60s -- the watchdog
+# already declines to count a container that is still inside it, so this is
+# slack for the recreate itself rather than for the startup. It also means a
+# single dropped datapoint cannot alarm on its own.
+resource "aws_cloudwatch_metric_alarm" "app_services_unhealthy" {
+  alarm_name          = "concertfinder-app-services-unhealthy"
+  alarm_description   = "One or more containers in docker-compose.prod.yml have been down, unhealthy or crash-looping for three minutes -- or the watchdog that reports on them has stopped. SSM to the box and run `docker compose -f docker-compose.prod.yml ps` and `journalctl -u concertfinder-watchdog.service -n 50`."
+  namespace           = local.app_metric_namespace
+  metric_name         = "ServicesUnhealthy"
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "breaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    InstanceId = aws_instance.app.id
+  }
+}
+
+# The instance can publish this one namespace and nothing else. PutMetricData
+# takes no resource ARN -- "*" is the only accepted value -- so the namespace
+# condition is the entire scope of this grant, and without it the role could
+# write into AWS/EC2 and friends and corrupt the metrics the alarms above read.
+data "aws_iam_policy_document" "publish_app_metrics" {
+  statement {
+    effect    = "Allow"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = [local.app_metric_namespace]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "ec2_publish_app_metrics" {
+  name   = "PublishAppMetrics"
+  role   = aws_iam_role.ec2.id
+  policy = data.aws_iam_policy_document.publish_app_metrics.json
 }
 
 # There is deliberately no database alarm here any more. Postgres is Neon,

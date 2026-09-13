@@ -40,16 +40,33 @@ the Cloudflare dashboard. See "DNS records" below.
 - **SES** verified domain identity, DKIM, custom MAIL FROM subdomain, and a
   sandbox-verified recipient (for initial testing). The DNS records these
   need are emitted as the `dns_records` output, not created.
-- **CloudWatch** three alarms, all publishing to an SNS topic with an email
+- **CloudWatch** four alarms, all publishing to an SNS topic with an email
   subscription on `alert_email`: EC2 status check failed, EC2 *system* status
-  check (whose action is `ec2:recover`, so it fixes rather than reports), and
-  estimated monthly billing over threshold. **An email subscription stays in
-  `PendingConfirmation` until someone clicks the link AWS sends on the first
-  apply, and Terraform reports the resource created either way** — confirm it
-  once rather than assuming a green apply means the alarms reach anyone. There
-  is deliberately no database alarm: Neon publishes no CloudWatch metrics, so
-  its storage and compute-hour headroom can only be alerted on from the Neon
-  console.
+  check (whose action is `ec2:recover`, so it fixes rather than reports),
+  estimated monthly billing over threshold, and **application services
+  unhealthy**. **An email subscription stays in `PendingConfirmation` until
+  someone clicks the link AWS sends on the first apply, and Terraform reports
+  the resource created either way** — confirm it once rather than assuming a
+  green apply means the alarms reach anyone. There is deliberately no database
+  alarm: Neon publishes no CloudWatch metrics, so its storage and compute-hour
+  headroom can only be alerted on from the Neon console.
+
+  The fourth is the only one not built from a metric AWS publishes by itself.
+  The first three watch the *instance*, and a crash-looping container behind a
+  healthy host trips none of them — `restart: unless-stopped` means the box
+  stays up and busy while the site is down. `scripts/watchdog.sh` runs on the
+  instance every minute from `concertfinder-watchdog.timer`, counts the
+  services in `docker-compose.prod.yml` that are missing, stopped, failing
+  their healthcheck or restarting, and publishes that count to
+  `ConcertFinder/App ServicesUnhealthy`. The role grants `PutMetricData` for
+  that namespace and no other.
+
+  Its `treat_missing_data` is `"breaching"`, which is deliberate and is the
+  part to leave alone: the watchdog runs on the machine it watches, so the
+  states that stop it reporting — a wedged docker daemon, a disabled timer, a
+  rebuilt instance that never got the unit — are exactly the states worth
+  reporting. Absent data therefore alarms rather than reassuring. Removing the
+  timer on purpose will mail you; that is the intended direction.
 
 Deliberately not included (see design §11.3 for triggers to add them):
 ALB, ECS Fargate, CloudFront/S3, Secrets Manager.
