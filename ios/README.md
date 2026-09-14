@@ -49,34 +49,44 @@ ID was registered 2026-08-25 — `com.concertfinder.ph`, team `L3MY7DN27B` — s
 is now effectively permanent: it is also `APNS_BUNDLE_ID` and the second half
 of `IOS_APP_ID`, which iOS caches from the association file.
 
-What is still outstanding, and every item fails *silently* — the app builds,
-launches, and sign-in simply never completes:
+**The server side is live.** The apply landed 2026-08-26 and the values are in
+SSM — `../infra/terraform.tfvars` holds them and `../infra/secrets.tf` derives
+the rest from `var.domain` and `var.ios_bundle_id`. Both of the values below
+answer for real today, and you can check that from anywhere:
 
-1. **The server side**, in SSM. `../infra/terraform.tfvars` holds the values
-   and `../infra/secrets.tf` derives the rest from `var.domain` and
-   `var.ios_bundle_id`, but none of it is live until `terraform apply` plus a
-   deploy:
-   - `MOBILE_CALLBACK_URL` → `https://concertfinder.app/app/auth/callback`.
-     Empty means `/api/auth/login?client=ios` returns 501 rather than
-     completing into a session the app cannot read.
-   - `IOS_APP_ID` → `L3MY7DN27B.com.concertfinder.ph`. Empty means
-     `/.well-known/apple-app-site-association` 404s **on purpose** — serving
-     an association naming an empty app is worse, because iOS caches it.
-   - The four `APNS_*` variables. `config.Validate` rejects a partial set at
-     startup, so a half-configured deployment refuses to boot rather than
-     dropping every notification quietly.
-2. **Signing**, in Xcode. `project.yml` sets no team, so a device build needs
-   one selected once.
+- `MOBILE_CALLBACK_URL` → `https://concertfinder.app/app/auth/callback`. Empty
+  would make `/api/auth/login?client=ios` return 501; it does not.
+- `IOS_APP_ID` → `L3MY7DN27B.com.concertfinder.ph`. Empty would make
+  `/.well-known/apple-app-site-association` 404 **on purpose** — serving an
+  association naming an empty app is worse, because iOS caches it. It serves.
 
-`aps-environment` in the entitlements is `development` and the server is
-configured `sandbox` to match, which is what a debug build off Xcode produces.
-Xcode rewrites the entitlement to `production` for TestFlight and App Store
-builds, and a token minted against one host is rejected by the other as
-`BadDeviceToken` — so `apns_environment` flips to `"production"` in the same
-sitting as the first TestFlight upload, not afterwards.
+**Signing is configured.** `project.yml` sets `DEVELOPMENT_TEAM: L3MY7DN27B`
+with `CODE_SIGN_STYLE: Automatic`, so a device build does not need a team
+picked by hand.
 
-Until the apply lands, the app builds and runs against the live API for
-everything except sign-in and push.
+What is still outstanding, and both fail *silently*:
+
+1. **Spotify is in Development Mode**, so sign-in completes only for
+   allowlisted accounts. For everyone else the handshake runs and ends without
+   a session. This is the gate, not the backend config — see "Not done here".
+2. **The APNs key is authorized for sandbox only** (`apns_environment =
+   "sandbox"`). `aps-environment` in the entitlements is `development`, which
+   is what a debug build off Xcode produces, so debug push works. Xcode
+   rewrites that entitlement to `production` for TestFlight and App Store
+   builds, and those devices are **skipped with a log** until the key covers
+   production too.
+
+That second one is worth stating precisely, because the mechanism changed and
+the old note here described a server that no longer exists. `apns_environment`
+is **not a host selector**: it names which environments the `.p8` is
+*authorized* for, a property of how Apple issued the key. Each notification is
+routed to its own host from the `Environment` stamped on the device row, so a
+single deployment serves debug and TestFlight builds at once — given a key
+issued as "Sandbox & Production". Reissue the key before the first TestFlight
+upload and set `apns_environment = "sandbox,production"`; there is no flip and
+no matching entitlement change to remember.
+
+The app otherwise builds and runs against the live API.
 
 ## Layout
 
@@ -164,10 +174,9 @@ engineering:
   reviewer, which is why §3.2 says to ship with an allowlisted demo account
   and treat Extended Quota as what makes the app usable by anyone who
   downloads it. Longest lead time in the plan.
-- **Apple Developer setup and M8**: App ID, signing, APNs key, privacy labels,
-  screenshots, review notes, submission.
-- **Deploying this branch.** The backend is live but running an older build;
-  the mobile auth routes ship with `ios-app`.
+- **Apple Developer setup and M8**: the App ID is registered and signing is
+  configured; what is left is the APNs key reissue, the App Store Connect app
+  record, privacy labels, screenshots, review notes and submission.
 
 Plan §10.1 and §10.2 are the two App Review questions worth raising in review
 notes rather than discovering at review.

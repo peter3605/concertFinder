@@ -67,7 +67,7 @@ effectively permanent, since iOS caches `IOS_APP_ID` from the association file.
 |---|---|---|
 | ~~Bundle identifier~~ | `ios/project.yml` | Resolved: `com.concertfinder.ph`. |
 | ~~Spotify logo asset~~ | `ios/ConcertFinder/DesignSystem/DesignSystem.swift` | Resolved 2026-08-31: the official full logo from Spotify's brand resource kit, in the asset catalogue as `SpotifyLogo`. See below. |
-| Signing | Xcode / App Store Connect | Team is available; no team is set in `project.yml`, so a device build needs one selected once. |
+| ~~Signing~~ | `ios/project.yml` | Resolved: `DEVELOPMENT_TEAM: L3MY7DN27B` with `CODE_SIGN_STYLE: Automatic`, so a device build needs no team picked by hand. |
 
 The APNs key was created restricted to **Sandbox**, which is why
 `apns_environment = "sandbox"`. A Sandbox-only key cannot send to the
@@ -448,9 +448,9 @@ listing is not bounded by anything.
 account-total ceiling (`rate_ledger_account`, migration 0017), and hitting it
 reuses the per-user `retry_after` path — which turned out to be the right
 answer rather than a shortcut, because the remedy is identical: wait for the
-UTC day to roll over. `README.md` now quotes both figures and says which is
-which (500 is what `.env.example` ships, 250 is the code default) instead of
-picking one and disagreeing with the other file.
+UTC day to roll over. `README.md`, `.env.example` and `internal/config` now
+agree on a single figure — 500 is what `.env.example` ships and 500 is the
+code default — instead of each quoting one and disagreeing with the others.
 
 ---
 
