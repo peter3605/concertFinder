@@ -467,6 +467,12 @@ func main() {
 		}
 		river.AddWorker(workers, &jobs.SendPushWorker{Pool: pool, APNs: apnsClient})
 		river.AddWorker(workers, &jobs.JanitorWorker{Pool: pool})
+		river.AddWorker(workers, &jobs.SeedDiscoverWorker{
+			Pool:   pool,
+			TM:     tmClient,
+			Ledger: rateLedger,
+			Cities: cfg.DiscoverSeedCities,
+		})
 		fanoutAff := &jobs.FanoutAffinityRefreshWorker{Pool: pool}
 		fanoutScan := &jobs.FanoutScanConcertsWorker{Pool: pool, Fallback: jobs.FallbackLocation{
 			Latitude:    cfg.UserLatitude,
@@ -477,6 +483,16 @@ func main() {
 		river.AddWorker(workers, fanoutAff)
 		river.AddWorker(workers, fanoutScan)
 		river.AddWorker(workers, fanoutDigest)
+		// The seed's only symptom when it is off is an empty section on the
+		// landing page, which is also what a cold cache looks like — so say
+		// which one this deployment is at startup, in both directions.
+		if len(cfg.DiscoverSeedCities) == 0 {
+			logger.Warn("discover seed disabled: the signed-out landing page will show only what signed-in users' scans have cached",
+				"set", "DISCOVER_SEED_CITIES")
+		} else {
+			logger.Info("discover seed enabled",
+				"cities", len(cfg.DiscoverSeedCities), "hour_utc", cfg.DailySeedHourUTC)
+		}
 		// Wall-clock schedules, not 24h intervals — see jobs.DailyAt for why
 		// an interval schedule silently stops running on a frequently
 		// redeployed process. RunOnStart stays false because DailyAt computes
@@ -510,6 +526,11 @@ func main() {
 				jobs.DailyAt(cfg.DailyJanitorHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.JanitorArgs{}, nil },
 				&river.PeriodicJobOpts{ID: "daily_janitor", RunOnStart: false},
+			),
+			river.NewPeriodicJob(
+				jobs.DailyAt(cfg.DailySeedHourUTC, 0),
+				func() (river.JobArgs, *river.InsertOpts) { return jobs.SeedDiscoverArgs{}, nil },
+				&river.PeriodicJobOpts{ID: "daily_seed_discover", RunOnStart: false},
 			),
 		}
 		riverClient, err = river.NewClient[pgx.Tx](riverDriver, &river.Config{

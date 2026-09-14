@@ -318,6 +318,35 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   undecodable payload, an empty area — answers `200` with `events: []`,
   because the caller is the first screen a stranger sees and both clients
   render nothing rather than an error there.
+- **What `/api/discover` cannot do is also why it needs feeding.** Serving it
+  from `concert_cache` alone is what makes it safe, and it is what made it
+  empty: every other row in that table is written by a signed-in user's scan,
+  filtered to that user's artists in that user's city, so the first screen a
+  stranger sees rendered nothing until real accounts had scanned real places —
+  and an empty section is indistinguishable from a quiet week, on both clients,
+  by design. `jobs.SeedDiscoverWorker` closes that with a daily
+  `ticketmaster.SearchEventsNear` — the one query in that package that is not
+  about a specific artist — per city in `DISCOVER_SEED_CITIES` (default: eight
+  dense US markets, New York first because it is the coordinate
+  `web/src/pages/discover.tsx` is hardcoded to). Four things hold it together.
+  The rows are **ordinary `tm:` rows** under `concerts.DiscoverSeedCacheKey`,
+  so `FromCachedTicketmaster` reads them with no special case and the janitor's
+  7-day prune expires them like any other — a key outside that prefix would be
+  invisible to the view it exists to fill *and* immortal. A **truncated fetch
+  is not cached at all**, the same rule `loadOrFetchTM` follows and for the same
+  reason: a short listing written here is served for the life of the row. The
+  seed radius must **cover** `DiscoverDefaultRadius`, or the edge of every
+  seeded city is filtered against events that were never fetched
+  (`internal/http/discover_seed_radius_test.go` pins them, since `jobs` cannot
+  import `internal/http`). And it charges **`rate.Ledger.ReserveAccount`**, a
+  block on `rate_ledger_account` alone: the spend is real against
+  Ticketmaster's 5000/day and belongs to no user, `rate_ledger.user_id` is an
+  FK into `users` so there is nowhere else to put it, and leaving it uncounted
+  would let signed-in users past a ceiling the upstream is already enforcing —
+  arriving, as ever, as 403s that look exactly like artists with no shows.
+  Unlike `Reserve`, a failed account charge grants **nothing** rather than
+  failing open: nobody is waiting on a seed and it runs again tomorrow, so
+  skipping a day is the cheaper mistake.
 - **The feed's `reason` line reads the affinity profile; it never computes
   one.** `Act.reason` ("You follow them", "#7 in your top artists") comes from
   `spotify.ArtistSignals`, a derived per-signal breakdown persisted in the
@@ -833,7 +862,9 @@ Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATA
 
 Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
 
-Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
+Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`,
+`DISCOVER_SEED_CITIES` (`Name:lat,lng;...`; unset uses the built-in list,
+`none` disables the seed), `DAILY_SEED_HOUR_UTC`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
 operator contact on `/privacy` and `/terms` and the address in the
 MusicBrainz/Nominatim User-Agent; it used to fall back to a maintainer's
 personal address, which an unset variable then published as a public

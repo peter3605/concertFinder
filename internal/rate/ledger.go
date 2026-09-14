@@ -201,7 +201,13 @@ type Reservation struct {
 	// because the account upsert errored and we failed open -- must not
 	// refund quota it never took.
 	accountTracked bool
-	granted        int64
+	// accountOnly marks a block that belongs to no user, so Release must not
+	// touch the per-user ledger. rate_ledger.user_id is a foreign key into
+	// users, so there is no synthetic account to charge and a zero UUID would
+	// simply fail the write -- the account counter is the honest and the only
+	// place this spend can land.
+	accountOnly bool
+	granted     int64
 	// wanted is what Reserve was asked for, kept only for diagnostics.
 	// granted < wanted means the day's cap was already partly spent before
 	// this scan began; it does not by itself mean any call was refused.
@@ -283,7 +289,12 @@ func (r *Reservation) Release(ctx context.Context) error {
 		// Best effort, and before the per-user refund: leaving the shared
 		// counter high is the failure that starves every other user, while
 		// leaving one user's counter high costs only them.
-		_ = r.ledger.refundAccount(ctx, r.source, int(unused))
+		if err := r.ledger.refundAccount(ctx, r.source, int(unused)); err != nil && r.accountOnly {
+			return err
+		}
+	}
+	if r.accountOnly {
+		return nil
 	}
 	return r.ledger.refund(ctx, r.userID, r.source, int(unused))
 }
@@ -392,6 +403,62 @@ func (l *Ledger) Reserve(ctx context.Context, userID uuid.UUID, source Source, w
 		ledger: l, userID: userID, source: source,
 		accountTracked: accountTracked,
 		granted:        int64(granted), wanted: int64(want),
+	}, nil
+}
+
+// ReserveAccount pre-charges a block against the account-wide ledger alone,
+// for upstream work that no user asked for -- currently the daily discover
+// seed, which fetches a city's listings so the signed-out landing page has
+// something to show.
+//
+// It exists because that spend is real against Ticketmaster's 5000/day and
+// has nowhere else to go. rate_ledger is keyed by a user_id with a foreign
+// key into users, so background work has no row there; charging nothing at
+// all would leave RATE_CAP_TM_ACCOUNT_DAILY counting less than the account
+// actually spends, and the guard would let signed-in users past a ceiling the
+// upstream is already enforcing -- arriving, as ever, as 403s that look
+// exactly like artists with no shows.
+//
+// One deliberate difference from Reserve: a failed account charge grants
+// nothing rather than failing open to a bounded block. Reserve fails open
+// because a user is waiting on that scan and a database blip must not cost
+// them their feed. Nobody is waiting on a seed, and it runs again tomorrow,
+// so the cheaper mistake here is to skip a day.
+func (l *Ledger) ReserveAccount(ctx context.Context, source Source, want int) (*Reservation, error) {
+	if l == nil || l.Pool == nil {
+		return &Reservation{unlimited: true}, nil
+	}
+	capacity := l.Caps.AccountCap(source)
+	if capacity <= 0 {
+		// The ceiling is switched off, exactly as it is for a per-user cap of
+		// zero. Unset restores the behaviour from before the account ledger
+		// existed.
+		return &Reservation{unlimited: true}, nil
+	}
+	if want < 0 {
+		want = 0
+	}
+	newTotal, err := l.chargeAccount(ctx, source, want)
+	if err != nil {
+		return &Reservation{
+			ledger: l, source: source, accountOnly: true,
+			granted: 0, wanted: int64(want),
+		}, err
+	}
+	granted := want - (newTotal - capacity)
+	if granted < 0 {
+		granted = 0
+	}
+	if granted > want {
+		granted = want
+	}
+	if over := want - granted; over > 0 {
+		_ = l.refundAccount(ctx, source, over)
+	}
+	return &Reservation{
+		ledger: l, source: source,
+		accountTracked: true, accountOnly: true,
+		granted: int64(granted), wanted: int64(want),
 	}, nil
 }
 

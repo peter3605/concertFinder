@@ -74,6 +74,25 @@ type Config struct {
 	DailyScanHourUTC     int
 	DailyDigestHourUTC   int
 	DailyJanitorHourUTC  int
+	DailySeedHourUTC     int
+
+	// DiscoverSeedCities are the places the daily seed fetches listings for,
+	// so the signed-out landing page has something to show in them.
+	//
+	// It needs a list at all because /api/discover is served entirely from
+	// concert_cache, and every other row in that table was written by a
+	// signed-in user's scan of their own city. Until enough real accounts
+	// scan enough real places, the first screen a stranger sees renders
+	// nothing -- silently, since an empty section is also what a healthy
+	// quiet week looks like.
+	//
+	// Empty disables the seed entirely.
+	DiscoverSeedCities []SeedCity
+	// discoverSeedCitiesErr carries a DISCOVER_SEED_CITIES parse failure from
+	// Load to Validate. Kept rather than logged: a typo that silently drops a
+	// city is exactly the failure this feature exists to prevent, and it
+	// would present as the landing page being empty in one market.
+	discoverSeedCitiesErr error
 
 	// Per-user daily caps on outbound API calls (design §8.3). 0 disables
 	// enforcement for that source.
@@ -259,6 +278,12 @@ func Load() (*Config, error) {
 	c.DailyScanHourUTC = hourEnv("DAILY_SCAN_HOUR_UTC", 7)
 	c.DailyDigestHourUTC = hourEnv("DAILY_DIGEST_HOUR_UTC", 9)
 	c.DailyJanitorHourUTC = hourEnv("DAILY_JANITOR_HOUR_UTC", 10)
+	// Ahead of the affinity refresh and the nightly scan: the seed spends
+	// account quota those two also draw on, and it is the cheapest of the
+	// three, so it goes first rather than competing with the tail of a
+	// fanout.
+	c.DailySeedHourUTC = hourEnv("DAILY_SEED_HOUR_UTC", 5)
+	c.DiscoverSeedCities, c.discoverSeedCitiesErr = parseSeedCities(os.Getenv("DISCOVER_SEED_CITIES"))
 	// Defaults sized so one full scan of a 200-artist profile fits inside a
 	// day's allowance for each source; see the field comments.
 	// 500 = MaxScoredArtists (200) x CallsPerArtistColdScan (2), rounded up
@@ -344,6 +369,82 @@ const SpotifyCallbackPath = "/api/auth/callback"
 // the unsubscribe link of real outbound email and in the User-Agent we send
 // MusicBrainz and Nominatim. None of these announce themselves; all of them
 // are trivially checkable here.
+// SeedCity is one place the discover seed fetches listings for. Name is for
+// logs and .env readability only; nothing keys off it.
+type SeedCity struct {
+	Name      string
+	Latitude  float64
+	Longitude float64
+}
+
+// defaultSeedCities are dense US concert markets, New York first because that
+// is the coordinate the signed-out web page is hardcoded to and therefore the
+// one city where an empty cache is guaranteed to be visible.
+//
+// Eight of them, at up to ticketmaster.MaxEventPages requests each, is at
+// most 80 of the account's 5000 daily Ticketmaster calls -- deliberately a
+// rounding error against what signed-in users spend, because this is a
+// backdrop and they are the product.
+var defaultSeedCities = []SeedCity{
+	{"New York", 40.7128, -74.0060},
+	{"Los Angeles", 34.0522, -118.2437},
+	{"Chicago", 41.8781, -87.6298},
+	{"San Francisco", 37.7749, -122.4194},
+	{"Austin", 30.2672, -97.7431},
+	{"Seattle", 47.6062, -122.3321},
+	{"Atlanta", 33.7490, -84.3880},
+	{"Boston", 42.3601, -71.0589},
+}
+
+// parseSeedCities reads the DISCOVER_SEED_CITIES form:
+//
+//	Name:lat,lng;Name:lat,lng
+//
+// An empty string yields the defaults. The literal "none" yields no cities,
+// which is how an operator turns the seed off -- distinct from unset, because
+// unset must keep working for a deployment that never sets it.
+//
+// A malformed entry is an error rather than a skip. Dropping one city quietly
+// leaves that market's landing page empty, which is indistinguishable from
+// the cache simply being cold.
+func parseSeedCities(raw string) ([]SeedCity, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultSeedCities, nil
+	}
+	if strings.EqualFold(raw, "none") {
+		return nil, nil
+	}
+	var out []SeedCity
+	for _, entry := range strings.Split(raw, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		name, coords, ok := strings.Cut(entry, ":")
+		if !ok {
+			return nil, fmt.Errorf("DISCOVER_SEED_CITIES entry %q must be Name:lat,lng", entry)
+		}
+		latS, lngS, ok := strings.Cut(coords, ",")
+		if !ok {
+			return nil, fmt.Errorf("DISCOVER_SEED_CITIES entry %q must be Name:lat,lng", entry)
+		}
+		lat, err := strconv.ParseFloat(strings.TrimSpace(latS), 64)
+		if err != nil {
+			return nil, fmt.Errorf("DISCOVER_SEED_CITIES entry %q: bad latitude: %w", entry, err)
+		}
+		lng, err := strconv.ParseFloat(strings.TrimSpace(lngS), 64)
+		if err != nil {
+			return nil, fmt.Errorf("DISCOVER_SEED_CITIES entry %q: bad longitude: %w", entry, err)
+		}
+		if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+			return nil, fmt.Errorf("DISCOVER_SEED_CITIES entry %q names a point that is not on Earth", entry)
+		}
+		out = append(out, SeedCity{Name: strings.TrimSpace(name), Latitude: lat, Longitude: lng})
+	}
+	return out, nil
+}
+
 func (c Config) Validate() []error {
 	var errs []error
 	required := []struct{ name, val string }{
@@ -384,6 +485,10 @@ func (c Config) Validate() []error {
 	if math.IsNaN(c.UserLongitude) || math.IsInf(c.UserLongitude, 0) ||
 		c.UserLongitude < -180 || c.UserLongitude > 180 {
 		errs = append(errs, fmt.Errorf("USER_LONGITUDE must be between -180 and 180, got %v", c.UserLongitude))
+	}
+
+	if c.discoverSeedCitiesErr != nil {
+		errs = append(errs, c.discoverSeedCitiesErr)
 	}
 
 	if u := c.SpotifyRedirectURI; u != "" && !strings.HasSuffix(strings.TrimRight(u, "/"), SpotifyCallbackPath) {

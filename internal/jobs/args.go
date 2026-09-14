@@ -169,3 +169,34 @@ func (SendPushArgs) Kind() string { return "send_push" }
 func (SendPushArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: PushMaxAttempts}
 }
+
+// SeedDiscoverArgs fetches city-wide Ticketmaster listings into concert_cache
+// so the signed-out discover view has something to show. Runs daily; see
+// SeedDiscoverWorker for why it exists and what it charges.
+type SeedDiscoverArgs struct{}
+
+func (SeedDiscoverArgs) Kind() string { return "seed_discover" }
+
+// InsertOpts bounds retries and collapses duplicate enqueues.
+//
+// MaxAttempts: river's default of 25 would re-fetch every city two dozen
+// times against a shared allowance for a backdrop nobody is waiting on.
+//
+// UniqueOpts: the job takes no arguments, so ByState alone is the whole
+// identity — at most one seed run outstanding at a time. Without it a
+// scheduler tick landing on a slow run would start a second one that
+// re-fetches and re-charges for the same cities.
+func (SeedDiscoverArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: SeedDiscoverMaxAttempts,
+		UniqueOpts: river.UniqueOpts{
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
