@@ -315,12 +315,21 @@ func main() {
 
 		var fallbackChain concerts.Fallbacker
 		if cfg.Phase2Enabled {
-			// URL resolution defaults to MusicBrainz (free, no API key). If a
-			// Brave key is set, we fall back to that — kept for parity while
-			// evaluating MusicBrainz coverage on real data.
+			// URL resolution is MusicBrainz, unconditionally. A non-empty
+			// BRAVE_SEARCH_API_KEY used to override it, and that override is
+			// how Tier B spent eleven nights resolving nothing: the key on the
+			// instance answered 422 to every request, so ResolveOfficialURL
+			// returned an error for every artist, tryOfficialSite was never
+			// reached, and not one `page:` row was written after 2026-09-02.
+			// A pasted key is not a statement that Brave still works, which
+			// makes it a bad selector for anything. Brave is also the only
+			// resolver carrying no pool, so choosing it silently bypassed
+			// mb_url_cache — a persistent cache the janitor prunes, every
+			// other path fills, and 84 artists were already resolved into.
 			var resolver fallback.URLResolver = fallback.NewMusicBrainzClient(userAgent).WithPool(pool)
 			if cfg.BraveSearchAPIKey != "" {
-				resolver = fallback.NewBraveClient(cfg.BraveSearchAPIKey)
+				logger.Warn("BRAVE_SEARCH_API_KEY is set but no longer selects a resolver; Tier B always uses MusicBrainz",
+					"action", "remove it from .env")
 			}
 			// One User-Agent for every outbound client, not just the two that
 			// happened to take one. The artist-site fetcher and the Songkick

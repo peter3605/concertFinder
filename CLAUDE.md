@@ -258,6 +258,27 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   through the same client. The cost is real and accepted: MusicBrainz lists
   plenty of `http://` homepages, and those artists now fail the fallback rather
   than being fetched.
+- **Tier B resolves through MusicBrainz, and nothing may silently replace
+  it.** `BRAVE_SEARCH_API_KEY` used to be a *selector*: a non-empty value swapped
+  `MusicBrainzClient` for `BraveClient` in `main.go`, on the theory that a
+  pasted key means someone wants Brave. It does not — it means someone pasted a
+  key once. When the production key began answering `422` to every request,
+  `ResolveOfficialURL` returned an error for every artist, `tryOfficialSite` was
+  never reached, and Tier B wrote not one `page:` row between 2026-09-02 and
+  2026-09-14 while still costing the escalation. `BraveClient` is also the only
+  resolver carrying **no pool**, so selecting it bypassed `mb_url_cache`
+  altogether — 84 already-resolved homepages, a table the janitor prunes and
+  every other path fills, consulted by nobody. The key is now inert and warns at
+  startup. What made this survive eleven nightly scans is that **"the chain ran
+  and found nothing" and "the chain never ran" were the same observation**:
+  both are artists with no shows, no error is raised, and the per-artist
+  `url resolve failed` WARN is two hundred lines of noise that says nothing in
+  aggregate. `concerts.fallbackStats` is the fix for that half — one
+  `fallback summary` line per scan carrying eligible/attempted/produced/skipped,
+  logged **unconditionally**, because a summary that only prints when something
+  looks wrong would have stayed silent through the whole outage. `eligible > 0`
+  with `attempted == 0` is a dead chain; `attempted > 0` with `produced == 0` is
+  a normal night.
 - **Display "Powered by Spotify"** attribution on any UI surface showing
   Spotify-derived data, **with Spotify's logo** — their guidelines require the
   mark, not just the words. One component per client owns it
@@ -860,7 +881,7 @@ that guard a mispasted production URL is an outage rather than a typo.
 
 Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `DB_MAX_CONNS` (optional, default 20 — pgx's own default is `max(4, NumCPU)`, i.e. 4 on the t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers; exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries), `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
 
-Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (optional — MB is the default resolver), `SONGKICK_API_KEY`.
+Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBACK_BUDGET_SECONDS`, `PHASE2_FALLBACK_CONCURRENCY`, `BRAVE_SEARCH_API_KEY` (**deprecated, inert** — MusicBrainz is always the resolver; see the Tier B constraint above), `SONGKICK_API_KEY`.
 
 Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`,
 `DISCOVER_SEED_CITIES` (`Name:lat,lng;...`; unset uses the built-in list,
