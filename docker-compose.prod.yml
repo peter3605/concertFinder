@@ -12,6 +12,26 @@ services:
     env_file:
       - path: .env
         required: true
+    # Stated again here, from the same .env, because env_file alone loses to
+    # docker-compose.yml. That file's api service sets DATABASE_URL to the dev
+    # `db` container in `environment:`, and in Compose `environment:` outranks
+    # `env_file:` — so `-f docker-compose.yml -f docker-compose.prod.yml up`
+    # loaded the Neon URL, overrode it, and started a dev Postgres to serve it.
+    # That form is harmless for `ps` and `logs`, which is exactly why it got
+    # used for an `up`: production then ran for eight days against an empty
+    # database, every health check green, because /api/healthz pinged the
+    # wrong Postgres and got a cheerful yes (CF-B17).
+    #
+    # An `environment:` entry here wins the merge over the base file's, and
+    # interpolation reads the project's .env, so both invocations now reach the
+    # same database. docker-compose.yml is deliberately untouched: the local
+    # .env holds the host-side URL (127.0.0.1:5433) for `go run`, which would
+    # be wrong inside the dev compose network. `:?` refuses to render at all
+    # when .env lacks it, rather than starting a container with no database.
+    # config.Validate is the other half: it refuses a dev DSN at boot under a
+    # real cookie domain, whatever route delivered it.
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
     expose:
       - "8080"
     restart: unless-stopped
