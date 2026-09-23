@@ -738,11 +738,22 @@ swap Neon for an empty dev Postgres. That form is harmless for `ps`/`logs`,
 which is how it came to be used for an `up`, and production then served an
 empty database for eight days with every health check green (CF-B17).
 `docker-compose.prod.yml` now restates `DATABASE_URL` from `.env` in its own
-`environment:`, the preflight asserts the two-file form renders `.env`'s value,
-and `config.Validate` refuses a `db`/loopback/unix-socket host or a non-TLS
+`environment:`, the preflight asserts that both the prod-only and the two-file
+forms render `.env`'s value (CF-B18), and `config.Validate` refuses a `db`/loopback/unix-socket host or a non-TLS
 `sslmode` whenever `SESSION_COOKIE_DOMAIN` is non-loopback — the last because
 it catches every *other* route to a dev database. Still: deploy commands use
 `-f docker-compose.prod.yml` alone.
+
+**Every ad-hoc `aws ssm send-command` against the instance carries `--comment`
+naming the story** (e.g. `--comment "CF-B7 verify IAM and IMDS"`). SSM keeps
+about 30 days of send-commands *including their full text*, so the audit trail
+of who touched production and why already exists — but only a labelled row is
+usable. Deploys label themselves ("Deploy from GitHub Actions run NNN"); on
+2026-09-14 seven hand-run commands went out in 25 minutes with a blank Comment,
+and the one that caused CF-B17's eight-day outage was among the unattributable
+rows, which turned "what changed?" into a four-round-trip investigation. The
+comment is capped at 100 characters, so it is the story ID and a few words, not
+a description.
 
 `scripts/verify-deploy.sh` is in the same category — it only ever executes on
 the instance, mid-deploy — so the preflight `bash -n`s it and asserts its

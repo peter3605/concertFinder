@@ -82,29 +82,40 @@ if ! (cd "$repo" && docker compose -f docker-compose.yml config) >/dev/null 2>"$
 fi
 pass "docker-compose.yml parses"
 
-# 4b. The two-file form reaches the database .env names (CF-B17). Run with the
+# 4b. Every prod compose form reaches the database .env names (CF-B17). Run with the
 #     dev file first and the prod file second, docker-compose.yml's
 #     `environment: DATABASE_URL` (the compose `db` container) used to outrank
 #     the prod file's env_file, so `up` quietly swapped Neon for an empty dev
 #     Postgres. It did, for eight days, with every health check green. The
 #     prod file restating DATABASE_URL in `environment:` is what fixes it;
 #     this is what notices if that line goes.
+#
+#     Every form that can start production is pinned, not only the one that
+#     broke (CF-B18): the prod file alone is what deploy.yml runs, the two-file
+#     form is what a session types by hand, and a check covering one says
+#     nothing about the other. Removing the prod file's `environment:` entry
+#     fails the two-file row; the prod-only row is what fails if the api ever
+#     stops reading .env at all.
 api_db_url() {
     (cd "$work" && docker compose "$@" config --format json) 2>"$work/err4b" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["api"]["environment"]["DATABASE_URL"])'
 }
-if ! got=$(api_db_url -f docker-compose.yml -f docker-compose.prod.yml); then
-    sed 's/^/    /' "$work/err4b" >&2
-    fail "docker-compose.yml + docker-compose.prod.yml do not render together"
-fi
-if [ "$got" != "$neon_url" ]; then
-    printf '    .env:     %s\n    rendered: %s\n' "$neon_url" "$got" >&2
-    fail "\`-f docker-compose.yml -f docker-compose.prod.yml\` does not give the api
-      the DATABASE_URL from .env. \`up\` in that form would run production against
-      whatever it rendered instead — docker-compose.prod.yml must set
-      DATABASE_URL in the api service's \`environment:\`."
-fi
-pass "the two-file compose form gives the api .env's DATABASE_URL"
+for form in "docker-compose.prod.yml" "docker-compose.yml docker-compose.prod.yml"; do
+    args=()
+    for f in $form; do args+=(-f "$f"); done
+    if ! got=$(api_db_url "${args[@]}"); then
+        sed 's/^/    /' "$work/err4b" >&2
+        fail "\`${args[*]} config\` does not render"
+    fi
+    if [ "$got" != "$neon_url" ]; then
+        printf '    .env:     %s\n    rendered: %s\n' "$neon_url" "$got" >&2
+        fail "\`${args[*]}\` does not give the api the DATABASE_URL from .env.
+      \`up\` in that form would run production against whatever it rendered
+      instead — docker-compose.prod.yml must set DATABASE_URL in the api
+      service's \`environment:\`."
+    fi
+    pass "\`${args[*]}\` gives the api .env's DATABASE_URL"
+done
 
 # ...and the dev file on its own still reaches the dev database, whatever the
 # .env says: the local .env holds the host-side URL for \`go run\`, which is
