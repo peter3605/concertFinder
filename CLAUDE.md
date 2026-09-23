@@ -730,6 +730,20 @@ Two of those are worth naming, because both are invisible to the obvious check:
   the script asserts against the compose-resolved environment instead, which
   is what actually reaches the container.
 
+**The dev and prod compose files must never disagree about the database
+without the prod file winning.** `docker-compose.yml` sets the api's
+`DATABASE_URL` to the dev `db` container in `environment:`, which outranks
+`env_file:` — so `-f docker-compose.yml -f docker-compose.prod.yml up` used to
+swap Neon for an empty dev Postgres. That form is harmless for `ps`/`logs`,
+which is how it came to be used for an `up`, and production then served an
+empty database for eight days with every health check green (CF-B17).
+`docker-compose.prod.yml` now restates `DATABASE_URL` from `.env` in its own
+`environment:`, the preflight asserts the two-file form renders `.env`'s value,
+and `config.Validate` refuses a `db`/loopback/unix-socket host or a non-TLS
+`sslmode` whenever `SESSION_COOKIE_DOMAIN` is non-loopback — the last because
+it catches every *other* route to a dev database. Still: deploy commands use
+`-f docker-compose.prod.yml` alone.
+
 `scripts/verify-deploy.sh` is in the same category — it only ever executes on
 the instance, mid-deploy — so the preflight `bash -n`s it and asserts its
 executable bit. It is the step that decides whether a deploy succeeded, so a

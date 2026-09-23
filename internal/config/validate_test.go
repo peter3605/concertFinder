@@ -5,6 +5,14 @@ import (
 	"testing"
 )
 
+// neonDSN is the shape of the production DATABASE_URL: a remote host and
+// sslmode=require.
+const neonDSN = "postgres://neondb_owner:pw@ep-cool-name-123456.us-east-1.aws.neon.tech/neondb?sslmode=require"
+
+// devDSN is docker-compose.yml's api value, byte for byte — the URL production
+// actually ran on for eight days (CF-B17).
+const devDSN = "postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable"
+
 // prodConfig is a configuration that should pass cleanly.
 func prodConfig() Config {
 	return Config{
@@ -15,6 +23,7 @@ func prodConfig() Config {
 		EncryptionKey:       strings.Repeat("ab", 32), // 32 bytes hex
 		SiteBaseURL:         "https://concerts.example.com",
 		SiteDomain:          "concerts.example.com",
+		DatabaseURL:         neonDSN,
 		EmailDeliveryMode:   "log",
 		ContactEmail:        "operator@concerts.example.com",
 	}
@@ -139,6 +148,77 @@ func TestSiteDomainNotRequiredLocally(t *testing.T) {
 	c.SiteDomain = ""
 	if errs := c.Validate(); len(errs) != 0 {
 		t.Errorf("local dev config must validate without SITE_DOMAIN, got %v", errs)
+	}
+}
+
+// A production cookie domain with a development database is invisible to
+// every health check we have: each asks whether *a* Postgres answers, and the
+// wrong one answers too. From 2026-09-14 to 09-23 the compose `db` container
+// stood in for Neon, empty, and the site admitted nobody with every signal
+// green. Refusing to boot is what turns that into a failed deploy.
+func TestDevDatabaseRejectedInProduction(t *testing.T) {
+	for _, tc := range []struct{ name, dsn, want string }{
+		{"the compose db service", devDSN, `compose "db" service`},
+		{"db host with TLS", "postgres://u:p@db:5432/x?sslmode=require", `compose "db" service`},
+		{"localhost", "postgres://u:p@localhost:5432/x?sslmode=require", "points at localhost"},
+		{"loopback IP", "postgres://u:p@127.0.0.1:5433/x?sslmode=require", "points at 127.0.0.1"},
+		{"IPv6 loopback", "postgres://u:p@[::1]:5432/x?sslmode=require", "points at ::1"},
+		{"sslmode=disable on a remote host", "postgres://u:p@ep-x.neon.tech/neondb?sslmode=disable", "does not require TLS"},
+		{"sslmode=allow tries plaintext first", "postgres://u:p@ep-x.neon.tech/neondb?sslmode=allow", "does not require TLS"},
+		{"keyword/value form", "host=db port=5432 user=u dbname=x sslmode=require", `compose "db" service`},
+		{"loopback as a fallback host", "postgres://u:p@ep-x.neon.tech,127.0.0.1/neondb?sslmode=require", "points at 127.0.0.1"},
+		{"unix socket", "host=/var/run/postgresql dbname=x sslmode=require", "unix socket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := prodConfig()
+			c.DatabaseURL = tc.dsn
+			if !problemsContaining(t, c, tc.want) {
+				t.Errorf("DATABASE_URL %q under a production cookie domain must be rejected with %q, got %v",
+					tc.dsn, tc.want, c.Validate())
+			}
+		})
+	}
+}
+
+// The dev DSN is exactly the shape the check above refuses, so the refusal
+// has to be conditioned on the production posture. A flat ban would break
+// every developer's machine — this is the half of the check that keeps it
+// honest.
+func TestDevDatabaseAllowedLocally(t *testing.T) {
+	for _, dsn := range []string{
+		devDSN,
+		// .env.example's value, for `go run` against the published port.
+		"postgres://concertfinder:concertfinder@127.0.0.1:5433/concertfinder?sslmode=disable",
+		"postgres://u:p@localhost:5432/x?sslmode=disable",
+	} {
+		c := prodConfig()
+		c.SessionCookieDomain = "127.0.0.1"
+		c.SpotifyRedirectURI = "https://127.0.0.1:3000/api/auth/callback"
+		c.SiteBaseURL = "https://127.0.0.1:3000"
+		c.DatabaseURL = dsn
+		if errs := c.Validate(); len(errs) != 0 {
+			t.Errorf("local dev must accept DATABASE_URL %q, got %v", dsn, errs)
+		}
+	}
+}
+
+// Remote hosts that merely resemble the refused ones must pass: the check is
+// on what pgx will dial, not on substrings.
+func TestRemoteDatabaseAcceptedInProduction(t *testing.T) {
+	for _, dsn := range []string{
+		neonDSN,
+		"postgres://u:p@db.example.com:5432/x?sslmode=verify-full",
+		"postgres://u:p@localhost-db.internal:5432/x?sslmode=require",
+		// Neon also issues URLs carrying channel_binding alongside sslmode.
+		"postgres://u:p@ep-x.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+	} {
+		c := prodConfig()
+		c.DatabaseURL = dsn
+		for _, e := range c.Validate() {
+			if strings.Contains(e.Error(), "DATABASE_URL") {
+				t.Errorf("DATABASE_URL %q must be accepted in production, got %v", dsn, e)
+			}
+		}
 	}
 }
 
