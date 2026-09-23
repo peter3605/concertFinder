@@ -33,5 +33,5 @@
     "notes": "MERGING TO main DEPLOYS TO PRODUCTION. deploy.yml fires on every push to main and concertfinder.app is live. Never merge from a session - push the branch, open the PR, wait for CI, then stop with the story In Review and the PR link recorded. Peter merges when he is ready to ship. Four Dependabot PRs are open; they deploy on merge too, so batch them rather than merging one at a time. ios.yml is path-filtered to the iOS client, so a PR that does not touch it runs only deploy.yml's test and deploy-config jobs - fine, but say so rather than reporting a bare 'all green'."
   },
   "viewContract": "Every project has its own 'road' view, filtered to that project and nothing else. Commands MUST scope by views.road - never by a shared browse view, whose filters anyone can change in the Notion UI. The 'Browse - filter this freely' view exists for reading and is deliberately not referenced here.",
-  "installedVersion": "0.1.0"
+  "installedVersion": "0.6.0"
 }
