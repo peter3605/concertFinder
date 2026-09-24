@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/peterho/concertfinder/internal/push"
 )
 
@@ -528,6 +530,27 @@ func (c Config) Validate() []error {
 		}
 	}
 
+	// A real cookie domain with a development database is the one
+	// misconfiguration no health check can see. From 2026-09-14 to 09-23
+	// production ran against the compose `db` container — an empty Postgres
+	// docker-compose.yml's `environment:` block had quietly substituted for
+	// Neon — and admitted nobody, while /api/healthz, verify-deploy.sh and
+	// the watchdog all reported green: each asks whether *a* database answers,
+	// never which one. The compose override is fixed in
+	// docker-compose.prod.yml; this catches every other route to the same
+	// place (a hand-edited .env, a future compose file, a stray -e flag) by
+	// refusing to boot, which `up -d --wait` and verify-deploy.sh do notice.
+	//
+	// Gated on a real cookie domain, like SITE_DOMAIN above: the dev DSN is
+	// exactly this shape and must keep working locally.
+	if !isLoopbackHost(c.SessionCookieDomain) && c.DatabaseURL != "" {
+		if why := devDatabaseReason(c.DatabaseURL); why != "" {
+			errs = append(errs, fmt.Errorf(
+				"DATABASE_URL %s, but SESSION_COOKIE_DOMAIN is %q — a production server pointed at a development database answers every health check while serving an empty site",
+				why, c.SessionCookieDomain))
+		}
+	}
+
 	// Removing CONTACT_EMAIL's default is only half the fix. main.go
 	// interpolates this into the MusicBrainz/Nominatim User-Agent
 	// unconditionally, so an empty value sends
@@ -622,6 +645,43 @@ func hostOf(s string) string {
 		return host
 	}
 	return s
+}
+
+// devDatabaseReason explains why a Postgres DSN looks like a development
+// database, or returns "" if it does not. It parses with pgconn — the parser
+// the pool itself uses — rather than net/url, so keyword/value DSNs, multi-host
+// URLs and a host-less "postgres:///db" (which pgx fills in as localhost or a
+// unix socket) are judged by what pgx would actually dial. A DSN pgconn cannot
+// parse is left alone: the pool fails on it at startup, loudly, by itself.
+func devDatabaseReason(dsn string) string {
+	pc, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return ""
+	}
+	// The host is checked first because it is the more telling reason — the
+	// compose dev DSN fails both — and because pgconn never uses TLS on a unix
+	// socket, so a socket would otherwise only ever be reported as plaintext.
+	hosts := []string{pc.Host}
+	for _, fb := range pc.Fallbacks {
+		hosts = append(hosts, fb.Host)
+	}
+	for _, h := range hosts {
+		switch {
+		case strings.HasPrefix(h, "/"):
+			return fmt.Sprintf("points at a local unix socket (%s)", h)
+		case strings.EqualFold(h, "db"):
+			return `points at the compose "db" service`
+		case isLoopbackHost(h):
+			return fmt.Sprintf("points at %s", h)
+		}
+	}
+	if pc.TLSConfig == nil {
+		// sslmode=disable, or allow (which tries plaintext first). Neon is
+		// across the public internet; ?sslmode=require is what stands in for
+		// the rds.force_ssl parameter group.
+		return "does not require TLS (sslmode=disable or allow)"
+	}
+	return ""
 }
 
 // isLoopbackHost reports whether a domain or URL refers to the local machine.
