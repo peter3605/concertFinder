@@ -191,6 +191,27 @@ func (g *FallbackGate) Acquire(ctx context.Context, wait time.Duration) (bool, f
 	}
 }
 
+// fallbackStats counts what the escalation actually did over one scan.
+//
+// It exists because "the fallback ran and found nothing" and "the fallback
+// never ran at all" are the same observation everywhere else in the system:
+// both present as artists with no shows, no error is raised, and the only
+// trace of the difference is whether rows appeared in tables nobody reads.
+// That ambiguity is what let a Tier B resolver answering 422 to every single
+// request go unnoticed from 2026-09-02 to 2026-09-14 — eleven nightly scans,
+// every one of them logging nothing worse than a per-artist warning lost
+// among two hundred others.
+//
+// eligible > 0 with attempted == 0 is the dead-chain shape; attempted > 0
+// with produced == 0 is a chain that is running and finding nothing, which
+// is a normal night on a profile of well-covered artists.
+type fallbackStats struct {
+	eligible  atomic.Int64 // passed the escalation gate in searchOne
+	attempted atomic.Int64 // actually entered the chain
+	produced  atomic.Int64 // came back holding at least one concert
+	skipped   atomic.Int64 // eligible, but the budget or the gate was gone
+}
+
 // resolveFallbackBudget maps a configured budget onto an effective one:
 // zero means "unset, use the default", negative means "disabled".
 func resolveFallbackBudget(configured time.Duration) time.Duration {
@@ -285,7 +306,7 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 	m := NewMerger()
 	sem := make(chan struct{}, d.Parallelism)
 	var skipped atomic.Int64
-	var fallbackSkipped atomic.Int64
+	var fbStats fallbackStats
 	var wg sync.WaitGroup
 
 	for _, a := range usable {
@@ -304,7 +325,7 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 			}
 			defer func() { <-sem }()
 
-			batch, err := searchOne(ctx, fallbackCtx, d, a, loc, &fallbackSkipped)
+			batch, err := searchOne(ctx, fallbackCtx, d, a, loc, &fbStats)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					skipped.Add(1)
@@ -335,7 +356,21 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 	// budget ran out" is a tuning signal, while "another scan held the slot"
 	// is a concurrency signal that means this deployment is running more
 	// simultaneous scans than the shared 1 req/sec turnstiles can feed.
-	if n := int(fallbackSkipped.Load()); n > 0 {
+	// One line per scan saying what the escalation did, emitted whether or
+	// not anything went wrong. A conditional summary would have stayed silent
+	// through the whole outage above: nothing was skipped and no budget ran
+	// out, the chain simply resolved nothing, two hundred times a night.
+	if d.Fallback != nil {
+		slog.Info("fallback summary",
+			"eligible", fbStats.eligible.Load(),
+			"attempted", fbStats.attempted.Load(),
+			"produced_events", fbStats.produced.Load(),
+			"skipped_no_budget", fbStats.skipped.Load(),
+			"total_artists", len(usable),
+		)
+	}
+
+	if n := int(fbStats.skipped.Load()); n > 0 {
 		if !admitted {
 			slog.Info("fallback skipped: another scan holds the process-wide slot",
 				"artists_not_escalated", n,
@@ -369,9 +404,8 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 //
 // fallbackCtx is the scan-wide fallback deadline (see SearchDeps.FallbackBudget);
 // it is a child of ctx, so it is never the longer-lived of the two.
-// fallbackSkipped counts artists that would have escalated but couldn't
-// because that budget was gone.
-func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Location, fallbackSkipped *atomic.Int64) ([]Concert, error) {
+// fs accumulates what the escalation did for this artist; see fallbackStats.
+func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Location, fs *fallbackStats) ([]Concert, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -446,14 +480,19 @@ func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredA
 	// carries every artist TM doesn't cover rather than only those neither
 	// primary knew about.
 	if len(out) == 0 && !capped && d.Fallback != nil && a.Score >= d.MinFallbackScore {
+		fs.eligible.Add(1)
 		// Don't even enter the chain once the scan-wide fallback budget is
 		// spent — every lookup inside would queue on a 1 req/sec turnstile
 		// only to be cancelled.
 		if fallbackCtx.Err() != nil {
-			fallbackSkipped.Add(1)
+			fs.skipped.Add(1)
 			return out, nil
 		}
+		fs.attempted.Add(1)
 		fb := d.Fallback.FindEvents(fallbackCtx, a, loc)
+		if len(fb) > 0 {
+			fs.produced.Add(1)
+		}
 		// Fallback emits concerts with only artist name/ID; attach genres from
 		// the ScoredArtist so downstream filters still work.
 		for i := range fb {
