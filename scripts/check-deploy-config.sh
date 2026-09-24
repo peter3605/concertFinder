@@ -146,6 +146,33 @@ if [ ! -x "$repo/scripts/verify-deploy.sh" ]; then
 fi
 pass "verify-deploy.sh is executable"
 
+# 6a. verify-deploy.sh decides whether the api reached the right database by
+#     comparing hosts parsed out of two DSNs (CF-B19), and its output is dumped
+#     into a public workflow log on failure. So the parser is pinned on both
+#     things that matter: it extracts the host, and it refuses — printing
+#     nothing — anything that is not a bare host, so no credential can escape
+#     through an error message. Sourcing stops at the script's main guard.
+(
+    # shellcheck source=verify-deploy.sh
+    . "$repo/scripts/verify-deploy.sh"
+    check_host() {
+        local got
+        got=$(db_host "$1") || got="<refused>"
+        [ "$got" = "$2" ] || { printf '    db_host gave %s, want %s\n' "$got" "$2" >&2; exit 1; }
+    }
+    check_host "$neon_url" ep-synthetic.us-east-1.aws.neon.tech
+    check_host 'postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable' db
+    check_host 'postgresql://u:p@127.0.0.1:5433/x' 127.0.0.1
+    check_host 'postgres://EP-Mixed.Neon.Tech/db' ep-mixed.neon.tech
+    check_host 'postgres://u:p@[::1]:5432/db' '[::1]'
+    check_host 'postgres://u:p%40ss@h.example/db?options=a@b' h.example
+    check_host 'host=h.example user=u password=secret dbname=d' h.example
+    check_host 'postgres://u:p@/db?host=/var/run/postgresql' '<refused>'
+    check_host 'postgres://u:p@h1:5432,h2:5432/db' '<refused>'
+    check_host 'not a dsn' '<refused>'
+) || fail "verify-deploy.sh's db_host misparses a DSN"
+pass "verify-deploy.sh extracts database hosts and refuses the rest"
+
 # 7. backup-db.sh is in that same never-runs-locally category, and worse: it
 #    runs from a systemd timer at 03:00 with nobody watching, so a syntax error
 #    in it is silent until the night someone needs a dump that was never taken.
