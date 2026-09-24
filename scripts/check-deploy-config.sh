@@ -248,6 +248,42 @@ if [ "$backup_img" != "$drill_img" ]; then
 fi
 pass "backup-db.sh and restore-drill.sh pin the same Postgres image ($backup_img)"
 
+# 9c. The drill's size guard is the one piece of logic in these scripts that is
+#     not a syntax check away from being right, and it has already been wrong
+#     once in production. It compared each dump only against the previous one,
+#     so when the nightly payload fell 19x on 2026-09-10 and stayed down, every
+#     ~108 KB dump sat beside another ~108 KB dump and it reported "99%" and
+#     printed "Backup present and fresh" for five consecutive nights. A
+#     derivative cannot see a level.
+#
+#     --size-verdict takes dump sizes oldest-first and judges the last one,
+#     touching neither S3 nor docker, which is what makes this runnable here.
+#     Both directions are asserted: a guard that never passes gets disabled,
+#     and a guard that never fails is what was already there.
+if "$repo/scripts/restore-drill.sh" --size-verdict 2000000 2000000 106000 >/dev/null 2>&1; then
+    fail "restore-drill.sh --size-verdict accepted a series ending 2.0 MB, 2.0 MB, 106 KB.
+      That is the 2026-09-10 payload cliff exactly, and it must be rejected."
+fi
+pass "restore-drill.sh rejects a payload cliff"
+
+if ! out=$("$repo/scripts/restore-drill.sh" --size-verdict \
+        2000000 2000000 2000000 2000000 2000000 2000000 2000000 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "restore-drill.sh --size-verdict rejected seven healthy ~2.0 MB dumps.
+      A backup check that cries wolf is a backup check that gets muted."
+fi
+pass "restore-drill.sh accepts a steady series"
+
+# A dump at or below schema-only size must fail on the absolute floor even
+# with no history to compare against — the case a median cannot cover, because
+# the first dump after a rebuilt bucket has no window.
+if "$repo/scripts/restore-drill.sh" --size-verdict 39851 >/dev/null 2>&1; then
+    fail "restore-drill.sh --size-verdict accepted a lone 39,851-byte dump.
+      That is the size of a --schema-only dump of this schema: a restore that
+      produced tables and no rows. The absolute floor exists for exactly this."
+fi
+pass "restore-drill.sh rejects a schema-sized dump with no history"
+
 # 10. The compose file must pin the api image name, because prune-images.sh and
 #     the deploy's SHA tagging both address it by name. Without `image:`,
 #     compose derives it from the project directory, so a rename of

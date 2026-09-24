@@ -881,6 +881,32 @@ matters. `check-deploy-config.sh` compares them. The drill also refuses a target
 that already holds users, because it restores `--clean --if-exists`: without
 that guard a mispasted production URL is an outage rather than a typo.
 
+- **The drill's size check is a level and a window, never a day-over-day
+  ratio.** `--check` compares the newest dump against an absolute floor
+  (`MIN_DUMP_BYTES`, 50,000 — a `--schema-only` dump of this schema is ~40 KB
+  and the smallest real dump ever taken was 65,916) *and* against the median of
+  the previous `BASELINE_DUMPS` (10) at `MIN_BASELINE_PCT` (50%). It compared
+  against the previous dump alone until CF-23, which is a derivative measuring
+  a failure that is a level: when the nightly payload fell 19x on 2026-09-10
+  and stayed down, every ~108 KB dump sat beside another ~108 KB dump, so the
+  check reported "99%", printed **Backup present and fresh** and exited 0 for
+  five nights. A floor alone misses a slow bleed and a median alone can be
+  walked down gradually, so both are load-bearing. The judgement lives in
+  `size_verdict`, which takes a list of integers and touches neither S3 nor
+  docker precisely so `check-deploy-config.sh` can assert both directions in
+  CI — a guard that never fires and a guard that always fires are the same
+  bug. Do **not** move any of this into `backup-db.sh`: its `pg_restore --list`
+  is a *structural* read of the archive TOC, it catches a truncated or piped
+  archive well, and an empty-but-valid archive passing it is by design.
+  Note what the dump's size actually measures: `concert_cache` holds the
+  Phase 2 fallback's cached HTML bodies under `page:` keys at ~140 KB each,
+  the janitor prunes that table at seven days, and those rows are most of a
+  fat dump. The 09-10 cliff was exactly that prune and cost no rows in any of
+  the four irreplaceable tables — so the floor is calibrated against
+  schema-only, not against the cache-inflated 2 MB, and the median guard is
+  expected to clear once ~108 KB becomes the established level.
+  `docs/aws-deploy.md` §"Restore drills" carries the measurement.
+
 ## Required Environment Variables (Appendix A)
 
 Core: `SPOTIFY_CLIENT_ID`, `SPOTIFY_REDIRECT_URI`, `TICKETMASTER_API_KEY`, `DATABASE_URL`, `DB_MAX_CONNS` (optional, default 20 — pgx's own default is `max(4, NumCPU)`, i.e. 4 on the t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers; exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries), `ENCRYPTION_KEY` (32-byte hex), `SESSION_COOKIE_DOMAIN`, `LISTEN_ADDR`, `SIGNING_KEY` (optional 32-byte hex; derived from `ENCRYPTION_KEY` when unset — set it only if you want to rotate signing without touching stored refresh-token ciphertexts).
