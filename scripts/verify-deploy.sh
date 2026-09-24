@@ -22,7 +22,7 @@
 # that endpoint is public, and publishing the database hostname on it would
 # be disclosure for nobody's benefit.
 #
-# Only hosts are ever printed, never a DSN. This output lands in the workflow
+# Only hosts are ever printed, never a DSN, and only on a mismatch. This output lands in the workflow
 # log on failure and the repo is public. db_host refuses anything that is not
 # a bare hostname rather than echo it, so a DSN it cannot parse cannot leak its
 # password through the error message either.
@@ -153,6 +153,11 @@ actual_host=$(db_host "$actual_dsn") ||
 if [ "$actual_host" != "$intended_host" ]; then
     fail "the api is connected to the wrong database: container has host '$actual_host', $ENV_FILE says '$intended_host'"
 fi
-printf '\033[32m  ok\033[0m  api database host matches %s (%s)\n' "$ENV_FILE" "$actual_host"
+# The host is named only on failure, where it is the diagnosis. On success it
+# would add nothing a reader needs, and this output is the deploy workflow's
+# log, which is public: printing it there would publish the database endpoint
+# on every deploy — the disclosure this check was kept out of /api/healthz to
+# avoid.
+printf '\033[32m  ok\033[0m  api database host matches %s\n' "$ENV_FILE"
 
 printf '\n\033[32mDeploy verified\033[0m\n'
