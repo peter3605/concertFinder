@@ -840,10 +840,57 @@ The cheap half answers "is there a restore point at all", in seconds:
 AWS_PROFILE=<profile> ./scripts/restore-drill.sh --check
 ```
 
-It fails if the newest object under `pg/` is more than two days old, and prints
-the newest dump's size against the previous one — a dump that halves overnight
-is a database that lost something, and a freshness check alone waves that
-through.
+It fails if the newest object under `pg/` is more than two days old, and it
+fails if the newest dump's size does not look like a dump of this database.
+That second guard has two halves, and it needs both:
+
+- an **absolute floor** (`MIN_DUMP_BYTES`, 50,000) — a `--schema-only` dump of
+  this schema is about 40 KB, so anything at that level is a restore point that
+  would produce tables and no rows. A floor is the only guard that works on the
+  first dump after a bucket is rebuilt, when there is no history to compare to.
+- a **median over a window** (`BASELINE_DUMPS`, 10, and `MIN_BASELINE_PCT`,
+  50%) — the newest dump against the median of the ten before it.
+
+It used to compare the newest dump against the *previous* one only, and that is
+a derivative where the failure is a level. On 2026-09-10 the nightly payload
+fell from 2,071,949 bytes to 109,323 and stayed there; from 09-11 on, each
+~108 KB dump sat beside another ~108 KB dump, so the check reported "size vs
+previous dump: 99%", printed **Backup present and fresh**, and exited 0 for
+five consecutive nights. A ratio can only see a step on the night the step
+happens. A median remembers the old level for as long as the window is long,
+which is what the window is for.
+
+The two guards cover each other's blind spots on purpose: a floor alone misses
+a slow bleed, and a median alone can be walked down a few percent at a time.
+
+`--size-verdict` runs that judgement on a list of sizes with no S3 and no
+docker, which is how `scripts/check-deploy-config.sh` tests it in CI:
+
+```
+./scripts/restore-drill.sh --size-verdict 2078242 2071949 109323   # exits 1
+```
+
+**What the 2026-09-10 cliff actually was, since the guard will find it again.**
+It was not data loss. Restoring the 09-09 and 09-14 dumps side by side and
+counting rows gives an identical `users` (2), `user_locations` (2),
+`user_saved_concerts` (1) and `user_subscribed_artists` (0). The whole 19x is
+`concert_cache`, whose payload went from 11,274,180 bytes to 44,221 while its
+row count only moved 289 → 207. Broken out by key prefix, 80 rows under `page:`
+— the Phase 2 fallback's cached HTML bodies (`internal/fallback/http.go`),
+averaging 140 KB each — are gone. All 80 were written in one 54-second burst at
+`2026-09-02 07:00`, and the janitor deletes `concert_cache` rows older than
+seven days (`internal/db/janitor.go`). 09-02 plus seven days is the 09-10 dump.
+
+So the dump's *size* is dominated by a seven-day-TTL cache rather than by
+anything a backup exists to protect, and ~108 KB is this database's healthy
+size absent a page-cache burst. Two things follow. The floor is calibrated
+against schema-only and against the smallest real dump ever taken (65,916
+bytes, 2026-08-22), not against the cache-inflated 2 MB — a floor up at 500 KB
+would have alarmed every night on a healthy database, and an alarm like that
+gets muted. And the median guard is *expected* to clear on its own around
+2026-09-17, once the pre-cliff dumps age out of the ten-day window and ~108 KB
+is simply the established level. That is the intended behaviour and not a
+regression: the guard fired, a human looked, and the answer was "benign".
 
 The real drill restores into a **scratch Neon branch** and times it:
 

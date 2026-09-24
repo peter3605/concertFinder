@@ -33,8 +33,12 @@ trap cleanup EXIT
 # Work on copies with a synthetic .env: never read the developer's real one,
 # and never print it — `docker compose config` echoes every variable it
 # resolves, secrets included.
-cp docker-compose.prod.yml Caddyfile "$work/"
-printf 'SITE_DOMAIN=example.com\n' > "$work/.env"
+cp docker-compose.yml docker-compose.prod.yml Caddyfile "$work/"
+# A Neon-shaped DATABASE_URL, distinct from docker-compose.yml's dev value so
+# check 4b can tell which one won. The `&` is deliberate: real Neon URLs carry
+# channel_binding alongside sslmode.
+neon_url='postgres://u:p@ep-synthetic.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\n' "$neon_url" > "$work/.env"
 
 fail() { printf '\n\033[31mFAIL\033[0m: %s\n' "$1" >&2; exit 1; }
 pass() { printf '\033[32m  ok\033[0m  %s\n' "$1"; }
@@ -78,6 +82,50 @@ if ! (cd "$repo" && docker compose -f docker-compose.yml config) >/dev/null 2>"$
 fi
 pass "docker-compose.yml parses"
 
+# 4b. Every prod compose form reaches the database .env names (CF-B17). Run with the
+#     dev file first and the prod file second, docker-compose.yml's
+#     `environment: DATABASE_URL` (the compose `db` container) used to outrank
+#     the prod file's env_file, so `up` quietly swapped Neon for an empty dev
+#     Postgres. It did, for eight days, with every health check green. The
+#     prod file restating DATABASE_URL in `environment:` is what fixes it;
+#     this is what notices if that line goes.
+#
+#     Every form that can start production is pinned, not only the one that
+#     broke (CF-B18): the prod file alone is what deploy.yml runs, the two-file
+#     form is what a session types by hand, and a check covering one says
+#     nothing about the other. Removing the prod file's `environment:` entry
+#     fails the two-file row; the prod-only row is what fails if the api ever
+#     stops reading .env at all.
+api_db_url() {
+    (cd "$work" && docker compose "$@" config --format json) 2>"$work/err4b" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["api"]["environment"]["DATABASE_URL"])'
+}
+for form in "docker-compose.prod.yml" "docker-compose.yml docker-compose.prod.yml"; do
+    args=()
+    for f in $form; do args+=(-f "$f"); done
+    if ! got=$(api_db_url "${args[@]}"); then
+        sed 's/^/    /' "$work/err4b" >&2
+        fail "\`${args[*]} config\` does not render"
+    fi
+    if [ "$got" != "$neon_url" ]; then
+        printf '    .env:     %s\n    rendered: %s\n' "$neon_url" "$got" >&2
+        fail "\`${args[*]}\` does not give the api the DATABASE_URL from .env.
+      \`up\` in that form would run production against whatever it rendered
+      instead — docker-compose.prod.yml must set DATABASE_URL in the api
+      service's \`environment:\`."
+    fi
+    pass "\`${args[*]}\` gives the api .env's DATABASE_URL"
+done
+
+# ...and the dev file on its own still reaches the dev database, whatever the
+# .env says: the local .env holds the host-side URL for \`go run\`, which is
+# wrong inside the compose network.
+if ! got=$(api_db_url -f docker-compose.yml) || [ "${got#*@}" != "db:5432/concertfinder?sslmode=disable" ]; then
+    printf '    rendered: %s\n' "${got:-<nothing>}" >&2
+    fail "docker-compose.yml alone no longer points the api at the compose db service"
+fi
+pass "docker-compose.yml alone still gives the api the dev database"
+
 # 5. verify-deploy.sh belongs to the same category as everything above: it only
 #    ever executes on the instance, mid-deploy. A syntax error in it would
 #    surface as a failed deploy of an otherwise fine build — and, because it is
@@ -97,6 +145,33 @@ if [ ! -x "$repo/scripts/verify-deploy.sh" ]; then
     fail "scripts/verify-deploy.sh is not executable — run: chmod +x scripts/verify-deploy.sh"
 fi
 pass "verify-deploy.sh is executable"
+
+# 6a. verify-deploy.sh decides whether the api reached the right database by
+#     comparing hosts parsed out of two DSNs (CF-B19), and its output is dumped
+#     into a public workflow log on failure. So the parser is pinned on both
+#     things that matter: it extracts the host, and it refuses — printing
+#     nothing — anything that is not a bare host, so no credential can escape
+#     through an error message. Sourcing stops at the script's main guard.
+(
+    # shellcheck source=verify-deploy.sh
+    . "$repo/scripts/verify-deploy.sh"
+    check_host() {
+        local got
+        got=$(db_host "$1") || got="<refused>"
+        [ "$got" = "$2" ] || { printf '    db_host gave %s, want %s\n' "$got" "$2" >&2; exit 1; }
+    }
+    check_host "$neon_url" ep-synthetic.us-east-1.aws.neon.tech
+    check_host 'postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable' db
+    check_host 'postgresql://u:p@127.0.0.1:5433/x' 127.0.0.1
+    check_host 'postgres://EP-Mixed.Neon.Tech/db' ep-mixed.neon.tech
+    check_host 'postgres://u:p@[::1]:5432/db' '[::1]'
+    check_host 'postgres://u:p%40ss@h.example/db?options=a@b' h.example
+    check_host 'host=h.example user=u password=secret dbname=d' h.example
+    check_host 'postgres://u:p@/db?host=/var/run/postgresql' '<refused>'
+    check_host 'postgres://u:p@h1:5432,h2:5432/db' '<refused>'
+    check_host 'not a dsn' '<refused>'
+) || fail "verify-deploy.sh's db_host misparses a DSN"
+pass "verify-deploy.sh extracts database hosts and refuses the rest"
 
 # 7. backup-db.sh is in that same never-runs-locally category, and worse: it
 #    runs from a systemd timer at 03:00 with nobody watching, so a syntax error
@@ -172,6 +247,42 @@ if [ "$backup_img" != "$drill_img" ]; then
       with the backups."
 fi
 pass "backup-db.sh and restore-drill.sh pin the same Postgres image ($backup_img)"
+
+# 9c. The drill's size guard is the one piece of logic in these scripts that is
+#     not a syntax check away from being right, and it has already been wrong
+#     once in production. It compared each dump only against the previous one,
+#     so when the nightly payload fell 19x on 2026-09-10 and stayed down, every
+#     ~108 KB dump sat beside another ~108 KB dump and it reported "99%" and
+#     printed "Backup present and fresh" for five consecutive nights. A
+#     derivative cannot see a level.
+#
+#     --size-verdict takes dump sizes oldest-first and judges the last one,
+#     touching neither S3 nor docker, which is what makes this runnable here.
+#     Both directions are asserted: a guard that never passes gets disabled,
+#     and a guard that never fails is what was already there.
+if "$repo/scripts/restore-drill.sh" --size-verdict 2000000 2000000 106000 >/dev/null 2>&1; then
+    fail "restore-drill.sh --size-verdict accepted a series ending 2.0 MB, 2.0 MB, 106 KB.
+      That is the 2026-09-10 payload cliff exactly, and it must be rejected."
+fi
+pass "restore-drill.sh rejects a payload cliff"
+
+if ! out=$("$repo/scripts/restore-drill.sh" --size-verdict \
+        2000000 2000000 2000000 2000000 2000000 2000000 2000000 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "restore-drill.sh --size-verdict rejected seven healthy ~2.0 MB dumps.
+      A backup check that cries wolf is a backup check that gets muted."
+fi
+pass "restore-drill.sh accepts a steady series"
+
+# A dump at or below schema-only size must fail on the absolute floor even
+# with no history to compare against — the case a median cannot cover, because
+# the first dump after a rebuilt bucket has no window.
+if "$repo/scripts/restore-drill.sh" --size-verdict 39851 >/dev/null 2>&1; then
+    fail "restore-drill.sh --size-verdict accepted a lone 39,851-byte dump.
+      That is the size of a --schema-only dump of this schema: a restore that
+      produced tables and no rows. The absolute floor exists for exactly this."
+fi
+pass "restore-drill.sh rejects a schema-sized dump with no history"
 
 # 10. The compose file must pin the api image name, because prune-images.sh and
 #     the deploy's SHA tagging both address it by name. Without `image:`,
