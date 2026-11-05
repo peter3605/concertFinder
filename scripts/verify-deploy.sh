@@ -34,6 +34,18 @@
 # VERIFY_ENV_FILE overrides which env file supplies the *intended* values
 # (default .env). It exists so the mismatch path can be exercised on the
 # instance against a scratch copy, without editing the live .env.
+#
+# Two more overrides exist for the shared apps box (scripts/deploy-box.sh) and
+# are unset in .github/workflows/deploy.yml, so the old box's deploy behaves
+# exactly as before:
+#
+#   VERIFY_COMPOSE_FILE    compose file for `ps`, `logs` and the api container
+#                          lookup (default docker-compose.prod.yml).
+#   VERIFY_SKIP_TLS_PROBE  non-empty skips only the HTTPS probe through Caddy.
+#                          Before the cutover the shared Caddy cannot hold a
+#                          certificate for the domain, so that probe cannot
+#                          pass; deploy-box.sh sets this only while DNS does
+#                          not point at the box. The database check still runs.
 set -euo pipefail
 
 # env_value KEY FILE — the first KEY=value in FILE, tolerating surrounding
@@ -82,7 +94,7 @@ fi
 
 cd "$(dirname "$0")/.."
 
-COMPOSE=(docker compose -f docker-compose.prod.yml)
+COMPOSE=(docker compose -f "${VERIFY_COMPOSE_FILE:-docker-compose.prod.yml}")
 ENV_FILE=${VERIFY_ENV_FILE:-.env}
 ATTEMPTS=12
 SLEEP=5
@@ -107,6 +119,11 @@ fail() {
 SITE_DOMAIN=$(env_value SITE_DOMAIN "$ENV_FILE")
 [ -n "$SITE_DOMAIN" ] || fail "SITE_DOMAIN is not set in .env — Caddy's site block would collapse into a global options block and the container would crash-loop"
 
+if [ -n "${VERIFY_SKIP_TLS_PROBE:-}" ]; then
+    printf '\033[33m  skip\033[0m  https://%s/api/healthz through Caddy (VERIFY_SKIP_TLS_PROBE is set)\n' "$SITE_DOMAIN"
+else
+# (Left at its original indentation inside this branch, so the diff that
+# added the branch shows no change to the probe itself.)
 echo "Verifying https://$SITE_DOMAIN/api/healthz ..."
 
 # --resolve pins the connection to this box while keeping the real hostname for
@@ -129,6 +146,7 @@ done
 
 [ "${healthy:-}" = 1 ] ||
     fail "/api/healthz did not return 200 after $ATTEMPTS attempts ($((ATTEMPTS * SLEEP))s)"
+fi
 
 # Which Postgres answered. The intended URL comes from the env file; the actual
 # one from the running container's config, which is what Compose resolved after
