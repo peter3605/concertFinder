@@ -84,6 +84,27 @@ Each external API gets its own package with its own types — there is
 deliberately no shared `models` package, because external schemas drift
 independently.
 
+## CI image build (dormant until the shared-box cutover)
+
+`.github/workflows/image.yml` builds the api image for `linux/arm64` on an
+arm64 runner. On pull requests it only builds, with no credentials. On `main`
+it pushes `concertfinder-api:<sha>` and `:latest` to ECR in the apps account
+and can deploy that image to the shared box. `deploy.yml` still ships
+production to the current instance, and `image.yml` deploys nowhere until these
+**repository variables** (Settings → Secrets and variables → Actions →
+*Variables*) are set:
+
+| Variable | Value | Unset |
+|---|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | `concertfinder-deploy` role ARN (`terraform output deploy_role_arns` in apps-infra) | The push job emits a notice, then builds and pushes nothing |
+| `DEPLOY_TO_BOX` | `true` to run the `concertfinder-deploy` SSM document after the push | Push only, no deploy |
+| `BOX_INSTANCE_ID` | The shared box (`terraform output box_instance_id`) | Required when `DEPLOY_TO_BOX` is `true`; the job fails without it |
+
+`AWS_DEPLOY_ROLE_ARN` here is a *variable* naming the apps-account role.
+`deploy.yml` reads a *secret* of the same name for the old instance's role in
+the management account. They are different roles. At cutover, turn off
+`deploy.yml`'s deploy job when `DEPLOY_TO_BOX` goes on, or both boxes deploy.
+
 ## Documentation
 
 | Doc | What it covers |

@@ -1,0 +1,223 @@
+name: Image
+
+# Builds the api image for linux/arm64 on an arm64 runner and, on main, pushes
+# it to ECR in the apps account (426433020884) for the shared t4g.small box.
+#
+# DORMANT UNTIL CUTOVER. deploy.yml is still what ships production: it builds
+# on the old box in the management account on every merge, and nothing here
+# touches that box or that account. This workflow only does real work once
+# Peter sets repo variables:
+#
+#   AWS_DEPLOY_ROLE_ARN  apps-account role `concertfinder-deploy` (terraform
+#                        output deploy_role_arns in apps-infra). Unset: the
+#                        push job emits a notice and does nothing.
+#                        NOTE this is a repo VARIABLE. deploy.yml reads a
+#                        SECRET of the same name for the old box's role; they
+#                        are different roles in different accounts.
+#   DEPLOY_TO_BOX        'true' to run the `concertfinder-deploy` SSM document
+#                        on the box after the push. Anything else: push only.
+#   BOX_INSTANCE_ID      the box (terraform output box_instance_id). Required
+#                        when DEPLOY_TO_BOX is 'true'.
+#
+# At cutover, deploy.yml's deploy job has to be turned off in the same breath
+# as DEPLOY_TO_BOX goes on, or both boxes keep deploying.
+#
+# Unlike deploy.yml's deploy job this does not wait for the test job: GitHub
+# cannot make one workflow `needs:` another. Every merge to main already went
+# through a PR with deploy.yml's checks green, which is the gate here.
+#
+# Same path exclusions as deploy.yml (the iOS app ships through Xcode, not
+# this image), plus docs and markdown, which never reach the image. Like
+# deploy.yml this is paths-ignore, never an allowlist: a backend path missing
+# from an allowlist would be a green merge whose image never got built.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PR builds supersede each other per branch. Main runs queue rather than
+# cancel: cancelling one mid-deploy leaves the box wherever the SSM command
+# got to. Separate from deploy.yml's groups, so neither can evict the other.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('image-pr-{0}', github.ref) || 'image-main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: concertfinder-api
+  DEPLOY_DOCUMENT: concertfinder-deploy
+  # Shared by PR builds and main pushes. PRs can read main's cache; main can
+  # never read a PR's, so the first main build after cutover starts cold.
+  CACHE_SCOPE: api-arm64
+
+jobs:
+  # Pull requests: prove the image builds on arm64. No credentials, no push.
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build linux/arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          # Single-platform manifest, no attestation manifests beside it.
+          # ECR's lifecycle keeps the last 3 images of any tag status, and
+          # an attestation counts as one, which would halve rollback depth.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.CACHE_SCOPE }},mode=max
+
+  # main: push <sha> and latest, then optionally deploy to the box.
+  push:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    # No `environment:` on this job. It changes the OIDC subject to
+    # repo:<repo>:environment:<name>, and the role trusts only
+    # repo:peter3605/concertFinder:ref:refs/heads/main.
+    permissions:
+      id-token: write # OIDC federation to AWS; scoped to this job only
+      contents: read
+    steps:
+      - name: Check the deploy role is configured
+        id: gate
+        env:
+          ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::notice title=Image not pushed::AWS_DEPLOY_ROLE_ARN is not set, so nothing was built or pushed. Expected until the apps account is applied (step 24)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+
+      - if: steps.gate.outputs.enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - if: steps.gate.outputs.enabled == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - if: steps.gate.outputs.enabled == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push linux/arm64
+        if: steps.gate.outputs.enabled == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.CACHE_SCOPE }},mode=max
+
+      # The document runs /opt/concertfinder/deploy.sh as the concertfinder
+      # user with IMAGE=<repo>:<ImageTag>. Its allowedPattern only accepts a
+      # hex SHA, which github.sha always is.
+      - name: Deploy to the box via SSM
+        id: ssm
+        if: steps.gate.outputs.enabled == 'true' && vars.DEPLOY_TO_BOX == 'true'
+        env:
+          BOX_INSTANCE_ID: ${{ vars.BOX_INSTANCE_ID }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BOX_INSTANCE_ID" ]; then
+            echo "::error::DEPLOY_TO_BOX is true but BOX_INSTANCE_ID is not set"
+            exit 1
+          fi
+          # Comment is capped at 100 characters.
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$BOX_INSTANCE_ID" \
+            --document-name "$DEPLOY_DOCUMENT" \
+            --parameters "ImageTag=$SHA" \
+            --comment "Deploy ${SHA:0:12} from image.yml run $RUN_ID" \
+            --query 'Command.CommandId' \
+            --output text)
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "Started SSM command $COMMAND_ID"
+
+      # Not `aws ssm wait command-executed`: that waiter gives up after 100
+      # seconds, and the document allows 900. Poll until a terminal status.
+      - name: Wait for the deploy to finish
+        id: wait
+        if: steps.ssm.outputs.command_id != ''
+        env:
+          BOX_INSTANCE_ID: ${{ vars.BOX_INSTANCE_ID }}
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+        run: |
+          set -uo pipefail
+          deadline=$((SECONDS + 960))
+          while :; do
+            # InvocationDoesNotExist for a few seconds after send-command.
+            status=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" --instance-id "$BOX_INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Pending|InProgress|Delayed) ;;
+              *) break ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              status="TimedOutWaiting"
+              break
+            fi
+            sleep 10
+          done
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "SSM command $COMMAND_ID finished: $status"
+
+      - name: Print deploy output
+        if: always() && steps.ssm.outputs.command_id != ''
+        env:
+          BOX_INSTANCE_ID: ${{ vars.BOX_INSTANCE_ID }}
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+        run: |
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$BOX_INSTANCE_ID" \
+            --query '{status:Status, stdout:StandardOutputContent, stderr:StandardErrorContent}' \
+            --output json
+
+      - name: Fail unless the deploy succeeded
+        if: steps.ssm.outputs.command_id != ''
+        env:
+          STATUS: ${{ steps.wait.outputs.status }}
+        run: |
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::SSM deploy ended with status '$STATUS'"
+            exit 1
+          fi
