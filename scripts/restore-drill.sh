@@ -309,8 +309,9 @@ else
         --query 'sort_by(Contents, &LastModified)[-1].[Key,LastModified,Size]' \
         --output text 2>/dev/null) || fail "cannot list s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX}"
 
-    [ -n "$newest" ] && [ "$newest" != "None" ] ||
+    if [ -z "$newest" ] || [ "$newest" = "None" ]; then
         fail "no objects under s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX} at all. There is no restore point. On the box: systemctl list-timers apps-backup.timer — at cutover it is switched on by apps-infra's shared-backup-sync document with Enable=true,RunNow=true."
+    fi
 
     newest_key=$(printf '%s' "$newest" | cut -f1)
     newest_at=$(printf '%s' "$newest" | cut -f2)
