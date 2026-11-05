@@ -33,12 +33,16 @@ trap cleanup EXIT
 # Work on copies with a synthetic .env: never read the developer's real one,
 # and never print it — `docker compose config` echoes every variable it
 # resolves, secrets included.
-cp docker-compose.yml docker-compose.prod.yml Caddyfile "$work/"
+cp docker-compose.yml docker-compose.prod.yml docker-compose.box.yml Caddyfile "$work/"
 # A Neon-shaped DATABASE_URL, distinct from docker-compose.yml's dev value so
 # check 4b can tell which one won. The `&` is deliberate: real Neon URLs carry
 # channel_binding alongside sslmode.
 neon_url='postgres://u:p@ep-synthetic.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
-printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\n' "$neon_url" > "$work/.env"
+# docker-compose.box.yml takes its image from CONCERTFINDER_IMAGE, which
+# scripts/deploy-box.sh appends to the box's .env. An ECR-shaped value at a
+# full SHA, so check 10b can assert it arrives unchanged.
+box_image='426433020884.dkr.ecr.us-east-1.amazonaws.com/concertfinder-api:0123456789abcdef0123456789abcdef01234567'
+printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\nCONCERTFINDER_IMAGE=%s\n' "$neon_url" "$box_image" > "$work/.env"
 
 fail() { printf '\n\033[31mFAIL\033[0m: %s\n' "$1" >&2; exit 1; }
 pass() { printf '\033[32m  ok\033[0m  %s\n' "$1"; }
@@ -100,7 +104,12 @@ api_db_url() {
     (cd "$work" && docker compose "$@" config --format json) 2>"$work/err4b" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["api"]["environment"]["DATABASE_URL"])'
 }
-for form in "docker-compose.prod.yml" "docker-compose.yml docker-compose.prod.yml"; do
+#
+#     The shared-box file (CF-B21) carries the same guard and gets the same two
+#     rows: it alone is what scripts/deploy-box.sh runs, and the two-file form
+#     is the one a session will type on the box by hand.
+for form in "docker-compose.prod.yml" "docker-compose.yml docker-compose.prod.yml" \
+        "docker-compose.box.yml" "docker-compose.yml docker-compose.box.yml"; do
     args=()
     for f in $form; do args+=(-f "$f"); done
     if ! got=$(api_db_url "${args[@]}"); then
@@ -294,6 +303,142 @@ if ! awk '/^  api:/{f=1;next} /^  [a-z]/{f=0} f' "$rendered" | grep -q 'image: c
       that name; without it compose derives the name from the directory."
 fi
 pass "api service pins its image name"
+
+# 10b. docker-compose.box.yml (CF-B21) is concertFinder's compose project on
+#      the shared apps box, dormant until the cutover. Like the prod file it
+#      never runs anywhere but the instance, so everything that matters about
+#      it is asserted here against the rendered config:
+#
+#      - exactly one service, `api` — TLS belongs to the box's shared Caddy;
+#      - the image is CONCERTFINDER_IMAGE verbatim, never built here;
+#      - container_name concertfinder-api, which is the name apps-infra's
+#        caddy/Caddyfile proxies to (that file is in another repo, so this is
+#        the only half CI can pin);
+#      - on the external `edge` network and nothing else, with nothing
+#        published to the host — 80/443 belong to the shared Caddy, and a
+#        published 8080 would be a way in with none of its headers;
+#      - healthcheck, stop_grace_period and log caps identical to the prod
+#        file's api, so a fix to one cannot silently miss the other.
+box_json="$work/box.json"
+prod_json="$work/prod.json"
+if ! (cd "$work" && docker compose -f docker-compose.box.yml config --format json) > "$box_json" 2>"$work/errbox"; then
+    sed 's/^/    /' "$work/errbox" >&2
+    fail "docker-compose.box.yml is not valid"
+fi
+pass "docker-compose.box.yml parses"
+(cd "$work" && docker compose -f docker-compose.prod.yml config --format json) > "$prod_json" 2>/dev/null ||
+    fail "docker-compose.prod.yml does not render as JSON"
+
+if ! out=$(python3 - "$box_json" "$prod_json" "$box_image" <<'PY' 2>&1
+import json, sys
+box = json.load(open(sys.argv[1]))
+prod = json.load(open(sys.argv[2]))
+want_image = sys.argv[3]
+errors = []
+services = sorted(box.get("services", {}))
+if services != ["api"]:
+    errors.append(f"services are {services}, want exactly ['api'] (no caddy: the box's Caddy is shared)")
+api = box["services"].get("api", {})
+papi = prod["services"]["api"]
+if api.get("image") != want_image:
+    errors.append(f"api image renders as {api.get('image')!r}, want CONCERTFINDER_IMAGE ({want_image!r})")
+if "build" in api:
+    errors.append("api has a build: section; the box pulls from ECR and never builds")
+if api.get("container_name") != "concertfinder-api":
+    errors.append(f"container_name is {api.get('container_name')!r}, want 'concertfinder-api' (apps-infra's Caddyfile proxies to that name)")
+if sorted(api.get("networks") or {}) != ["edge"]:
+    errors.append(f"api networks are {sorted(api.get('networks') or {})}, want exactly ['edge']")
+if not box.get("networks", {}).get("edge", {}).get("external"):
+    errors.append("network edge is not external; `down` here could remove it from under every other app")
+if api.get("ports"):
+    errors.append(f"api publishes ports {api['ports']}; nothing may be published on the box")
+for key in ("healthcheck", "stop_grace_period", "logging", "restart"):
+    if api.get(key) != papi.get(key):
+        errors.append(f"{key} differs from docker-compose.prod.yml's api: {api.get(key)!r} vs {papi.get(key)!r}")
+if errors:
+    print("\n".join(errors))
+    sys.exit(1)
+PY
+); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "docker-compose.box.yml does not match the shape the shared box needs"
+fi
+pass "box file: api only, image from CONCERTFINDER_IMAGE, concertfinder-api on external edge, nothing published"
+pass "box file: healthcheck, stop_grace_period, restart and log caps match the prod file"
+
+# 10c. Both `:?` guards must refuse to render, not fall back. Without
+#      CONCERTFINDER_IMAGE compose would otherwise resolve an empty image;
+#      without DATABASE_URL the container would start with no database (or,
+#      in the two-file form, the dev one — CF-B17). --env-file replaces the
+#      .env used for interpolation, so each run lacks exactly one variable.
+printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\n' "$neon_url" > "$work/noimage.env"
+printf 'SITE_DOMAIN=example.com\nCONCERTFINDER_IMAGE=%s\n' "$box_image" > "$work/nodb.env"
+for case in "noimage.env:CONCERTFINDER_IMAGE" "nodb.env:DATABASE_URL"; do
+    envf=${case%%:*}
+    var=${case#*:}
+    # The refusal must be the guard's own, naming the variable. Without the
+    # image guard compose still refuses today, but only because an empty image
+    # leaves the service with "neither an image nor a build context" — add a
+    # build: section and it would quietly build instead. So a refusal for any
+    # other reason does not count.
+    if (cd "$work" && env -u CONCERTFINDER_IMAGE -u DATABASE_URL \
+            docker compose --env-file "$envf" -f docker-compose.box.yml config) >/dev/null 2>"$work/err10c"; then
+        fail "docker-compose.box.yml rendered without $var. Its \`:?\` guard is gone, so
+      \`up\` would start the api without it instead of refusing."
+    fi
+    if ! grep -q "$var must be set" "$work/err10c"; then
+        sed 's/^/    /' "$work/err10c" >&2
+        fail "docker-compose.box.yml refused to render without $var, but not through its
+      \`:?\` guard (no \"$var must be set\" in the error) — the guard is gone."
+    fi
+    pass "box file refuses to render without $var"
+done
+
+# 10d. scripts/deploy-box.sh is what the box's SSM document runs, as
+#      /opt/concertfinder/deploy.sh — a symlink at the repo root. Same family
+#      as the scripts below: it only ever runs on the instance. A broken
+#      symlink or a lost executable bit fails the document's `test -x` before
+#      anything happens, which is safe but is the whole deploy.
+if ! out=$(bash -n "$repo/scripts/deploy-box.sh" 2>&1); then
+    echo "$out" | sed 's/^/    /' >&2
+    fail "scripts/deploy-box.sh has a syntax error"
+fi
+pass "deploy-box.sh parses"
+[ -x "$repo/scripts/deploy-box.sh" ] ||
+    fail "scripts/deploy-box.sh is not executable — run: chmod +x scripts/deploy-box.sh"
+if [ ! -L "$repo/deploy.sh" ] || [ "$(readlink "$repo/deploy.sh")" != "scripts/deploy-box.sh" ] || [ ! -x "$repo/deploy.sh" ]; then
+    fail "deploy.sh at the repo root must be an executable symlink to scripts/deploy-box.sh.
+      apps-infra's concertfinder-deploy document runs /opt/concertfinder/deploy.sh."
+fi
+pass "deploy.sh is an executable symlink to scripts/deploy-box.sh"
+
+# 10e. deploy-box.sh moves a git checkout to the SHA in IMAGE's tag, so a tag
+#      it did not validate reaches git. Run a copy with a stub git that records
+#      any call: a bad IMAGE must be refused before git is touched at all.
+#      Run against a copy, never this checkout, because the failure this
+#      catches is precisely a checkout of the wrong thing.
+boxrepo="$work/boxrepo"
+mkdir -p "$boxrepo/scripts" "$boxrepo/bin"
+cp "$repo/scripts/deploy-box.sh" "$boxrepo/scripts/"
+cat > "$boxrepo/bin/git" <<'STUB'
+#!/usr/bin/env bash
+echo called >> "$GIT_STUB_LOG"
+exit 1
+STUB
+chmod +x "$boxrepo/bin/git"
+for bad in "" "426433020884.dkr.ecr.us-east-1.amazonaws.com/concertfinder-api:main" \
+        "426433020884.dkr.ecr.us-east-1.amazonaws.com/concertfinder-api:abc;id" \
+        "426433020884.dkr.ecr.us-east-1.amazonaws.com/edgefinder-api:0123456"; do
+    : > "$work/git.log"
+    if PATH="$boxrepo/bin:$PATH" GIT_STUB_LOG="$work/git.log" IMAGE="$bad" \
+            CF_DEPLOY_LOCKED=1 "$boxrepo/scripts/deploy-box.sh" >/dev/null 2>&1; then
+        fail "deploy-box.sh accepted IMAGE='$bad'"
+    fi
+    if [ -s "$work/git.log" ]; then
+        fail "deploy-box.sh called git for IMAGE='$bad' before refusing it"
+    fi
+done
+pass "deploy-box.sh refuses an IMAGE that is not concertfinder-api at a SHA, before touching git"
 
 # 11. The rendered .env has two consumers with two different parsers, and only
 #     one of them is exercised by a deploy. docker compose reads it as an

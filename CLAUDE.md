@@ -732,6 +732,15 @@ addresses come from Spotify, and a CRLF in one would let it inject headers.
 
 ## Deployment
 
+**Two deployments exist until the cutover, and only one of them is live.**
+Everything below describes the old box (`docker-compose.prod.yml`, this repo's
+`Caddyfile`, `deploy.yml`), which serves production. `docker-compose.box.yml`
+and `deploy.sh` → `scripts/deploy-box.sh` are concertFinder's half of the
+shared apps box and are **dormant**: nothing on `main` runs them. Read
+`docs/shared-box.md` before touching either, and never change the old box's
+three files to make the new one work. The two halves are pinned by
+`check-deploy-config.sh` exactly as the old ones are.
+
 **Run `./scripts/check-deploy-config.sh` after touching `Caddyfile` or either
 compose file.** CI runs it too (the `deploy-config` job, which `deploy` depends
 on). These are the only files in the repo that never execute locally —

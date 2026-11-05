@@ -20,3 +20,8 @@ dist
 .claude/.nudged
 .claude/launch-control.local.json
 .claude/_pre-plugin/
+
+# Shared apps box: the deploy lock and the ECR credential-helper config live
+# in /opt/concertfinder, which is also this checkout (docs/shared-box.md).
+.deploy.lock
+.docker/

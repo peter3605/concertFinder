@@ -1,0 +1,86 @@
+# concertFinder on the shared apps box (apps account, apps-infra). DORMANT until
+# the cutover: nothing in .github/workflows/deploy.yml reads this file, and
+# docker-compose.prod.yml is still what serves concertfinder.app from the old
+# box. See docs/shared-box.md.
+#
+# Its own compose project, holding only the api. TLS is the box's job, not
+# ours: one shared Caddy (apps-infra caddy/, project "shared") terminates every
+# site and reaches this container by name over the external `edge` network. So
+# there is no caddy service here, nothing is published to the host, and the
+# Caddyfile in this repo plays no part on the box. apps-infra's caddy/Caddyfile
+# proxies concertfinder.app to `concertfinder-api:8080`; container_name below is
+# the other half of that contract, and nothing but this comment ties them
+# together, because they live in different repos.
+#
+# Run only through scripts/deploy-box.sh (or by hand from /opt/concertfinder,
+# where the deploy leaves a .env that carries CONCERTFINDER_IMAGE).
+#
+# The project name is deliberately NOT plain `concertfinder`. That is the name
+# compose derives for the dev stack from a checkout called concertFinder, and
+# two files sharing a project name are one project to compose: running this
+# file on a laptop recreated the dev stack's api container as this one and
+# reported the dev web and db as orphans. A distinct name makes that collision
+# impossible in either direction.
+name: concertfinder-box
+
+services:
+  api:
+    # The ECR repository at a git SHA, e.g.
+    #   426433020884.dkr.ecr.us-east-1.amazonaws.com/concertfinder-api:<sha>
+    # Built in GitHub Actions and pulled, never built here: the 2 GiB box is
+    # shared now, and an on-box build is what used to OOM a deploy.
+    # deploy-box.sh writes the value into .env after rendering it, so `ps`,
+    # `logs` and the watchdog can still render this file between deploys. `:?`
+    # refuses to render without it rather than letting compose fall back to
+    # some local image of the same name.
+    image: ${CONCERTFINDER_IMAGE:?CONCERTFINDER_IMAGE must be set (deploy-box.sh writes it into .env)}
+    container_name: concertfinder-api
+    env_file:
+      - path: .env
+        required: true
+    # Same guard as docker-compose.prod.yml, for the same reason (CF-B17): read
+    # the comment there before touching it. env_file alone loses to
+    # docker-compose.yml's `environment: DATABASE_URL` (the dev `db`
+    # container), so `-f docker-compose.yml -f docker-compose.box.yml up` would
+    # otherwise start production against an empty dev Postgres with every
+    # health check green. Restating it here wins that merge, and `:?` refuses
+    # to render at all when .env lacks it. config.Validate is the other half.
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+    # Reachable by Caddy over `edge`; `expose` publishes nothing to the host.
+    # There is deliberately no `ports:` — port 80/443 on the box belong to the
+    # shared Caddy, and a published 8080 would be a second, header-less way in.
+    expose:
+      - "8080"
+    networks:
+      - edge
+    restart: unless-stopped
+    # Identical to docker-compose.prod.yml, and check-deploy-config.sh asserts
+    # that the two render the same. 45s leaves main.go's 30s graceful shutdown
+    # room to finish; Docker's 10s default kills in-flight river jobs, which
+    # then sit unrescued for an hour and block that user's next scan.
+    stop_grace_period: 45s
+    # Capped for the same reason as in prod, more so here: the root volume is
+    # shared by every app on the box, and a full one takes all of them down.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # The binary in -healthcheck mode: the image is distroless, so there is no
+    # shell, curl or wget to probe with. CMD, never CMD-SHELL. This is what
+    # `up -d --wait` blocks on. start_period covers migrations against a cold
+    # database; failures inside it do not count.
+    healthcheck:
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  # Created by apps-infra's user_data (`docker network create edge`) and shared
+  # with the Caddy project. External, so `down` here can never remove it from
+  # under the other apps.
+  edge:
+    external: true
