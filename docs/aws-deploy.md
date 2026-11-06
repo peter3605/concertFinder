@@ -828,20 +828,31 @@ in that shell's scrollback.
 
 ## Restore drills
 
-The backups have a verified *write* path — `backup-db.sh` runs `pg_restore
---list` over the archive before uploading, and pings a heartbeat after. Nothing
-verifies the *read* path, and an untested restore is a hypothesis.
-`scripts/restore-drill.sh` is that test, run from your laptop (the instance role
-has `PutObject` and nothing else, on purpose).
+**From cutover, the dumps come from the shared box, weekly.** apps-infra's
+`box/apps-backup.sh` (switched on by its `shared-backup-sync` SSM document)
+dumps the `concertfinder` database on the shared RDS every Sunday to
+`s3://apps-backups-426433020884/weekly/concertfinder/`, and `backup-db.sh`
+retires with the old box. RDS's own 14-day automated backups are the first
+line; the weekly dump is the copy outside RDS. The drill below reads the weekly
+dumps and restores into the shared RDS through apps-infra's tunnel.
+
+The backups have a verified *write* path: the box runs `pg_restore --list`
+over the archive before uploading. Nothing verifies the *read* path, and an
+untested restore is a hypothesis. `scripts/restore-drill.sh` is that test, run
+from your laptop (the instance role has `PutObject` and nothing else, on
+purpose).
 
 The cheap half answers "is there a restore point at all", in seconds:
 
 ```
-AWS_PROFILE=<profile> ./scripts/restore-drill.sh --check
+AWS_PROFILE=apps-admin ./scripts/restore-drill.sh --check
 ```
 
-It fails if the newest object under `pg/` is more than two days old, and it
-fails if the newest dump's size does not look like a dump of this database.
+It fails if the newest object under `weekly/concertfinder/` is more than eight
+days old, and it fails if the newest dump's size does not look like a dump of
+this database. Until step 27 the old nightly dumps can be checked in place with
+`BACKUP_S3_BUCKET=concertfinder-backups-<mgmt acct> BACKUP_PREFIX=pg/
+MAX_AGE_DAYS=2` and the management-account profile.
 That second guard has two halves, and it needs both:
 
 - an **absolute floor** (`MIN_DUMP_BYTES`, 50,000) — a `--schema-only` dump of
@@ -892,22 +903,32 @@ gets muted. And the median guard is *expected* to clear on its own around
 is simply the established level. That is the intended behaviour and not a
 regression: the guard fired, a human looked, and the answer was "benign".
 
-The real drill restores into a **scratch Neon branch** and times it:
+The real drill restores into a **scratch database on the shared RDS** and
+times it. Docker running, then:
 
 ```
-neon branches create --name restore-drill        # or the Neon console
-AWS_PROFILE=<profile> ./scripts/restore-drill.sh 'postgres://…restore-drill…?sslmode=require'
-neon branches delete restore-drill
+AWS_PROFILE=apps-admin ../apps-infra/scripts/db-tunnel.sh      # terminal 1, leave open
+AWS_PROFILE=apps-admin ./scripts/restore-drill.sh              # terminal 2
+# at cutover, before the first weekly dump exists:
+AWS_PROFILE=apps-admin ./scripts/restore-drill.sh --key neon-final/concertfinder/<file>.dump
 ```
 
-It refuses a target that already has rows in `users`, which is what makes a
-mispasted production URL a refusal rather than an outage. It asserts the four
-tables that do not rebuild themselves (`users`, `user_saved_concerts`,
-`user_subscribed_artists`, `user_locations`) came back with rows — a restore
-that produces an empty schema exits 0 and otherwise looks like a pass. The
-elapsed restore time it prints is the data-layer RTO; record it here when you
-first measure it, and remember it excludes noticing, deciding, branching, and
-pointing `DATABASE_URL` at the result.
+It logs in as the RDS master user, creates `concertfinder_drill`, restores
+into it, counts rows and drops it on a pass (`--keep` leaves it; a second
+drill into a kept one needs `--force`). It refuses a target whose name lacks
+`drill` or `scratch`, a database owned by anything but the master user (every
+app's database is owned by its own login), a target that already has rows in
+`users`, and a Postgres on 15432 that is not RDS. Those are what make a typo a
+refusal rather than an outage. It asserts the four tables that do not rebuild
+themselves (`users`, `user_saved_concerts`, `user_subscribed_artists`,
+`user_locations`) exist and that `users` has rows. A restore that produces an
+empty schema exits 0 and otherwise looks like a pass. The others may
+legitimately be empty: the 2026-09-14 dumps hold 0 follows. The elapsed
+restore time it prints is the data-layer RTO through the tunnel from a laptop.
+Record it here when you first measure it, and remember it excludes noticing,
+deciding, and pointing `DATABASE_URL` at the result.
+
+**Measured RTO:** not yet measured; first run at cutover (CF-10).
 
 The whole-database restore into production, when it is not a drill, is still
 the manual path in §7 above.
@@ -1007,8 +1028,9 @@ Deliberately kept out to keep the year-1 bill at ~$16:
   the ping, which is the only signal that catches a run that never happened.
   Without it, `systemctl list-timers concertfinder-backup` and an occasional
   `aws s3 ls` are the answer.
-- **The backup has never been restored.** Time one restore into a scratch Neon
-  branch; the elapsed time is the real RTO, and `ENCRYPTION_KEY` needs to be
+- **The backup has never been restored.** Time one restore into a scratch
+  database on the shared RDS (`scripts/restore-drill.sh`, see "Restore
+  drills"); the elapsed time is the real RTO, and `ENCRYPTION_KEY` needs to be
   escrowed somewhere that is not SSM — every dump of `users` is AES-GCM
   ciphertext, so losing that one parameter makes all of them unrecoverable.
 - **No secrets manager.** The `.env` file on the box holds credentials. If

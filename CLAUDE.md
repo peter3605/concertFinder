@@ -901,15 +901,25 @@ pushing to ECR would remove the on-instance build entirely; that needs an ECR
 repo plus instance-profile pull permissions in `/infra`.
 
 **The backup and its drill must pin the same Postgres image.**
-`scripts/restore-drill.sh` is the read half of `scripts/backup-db.sh` — it
-fetches the newest dump from S3, restores it into a scratch Neon branch, times
-it, and asserts the four tables that do not rebuild themselves came back with
-rows. `pg_restore` refuses an archive produced by a *newer* server, so a
-`PG_IMAGE` that drifts between the two scripts fails the drill for a reason
-that has nothing to do with the backups, on the one day that distinction
-matters. `check-deploy-config.sh` compares them. The drill also refuses a target
-that already holds users, because it restores `--clean --if-exists`: without
-that guard a mispasted production URL is an outage rather than a typo.
+`scripts/restore-drill.sh` is the read half of the backup. Since CF-10 it
+reads the shared box's **weekly** dumps (`apps-backups-426433020884`,
+`weekly/concertfinder/`, written by apps-infra's `box/apps-backup.sh`, which
+replaces `scripts/backup-db.sh` at cutover). With `AWS_PROFILE=apps-admin` and
+apps-infra's `scripts/db-tunnel.sh` open on `localhost:15432`, it restores the
+newest dump into a **scratch database on the shared RDS** (default
+`concertfinder_drill`), times it, checks the four tables that do not rebuild
+themselves exist and that `users` has rows, and then drops the scratch
+database. Only `users` must be non-empty because a deployment with no follows
+is real: the 2026-09-14 dumps hold 0 rows in `user_subscribed_artists`.
+`pg_restore` refuses an archive produced by a *newer* server, so a `PG_IMAGE`
+that drifts from the image that wrote the dump fails the drill for a reason
+that has nothing to do with the backups. Keep it equal to apps-infra's
+`postgres:<rds_engine_version>-alpine` and to `backup-db.sh`'s pin;
+`check-deploy-config.sh` compares the latter pair. The restore is `--clean
+--if-exists`, so the drill refuses any target whose name lacks `drill` or
+`scratch`, any database not owned by the RDS master user (every app's database
+is owned by its own login), any target that already holds users, and any
+server on 15432 that is not RDS. Without those guards a typo is an outage.
 
 - **The drill's size check is a level and a window, never a day-over-day
   ratio.** `--check` compares the newest dump against an absolute floor

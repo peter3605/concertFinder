@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Timed restore drill against a nightly dump in S3. Run from your laptop with
-# admin credentials — the instance role can PutObject and nothing else, which
-# is deliberate (infra/backups.tf), so a restore cannot be driven from the box.
+# Timed restore drill against a weekly dump in S3, restored into a SCRATCH
+# database on the shared RDS instance in the apps account. Run from your
+# laptop with AWS_PROFILE=apps-admin: the box's role can PutObject and nothing
+# else, on purpose, so a restore cannot be driven from the box.
 #
 # Two questions this answers, and they are different:
 #
 #   1. Is there a restore point at all? `--check` alone answers that in a few
-#      seconds. It is not a rhetorical question: the .env is sourced by
-#      backup-db.sh, and an unquoted value with a space in it (APNS_P8_KEY, for
-#      most of this project's life) makes that source fail — so the nightly
-#      timer has been capable of failing every night while everything else
-#      looked healthy.
+#      seconds: the newest dump under weekly/concertfinder/ in
+#      apps-backups-426433020884 is fresh and the right size. The dumps are
+#      written by the box's apps-backup.timer (apps-infra box/apps-backup.sh).
 #
 #   2. How long does a restore take, and does the restored data actually have
 #      the rows in it? That is the RTO, and it is unknown until measured. A
@@ -19,29 +18,45 @@
 #      the script rather than a flourish at the end.
 #
 # Usage:
-#   scripts/restore-drill.sh --check
-#   scripts/restore-drill.sh 'postgres://…scratch-branch…?sslmode=require'
-#   scripts/restore-drill.sh --key pg/concertfinder-2026-08-30.dump '<url>'
+#   AWS_PROFILE=apps-admin scripts/restore-drill.sh --check
+#   AWS_PROFILE=apps-admin scripts/restore-drill.sh                 # into concertfinder_drill
+#   AWS_PROFILE=apps-admin scripts/restore-drill.sh <scratch_db>
+#   AWS_PROFILE=apps-admin scripts/restore-drill.sh --key neon-final/concertfinder/<file>.dump
 #   scripts/restore-drill.sh --size-verdict 2078242 2071949 109323   # offline
 #
-# The target must be a SCRATCH database — a Neon branch made for the drill
-# (`neon branches create`), not the production branch. The restore is
-# --clean --if-exists, so it drops what it finds. The guard below refuses a
-# target that already holds users, which is what makes a mispasted production
-# URL a refusal rather than an outage; --force is there for the second drill
-# into the same scratch branch, and for nothing else.
+# A restore needs the tunnel from apps-infra open in another terminal:
+#   AWS_PROFILE=apps-admin ../apps-infra/scripts/db-tunnel.sh   # localhost:15432
+# and docker running (every Postgres client runs in PG_IMAGE). It logs in as
+# the RDS master user, creates the scratch database if it is missing, restores
+# into it, counts rows, and drops it again on a pass (--keep to leave it).
+#
+# Refusals, which are what make a typo a refusal rather than an outage:
+#   - the target name must contain "drill" or "scratch", so it can never be an
+#     app's database (concertfinder, edgefinder, ...);
+#   - a target that exists must be owned by the master user: every app's
+#     database is owned by that app's login (apps-infra create-app-db.sh);
+#   - a target that already holds rows in users is refused. The restore is
+#     --clean --if-exists and drops what it finds. --force is for the second
+#     drill into a kept scratch database, and for nothing else;
+#   - the far end of localhost:15432 must be RDS (an rdsadmin role exists).
+#
+# Until step 27 the old nightly dumps can still be checked in place:
+#   AWS_PROFILE=<management> BACKUP_S3_BUCKET=concertfinder-backups-<acct> \
+#     BACKUP_PREFIX=pg/ MAX_AGE_DAYS=2 scripts/restore-drill.sh --check
 set -euo pipefail
 
-# Same image and same reason as scripts/backup-db.sh: pg_restore must be at
-# least the server's major version, the archive is custom-format, and pinning
-# means a Neon major bump fails loudly here rather than silently producing an
-# unusable drill. Keep this in step with backup-db.sh's PG_IMAGE.
+# pg_restore must be at least the version of the pg_dump that wrote the
+# archive, and psql/pg_restore at least the server's major. The weekly dumps
+# are written by postgres:<rds major>-alpine on the box (apps-infra
+# backup-sync.tf), and pinning here means an RDS major bump fails loudly
+# rather than producing an unusable drill. Keep this in step with that image
+# and with backup-db.sh's PG_IMAGE (check-deploy-config.sh asserts the latter).
 PG_IMAGE=${PG_IMAGE:-postgres:18-alpine}
 
 # How old the newest dump may be before this is a failure rather than a drill.
-# Two days, not one: a drill run at 02:00 UTC is legitimately looking at
-# yesterday's 03:00 dump.
-MAX_AGE_DAYS=${MAX_AGE_DAYS:-2}
+# The box dumps weekly (Sundays 09:00 UTC), so seven days plus one of slack: a
+# drill run on Sunday morning is legitimately looking at last week's dump.
+MAX_AGE_DAYS=${MAX_AGE_DAYS:-8}
 
 # The size guards, and they are two different instruments because the failure
 # they exist for has two shapes.
@@ -64,6 +79,9 @@ MAX_AGE_DAYS=${MAX_AGE_DAYS:-2}
 # the old level for as long as the window is long. Ten days is chosen so a
 # single anomalous night cannot move it and so a real step is still visible a
 # week later; it is deliberately not a mean, which one 11 MB night would drag.
+# Ten *dumps*: that was ten days when they were nightly from the old box and is
+# ten weeks now the shared box dumps weekly. Still not a mean, and a step is
+# still visible for as long as the window is long.
 MIN_DUMP_BYTES=${MIN_DUMP_BYTES:-50000}
 BASELINE_DUMPS=${BASELINE_DUMPS:-10}
 MIN_BASELINE_PCT=${MIN_BASELINE_PCT:-50}
@@ -127,6 +145,7 @@ size_verdict() {
     # a slice so that fewer than N available is simply a shorter window and not
     # an error: a bucket four days old still gets a baseline, just a weaker one.
     if [ -n "$baseline" ]; then
+        # shellcheck disable=SC2086  # split on purpose: one size per line
         baseline=$(printf '%s\n' $baseline | tail -n "$BASELINE_DUMPS" | tr '\n' ' ')
     fi
 
@@ -142,6 +161,7 @@ size_verdict() {
         med=$(median $baseline)
         if [ "${med:-0}" -gt 0 ]; then
             pct=$(( newest * 100 / med ))
+            # shellcheck disable=SC2086  # split on purpose: one size per line
             info "size vs median of the previous $(printf '%s\n' $baseline | wc -l | tr -d ' ') dumps: ${pct}% (median ${med} bytes)"
             if [ "$pct" -lt "$MIN_BASELINE_PCT" ]; then
                 printf '%s  payload cliff: this dump is %s%% of the median of the window, floor is %s%%.%s\n' \
@@ -156,22 +176,40 @@ size_verdict() {
     return $verdict
 }
 
+# The apps account and its shared database. Restores happen here and only
+# here; see apps-infra scripts/db-tunnel.sh and scripts/create-app-db.sh.
+APPS_ACCOUNT_ID=426433020884
+REQUIRED_PROFILE=apps-admin
+RDS_IDENTIFIER=shared-postgres
+RDS_MASTER_PARAM=/shared/RDS_MASTER_PASSWORD
+TUNNEL_PORT=15432
+BACKUP_PREFIX=${BACKUP_PREFIX:-weekly/concertfinder/}
+DEFAULT_TARGET=concertfinder_drill
+
 check_only=false
 force=false
+keep=false
 verdict_only=false
 key=""
 target=""
 sizes=""
 
+# The header comment is the help text: line 2 up to the first non-comment line.
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) check_only=true; shift ;;
         --force) force=true; shift ;;
+        --keep) keep=true; shift ;;
         --size-verdict) verdict_only=true; shift ;;
         --key) key=${2:-}; [ -n "$key" ] || fail "--key needs a value"; shift 2 ;;
-        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        -*) fail "unknown flag: $1" ;;
-        *) if [ "$verdict_only" = true ]; then sizes="$sizes $1"; else target=$1; fi; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) fail "unknown flag: $1 (see --help)" ;;
+        *) if [ "$verdict_only" = true ]; then sizes="$sizes $1"; else
+               [ -z "$target" ] || fail "one target database at a time (got '$target' and '$1')"
+               target=$1
+           fi; shift ;;
     esac
 done
 
@@ -187,100 +225,218 @@ if [ "$verdict_only" = true ]; then
     exit 0
 fi
 
-command -v aws >/dev/null || fail "aws CLI not on PATH"
-command -v docker >/dev/null || fail "docker not on PATH (pg_restore runs in $PG_IMAGE)"
+# The drill used to take a Neon connection string. Say so plainly rather than
+# treat a pasted URL as a database name and refuse it for the wrong reason.
+case "$target" in
+    *://*) fail "the drill no longer takes a connection URL. It restores into a scratch database on the shared RDS through the apps-infra tunnel; pass a database name (default ${DEFAULT_TARGET}) or nothing. See --help." ;;
+esac
+[ -n "$target" ] || target=$DEFAULT_TARGET
+case "$target" in
+    *[!a-z0-9_]*|[!a-z]*) fail "scratch database name '$target' must be lowercase letters, digits and underscores, starting with a letter" ;;
+esac
+case "$target" in
+    *drill*|*scratch*) ;;
+    *) fail "refusing target '$target': a scratch database name must contain 'drill' or 'scratch', so it can never be an app's database. The default is ${DEFAULT_TARGET}." ;;
+esac
 
-# Derived rather than passed, and derived the same way infra/backups.tf names
+command -v aws >/dev/null || fail "aws CLI not on PATH"
+
+# A restore reads the master password and the backups bucket, so it is
+# apps-admin or nothing. --check only lists the bucket, and also serves the old
+# management-account bucket until step 27, so it takes whatever profile is set.
+if [ "$check_only" = false ]; then
+    [ "${AWS_PROFILE:-}" = "$REQUIRED_PROFILE" ] ||
+        fail "refusing to restore with AWS_PROFILE='${AWS_PROFILE:-}'. A restore needs admin rights in the apps account (${APPS_ACCOUNT_ID}): it reads ${RDS_MASTER_PARAM} and the backups bucket. Re-run with AWS_PROFILE=${REQUIRED_PROFILE}."
+    # Environment credentials override AWS_PROFILE, so a stale export would
+    # quietly run this as someone else.
+    [ -z "${AWS_ACCESS_KEY_ID:-}" ] ||
+        fail "AWS_ACCESS_KEY_ID is set in this shell, and environment credentials override AWS_PROFILE. Unset AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN, then re-run."
+fi
+
+account=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) ||
+    fail "aws sts get-caller-identity failed — no usable credentials for profile '${AWS_PROFILE:-default}'"
+
+if [ "$check_only" = false ] && [ "$account" != "$APPS_ACCOUNT_ID" ]; then
+    fail "profile ${REQUIRED_PROFILE} resolves to account ${account}, not the apps account ${APPS_ACCOUNT_ID}. Fix ~/.aws/config."
+fi
+
+# Derived rather than passed, and derived the way apps-infra backups.tf names
 # it. A drill against the wrong bucket reports a missing backup for a backup
 # that exists, which is the most alarming way to be wrong.
 if [ -z "${BACKUP_S3_BUCKET:-}" ]; then
-    account=$(aws sts get-caller-identity --query Account --output text) ||
-        fail "aws sts get-caller-identity failed — no usable credentials"
-    BACKUP_S3_BUCKET="concertfinder-backups-${account}"
+    [ "$account" = "$APPS_ACCOUNT_ID" ] ||
+        fail "credentials are for account ${account}, but the backups live in the apps account (${APPS_ACCOUNT_ID}). Use AWS_PROFILE=${REQUIRED_PROFILE}, or set BACKUP_S3_BUCKET and BACKUP_PREFIX to check another bucket."
+    BACKUP_S3_BUCKET="apps-backups-${account}"
 fi
-info "bucket: s3://${BACKUP_S3_BUCKET}"
-
-step "Finding the newest dump"
-# --output text over a --query that sorts by LastModified. `aws s3 ls` sorts
-# lexicographically by key, which happens to agree with date order today and
-# stops agreeing the moment a key is ever named anything else.
-newest=$(aws s3api list-objects-v2 \
-    --bucket "$BACKUP_S3_BUCKET" --prefix pg/ \
-    --query 'sort_by(Contents, &LastModified)[-1].[Key,LastModified,Size]' \
-    --output text 2>/dev/null) || fail "cannot list s3://${BACKUP_S3_BUCKET}/pg/"
-
-[ -n "$newest" ] && [ "$newest" != "None" ] ||
-    fail "no objects under s3://${BACKUP_S3_BUCKET}/pg/ at all. There is no restore point. Check the timer on the instance: systemctl list-timers concertfinder-backup"
-
-newest_key=$(printf '%s' "$newest" | cut -f1)
-newest_at=$(printf '%s' "$newest" | cut -f2)
-newest_size=$(printf '%s' "$newest" | cut -f3)
+info "bucket: s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX}"
 
 # GNU date and BSD date disagree on everything except -u +%s, so the epoch is
 # computed by python3 (present on macOS and on every runner) rather than by
 # guessing which date this laptop has.
-age_days=$(python3 -c '
+age_in_days() {
+    python3 -c '
 import sys, datetime
 ts = sys.argv[1].replace("Z", "+00:00")
 d = datetime.datetime.fromisoformat(ts)
 now = datetime.datetime.now(datetime.timezone.utc)
 print(f"{(now - d).total_seconds() / 86400:.1f}")
-' "$newest_at")
+' "$1"
+}
 
-info "newest: $newest_key"
-info "taken:  $newest_at (${age_days} days ago)"
-info "size:   ${newest_size} bytes"
+if [ -n "$key" ]; then
+    # A named object — at cutover, the final Neon dump under neon-final/ —
+    # is judged on its own: it exists, and it clears the absolute floor. The
+    # freshness and cliff checks are about the weekly series, which a
+    # hand-picked object is not part of.
+    step "Checking $key"
+    obj=$(aws s3api head-object --bucket "$BACKUP_S3_BUCKET" --key "$key" \
+        --query '[LastModified,ContentLength]' --output text 2>/dev/null) ||
+        fail "s3://${BACKUP_S3_BUCKET}/${key} does not exist or is not readable"
+    newest_key=$key
+    newest_at=$(printf '%s' "$obj" | cut -f1)
+    newest_size=$(printf '%s' "$obj" | cut -f2)
+    info "taken:  $newest_at"
+    info "size:   ${newest_size} bytes"
+    size_verdict "$newest_size" ||
+        fail "$key does not look like a dump of this database. See above."
+else
+    step "Finding the newest dump"
+    # --output text over a --query that sorts by LastModified. `aws s3 ls`
+    # sorts lexicographically by key, which happens to agree with date order
+    # today and stops agreeing the moment a key is ever named anything else.
+    newest=$(aws s3api list-objects-v2 \
+        --bucket "$BACKUP_S3_BUCKET" --prefix "$BACKUP_PREFIX" \
+        --query 'sort_by(Contents, &LastModified)[-1].[Key,LastModified,Size]' \
+        --output text 2>/dev/null) || fail "cannot list s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX}"
 
-# Float comparison, so awk rather than [ -gt ]: age_days has a decimal in it and
-# a shell integer test on "1.4" is a syntax error, not a comparison.
-if awk -v a="$age_days" -v m="$MAX_AGE_DAYS" 'BEGIN { exit !(a > m) }'; then
-    fail "newest dump is ${age_days} days old (limit ${MAX_AGE_DAYS}). The nightly backup is not running. Look for a sourcing failure in the .env before anything else: journalctl -u concertfinder-backup -n 50"
+    if [ -z "$newest" ] || [ "$newest" = "None" ]; then
+        fail "no objects under s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX} at all. There is no restore point. On the box: systemctl list-timers apps-backup.timer — at cutover it is switched on by apps-infra's shared-backup-sync document with Enable=true,RunNow=true."
+    fi
+
+    newest_key=$(printf '%s' "$newest" | cut -f1)
+    newest_at=$(printf '%s' "$newest" | cut -f2)
+    newest_size=$(printf '%s' "$newest" | cut -f3)
+    age_days=$(age_in_days "$newest_at")
+
+    info "newest: $newest_key"
+    info "taken:  $newest_at (${age_days} days ago)"
+    info "size:   ${newest_size} bytes"
+
+    # Float comparison, so awk rather than [ -gt ]: age_days has a decimal in
+    # it and a shell integer test on "1.4" is a syntax error, not a comparison.
+    if awk -v a="$age_days" -v m="$MAX_AGE_DAYS" 'BEGIN { exit !(a > m) }'; then
+        fail "newest dump is ${age_days} days old (limit ${MAX_AGE_DAYS}). The weekly backup is not running. On the box: systemctl status apps-backup.timer; journalctl -u apps-backup -n 50"
+    fi
+
+    # A dump that shrinks by an order of magnitude is a dump of a database that
+    # lost something, and it is the failure a freshness check waves through:
+    # the object is there, it is this week's, and it is a fraction of what it
+    # should be.
+    #
+    # The window includes the newest dump as its last element, which is
+    # exactly size_verdict's contract. A JMESPath slice rather than two queries
+    # so the newest and its baseline come from one listing and cannot disagree.
+    history=$(aws s3api list-objects-v2 \
+        --bucket "$BACKUP_S3_BUCKET" --prefix "$BACKUP_PREFIX" \
+        --query "sort_by(Contents, &LastModified)[-$(( BASELINE_DUMPS + 1 )):].Size" \
+        --output text 2>/dev/null | tr '\t' ' ') ||
+        fail "cannot list the dump history in s3://${BACKUP_S3_BUCKET}/${BACKUP_PREFIX}. The newest object was readable a moment ago, so this is not a missing backup — but without the window there is no cliff guard, and passing on the floor alone is the failure this check exists to stop."
+
+    [ -n "$history" ] || history=$newest_size
+
+    # Enforced, not warned: a step measured against a ten-dump median is not
+    # ambiguous, and a warning printed above the words "Backup present and
+    # fresh" is a warning nobody acts on.
+    # shellcheck disable=SC2086
+    size_verdict $history ||
+        fail "the newest dump does not look like a dump of this database. See above. This is not a restore point until someone has restored it and counted rows."
 fi
-
-# A dump that shrinks by an order of magnitude is a dump of a database that
-# lost something, and it is the failure a freshness check waves through: the
-# object is there, it is today's, and it is a fraction of what it should be.
-#
-# The window includes the newest dump as its last element, which is exactly
-# size_verdict's contract. A JMESPath slice rather than two queries so the
-# newest and its baseline come from one listing and cannot disagree.
-history=$(aws s3api list-objects-v2 \
-    --bucket "$BACKUP_S3_BUCKET" --prefix pg/ \
-    --query "sort_by(Contents, &LastModified)[-$(( BASELINE_DUMPS + 1 )):].Size" \
-    --output text 2>/dev/null | tr '\t' ' ') ||
-    fail "cannot list the dump history in s3://${BACKUP_S3_BUCKET}/pg/. The newest object was readable a moment ago, so this is not a missing backup — but without the window there is no cliff guard, and passing on the floor alone is the failure this check exists to stop."
-
-[ -n "$history" ] || history=$newest_size
-
-# Enforced, not warned. It was a warning for as long as it was a day-over-day
-# ratio, because at one day's remove a real loss and real growth are the same
-# shape and only a human can tell them apart — but a step measured against a
-# ten-day median is not ambiguous in that way, and a warning printed above the
-# words "Backup present and fresh" is a warning nobody acts on.
-# shellcheck disable=SC2086
-size_verdict $history ||
-    fail "the newest dump does not look like a dump of this database. See above. This is not a restore point until someone has restored it and counted rows."
 
 if [ "$check_only" = true ]; then
     printf '\n%sBackup present and fresh.%s Restore not attempted (--check).\n' "$GREEN" "$RESET"
     exit 0
 fi
 
-[ -n "$target" ] ||
-    fail "no target database URL. Pass a SCRATCH Neon branch URL, or --check to only verify a restore point exists."
+command -v docker >/dev/null || fail "docker not on PATH (every Postgres client runs in $PG_IMAGE)"
+docker info >/dev/null 2>&1 || fail "docker is installed but not running. Start Docker Desktop and re-run."
 
-[ -n "$key" ] || key=$newest_key
+# bash's /dev/tcp, so neither nc nor lsof is needed. The subshell keeps the fd
+# from leaking.
+(exec 3<>"/dev/tcp/127.0.0.1/${TUNNEL_PORT}") 2>/dev/null ||
+    fail "nothing is listening on localhost:${TUNNEL_PORT}. Open the tunnel in another terminal and leave it running: AWS_PROFILE=${REQUIRED_PROFILE} ../apps-infra/scripts/db-tunnel.sh"
 
-work=$(mktemp -d /tmp/concertfinder-drill.XXXXXX)
+# How a container reaches the laptop's tunnel. session-manager-plugin binds
+# 127.0.0.1 only. Docker Desktop (macOS) forwards host.docker.internal to the
+# host's loopback; on Linux the container shares the host network instead.
+case "$(uname -s)" in
+    Linux) docker_net=(--network host); PGHOST=127.0.0.1 ;;
+    *)     docker_net=(); PGHOST=host.docker.internal ;;
+esac
+# TLS is required (RDS forces it). The hostname cannot be verified through a
+# tunnel, so the mode is require rather than verify-full.
+PGPORT=$TUNNEL_PORT
+PGSSLMODE=require
+export PGHOST PGPORT PGSSLMODE
+
+# Connection settings travel in libpq's PG* variables, passed to the container
+# by name (-e VAR with no value), so neither the master password nor a URL is
+# ever in a process's argv. PGDATABASE is set per call.
+# The ${arr[@]+...} form is for macOS's /bin/bash 3.2, where expanding an
+# empty array under set -u is an "unbound variable" error.
+pg() {
+    docker run --rm -i ${docker_net[@]+"${docker_net[@]}"} \
+        -e PGHOST -e PGPORT -e PGSSLMODE -e PGUSER -e PGPASSWORD -e PGDATABASE \
+        "$@"
+}
+psql_on() {
+    local db=$1 sql=$2
+    PGDATABASE=$db pg "$PG_IMAGE" psql -X -tAc "$sql" 2>/dev/null
+}
+
+step "Connecting to ${RDS_IDENTIFIER} through localhost:${TUNNEL_PORT}"
+PGUSER=$(aws rds describe-db-instances --db-instance-identifier "$RDS_IDENTIFIER" \
+    --query 'DBInstances[0].MasterUsername' --output text 2>/dev/null) ||
+    fail "cannot describe ${RDS_IDENTIFIER}"
+PGPASSWORD=$(aws ssm get-parameter --name "$RDS_MASTER_PARAM" --with-decryption \
+    --query Parameter.Value --output text 2>/dev/null) ||
+    fail "cannot read ${RDS_MASTER_PARAM}"
+export PGUSER PGPASSWORD
+
+is_rds=$(psql_on postgres "SELECT 1 FROM pg_roles WHERE rolname = 'rdsadmin'") ||
+    fail "could not log in through localhost:${TUNNEL_PORT} as ${PGUSER}. Is the tunnel pointed at ${RDS_IDENTIFIER}?"
+[ "$is_rds" = 1 ] ||
+    fail "the Postgres on localhost:${TUNNEL_PORT} is not RDS (no rdsadmin role). Something else holds that port; stop it and re-open the tunnel."
+server_version=$(psql_on postgres "SHOW server_version")
+info "logged in as ${PGUSER}; server ${server_version}"
+
+step "Checking ${target} is a scratch database"
+owner=$(psql_on postgres "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${target}'") ||
+    fail "could not query pg_database"
+if [ -z "$owner" ]; then
+    info "${target} does not exist; creating it"
+    psql_on postgres "CREATE DATABASE \"${target}\"" >/dev/null ||
+        fail "CREATE DATABASE ${target} failed"
+elif [ "$owner" != "$PGUSER" ]; then
+    fail "${target} is owned by '${owner}', not by the master user ${PGUSER}. Every app's database is owned by that app's login, so this is not a scratch database. Pick another name."
+else
+    existing=$(psql_on "$target" "SELECT count(*) FROM users" || true)
+    if [ -n "$existing" ] && [ "$existing" != "0" ]; then
+        [ "$force" = true ] ||
+            fail "${target} already has ${existing} rows in users. This drill restores with --clean --if-exists and would drop them. If it is a scratch database left by --keep, re-run with --force; otherwise, do not."
+        printf '%s  --force given; restoring over %s existing users%s\n' "$YELLOW" "$existing" "$RESET"
+    fi
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/concertfinder-drill.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 dump="$work/dump"
 
-step "Downloading $key"
-aws s3 cp "s3://${BACKUP_S3_BUCKET}/${key}" "$dump" --only-show-errors ||
+step "Downloading $newest_key"
+aws s3 cp "s3://${BACKUP_S3_BUCKET}/${newest_key}" "$dump" --only-show-errors ||
     fail "download failed"
 
-# Same check backup-db.sh runs before uploading, repeated here because this is
-# the run that proves the object in S3 — not the temp file on the instance — is
+# The same check the box runs before uploading, repeated because this is the
+# run that proves the object in S3 — not the temp file on the box — is
 # readable. Bind-mounted, never piped: a custom-format archive is read by
 # seeking, and pg_restore against a pipe fails with "did not find magic string
 # in file header" no matter how good the dump is.
@@ -289,30 +445,13 @@ docker run --rm -v "$dump:/dump:ro" "$PG_IMAGE" pg_restore --list /dump >/dev/nu
     fail "pg_restore --list rejected the archive. This object is not a usable backup."
 info "table of contents reads cleanly"
 
-psql_q() {
-    docker run --rm -i -e TARGET_URL "$PG_IMAGE" \
-        psql --dbname="$TARGET_URL" -tAc "$1" 2>/dev/null
-}
-export TARGET_URL=$target
-
-step "Checking the target is a scratch database"
-target_host=$(printf '%s' "$target" | sed -E 's|^[a-z+]+://[^@]*@||; s|[:/?].*$||')
-info "target host: $target_host"
-
-existing=$(psql_q "SELECT count(*) FROM users" || true)
-if [ -n "$existing" ] && [ "$existing" != "0" ]; then
-    [ "$force" = true ] ||
-        fail "target already has ${existing} rows in users. This drill restores with --clean --if-exists and would drop them. If this is really a scratch branch, re-run with --force; if you pasted the production URL, do not."
-    printf '%s  --force given; restoring over %s existing users%s\n' "$YELLOW" "$existing" "$RESET"
-fi
-
-step "Restoring (this is the number the drill exists to produce)"
+step "Restoring into ${target} (this is the number the drill exists to produce)"
 started=$(date -u +%s)
-if ! docker run --rm -i -e TARGET_URL -v "$dump:/dump:ro" "$PG_IMAGE" \
-        pg_restore --dbname="$TARGET_URL" --clean --if-exists --no-owner \
-        --no-privileges /dump >"$work/restore.log" 2>&1; then
+if ! PGDATABASE=$target pg -v "$dump:/dump:ro" "$PG_IMAGE" \
+        pg_restore --clean --if-exists --no-owner --no-privileges \
+        --dbname="$target" /dump >"$work/restore.log" 2>&1; then
     tail -20 "$work/restore.log" | sed 's/^/    /' >&2
-    fail "pg_restore exited non-zero — see the tail above"
+    fail "pg_restore exited non-zero — see the tail above. ${target} is left in place for inspection."
 fi
 elapsed=$(( $(date -u +%s) - started ))
 
@@ -325,27 +464,42 @@ warnings=$(grep -ci 'warning' "$work/restore.log" || true)
 step "Verifying the restored data"
 missing=0
 for t in "${IRREPLACEABLE[@]}"; do
-    n=$(psql_q "SELECT count(*) FROM ${t}" || true)
+    n=$(psql_on "$target" "SELECT count(*) FROM ${t}" || true)
     if [ -z "$n" ]; then
         printf '  %s%-26s table missing entirely%s\n' "$RED" "$t" "$RESET"
         missing=1
     else
         printf '  %-26s %s rows\n' "$t" "$n"
-        # `users` is the only one that cannot legitimately be empty: a
-        # deployment with no saves or no set locations is plausible, a
-        # deployment with no accounts is a restore that restored nothing.
+        # All four must exist; only `users` must be non-empty. A deployment
+        # with no saves, no follows or no set locations is real (the
+        # 2026-09-14 dumps hold 0 rows in user_subscribed_artists), and a
+        # drill that fails on healthy data gets skipped. A deployment with no
+        # accounts is a restore that restored nothing.
         if [ "$t" = users ] && [ "$n" = "0" ]; then
             printf '  %susers is empty — the restore produced a schema, not data%s\n' "$RED" "$RESET"
             missing=1
         fi
     fi
 done
-[ "$missing" -eq 0 ] || fail "the restored database is missing data that does not rebuild itself"
+[ "$missing" -eq 0 ] ||
+    fail "the restored database is missing data that does not rebuild itself. ${target} is left in place for inspection; drop it when done (re-run with --force to retry into it)."
 
 printf '\n%sDRILL PASSED%s\n' "$GREEN" "$RESET"
-printf '  dump:          %s (%s)\n' "$key" "$newest_at"
+printf '  dump:          %s (%s)\n' "$newest_key" "$newest_at"
+printf '  target:        %s on %s (Postgres %s)\n' "$target" "$RDS_IDENTIFIER" "$server_version"
 printf '  restore time:  %dm %ds\n' $(( elapsed / 60 )) $(( elapsed % 60 ))
-printf '\n  That restore time is the measured RTO for the data layer, and it excludes\n'
-printf '  everything around it: noticing, deciding, making a branch, and pointing\n'
-printf '  DATABASE_URL at it followed by a deploy. Record it in docs/aws-deploy.md\n'
-printf '  and drop the scratch branch.\n'
+printf '\n  That restore time is the measured RTO for the data layer, through the SSM\n'
+printf '  tunnel from this laptop, and it excludes everything around it: noticing,\n'
+printf '  deciding, and pointing DATABASE_URL at the result followed by a deploy.\n'
+printf '  Record it in docs/aws-deploy.md under "Restore drills".\n'
+
+if [ "$keep" = true ]; then
+    printf '\n  %s left in place (--keep). Drop it when done; a second drill into it needs --force.\n' "$target"
+else
+    step "Dropping ${target}"
+    if psql_on postgres "DROP DATABASE \"${target}\"" >/dev/null; then
+        info "dropped"
+    else
+        printf '%s  could not drop %s; drop it by hand through the tunnel.%s\n' "$YELLOW" "$target" "$RESET" >&2
+    fi
+fi

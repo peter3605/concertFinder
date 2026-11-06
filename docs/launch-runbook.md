@@ -41,7 +41,9 @@ not be one. Two independent reasons it may never have run:
   APNs was set up.
 
 ```bash
-./scripts/restore-drill.sh --check
+# the old nightly dumps, until step 27 (the default is now the apps account's weekly dumps)
+BACKUP_S3_BUCKET=concertfinder-backups-<mgmt acct> BACKUP_PREFIX=pg/ MAX_AGE_DAYS=2 \
+  ./scripts/restore-drill.sh --check
 ```
 
 **Done when** it prints a dump from the last day or two at a plausible size.
@@ -190,26 +192,30 @@ wants detail.
 §1 proved a file exists. This proves it restores, and produces the number
 nobody has: the RTO.
 
-1. [Neon console](https://console.neon.tech) → branch production → name it
-   `restore-drill`.
-2. Copy its **direct** connection string (no `-pooler`), ending in
-   `?sslmode=require`.
-3. Docker running, then:
+Runs at cutover, against the shared RDS in the apps account. Docker running,
+then:
 
 ```bash
-./scripts/restore-drill.sh 'postgres://…restore-drill…?sslmode=require'
+AWS_PROFILE=apps-admin ../apps-infra/scripts/db-tunnel.sh   # terminal 1, leave open
+AWS_PROFILE=apps-admin ./scripts/restore-drill.sh           # terminal 2
 ```
 
+If the box has not written a weekly dump yet, drill the final Neon dump
+instead: `--key neon-final/concertfinder/<file>.dump`.
+
 **Done when** it prints `DRILL PASSED` and a restore time. Record that number in
-`docs/aws-deploy.md` under "Restore drills", then delete the branch.
+`docs/aws-deploy.md` under "Restore drills". The script drops its scratch
+database (`concertfinder_drill`) on a pass.
 
-The script refuses a target that already holds rows in `users`, so a mispasted
-production URL is a refusal rather than an outage. It asserts the four
-irreplaceable tables came back with rows — a restore that produces an empty
-schema exits 0 and otherwise looks exactly like a pass.
+The script refuses a target whose name lacks `drill` or `scratch`, a database
+owned by an app's login, a target that already holds rows in `users`, and a
+non-RDS server on the tunnel port. A typo becomes a refusal rather than an
+outage. It asserts the four irreplaceable tables exist and that `users` has
+rows: a restore that produces an empty schema exits 0 and otherwise looks
+exactly like a pass.
 
-**What the number excludes:** noticing, deciding, making the branch, pointing
-`DATABASE_URL` at it, and deploying. The real RTO is that plus what the script
+**What the number excludes:** noticing, deciding, pointing `DATABASE_URL` at
+the result, and deploying. The real RTO is that plus what the script
 measures.
 
 ### 7. Move Terraform state to S3
