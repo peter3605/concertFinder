@@ -60,6 +60,15 @@ services:
     # room to finish; Docker's 10s default kills in-flight river jobs, which
     # then sit unrescued for an hour and block that user's next scan.
     stop_grace_period: 45s
+    # Memory cap on the shared 2 GiB box (CF-B22). Every container there has
+    # one, and together they stay under the box: caddy 128m + this 320m +
+    # edgefinder-api 512m + runner 640m = 1,600 MiB (apps-infra README, "Memory
+    # budget"). ~3x the ~100 MiB this Go api is expected to use, because nothing
+    # has measured it yet. No memswap_limit on purpose: docker then lets the
+    # container swap as much again, so outgrowing the cap is slow before it is
+    # an OOM kill. Box only: docker-compose.prod.yml's old box has the RAM to
+    # itself and stays uncapped.
+    mem_limit: 320m
     # Capped for the same reason as in prod, more so here: the root volume is
     # shared by every app on the box, and a full one takes all of them down.
     logging:
