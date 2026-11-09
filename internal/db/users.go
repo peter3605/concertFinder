@@ -11,7 +11,10 @@ import (
 )
 
 type User struct {
-	ID                    uuid.UUID
+	ID uuid.UUID
+	// SpotifyUserID is empty for an account with no Spotify identity. The column
+	// is NULL there, so every query selecting it must COALESCE; see migration
+	// 0023.
 	SpotifyUserID         string
 	DisplayName           string
 	EncryptedRefreshToken []byte
@@ -41,12 +44,16 @@ type User struct {
 	// every authenticated request, and it is the only source RequireAdmin
 	// consults.
 	IsAdmin bool
+	// AuthMethods lists the providers this account can sign in with, sorted.
+	// Only the session join fills it (sessionUserColumns), which is all
+	// userPayload is ever handed; GetUserByID leaves it nil.
+	AuthMethods []string
 }
 
 // GetUserByID returns the user or (User{}, pgx.ErrNoRows) if none exists.
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, error) {
 	const q = `
-SELECT id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
+SELECT id, COALESCE(spotify_user_id, ''), display_name, encrypted_refresh_token, refresh_token_nonce,
        COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in,
        COALESCE(invited_with, ''), is_admin
 FROM users WHERE id = $1`

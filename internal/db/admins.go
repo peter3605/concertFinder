@@ -44,7 +44,7 @@ func SetAdmin(ctx context.Context, pool *pgxpool.Pool, spotifyUserID string, adm
 	const q = `
 UPDATE users SET is_admin = $2, updated_at = now()
 WHERE spotify_user_id = $1
-RETURNING id, spotify_user_id, display_name, created_at`
+RETURNING id, COALESCE(spotify_user_id, ''), display_name, created_at`
 	var a AdminAccount
 	err := pool.QueryRow(ctx, q, spotifyUserID, admin).
 		Scan(&a.ID, &a.SpotifyUserID, &a.DisplayName, &a.CreatedAt)
@@ -64,7 +64,7 @@ RETURNING id, spotify_user_id, display_name, created_at`
 // bootstrap admin heads the list.
 func ListAdmins(ctx context.Context, pool *pgxpool.Pool) ([]AdminAccount, error) {
 	const q = `
-SELECT id, spotify_user_id, display_name, created_at
+SELECT id, COALESCE(spotify_user_id, ''), display_name, created_at
 FROM users WHERE is_admin ORDER BY created_at ASC`
 	rows, err := pool.Query(ctx, q)
 	if err != nil {

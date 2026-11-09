@@ -202,3 +202,31 @@ func TestGrantAdminFailsLoudlyForAnUnknownAccount(t *testing.T) {
 		t.Fatal("-grant-admin for an unknown account exited 0; it must fail")
 	}
 }
+
+// An admin with no Spotify ID is a NULL in a column -list-admins selects, and
+// one such row would otherwise fail the whole listing with a scan error.
+func TestListAdminsCLIHandlesAnAccountWithoutSpotify(t *testing.T) {
+	pool := cliTestPool(t)
+	ctx := context.Background()
+	id := uuid.New()
+	name := "No Spotify Admin " + uuid.NewString()
+	const insert = `
+INSERT INTO users (id, display_name, encrypted_refresh_token, refresh_token_nonce, is_admin)
+VALUES ($1, $2, '', '', true)`
+	if _, err := pool.Exec(ctx, insert, id, name); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, id)
+	})
+
+	out, code := captureStdout(t, func() int {
+		return runAdminAdmin(adminArgs{list: true})
+	})
+	if code != 0 {
+		t.Fatalf("-list-admins exited %d, want 0; output %q", code, out)
+	}
+	if !strings.Contains(out, name) {
+		t.Errorf("-list-admins output does not include the account: %q", out)
+	}
+}

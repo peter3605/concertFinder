@@ -175,5 +175,6 @@ func userPayload(u db.User) map[string]any {
 		"digest_opt_in":         u.DigestOptIn,
 		"instant_notify_opt_in": u.InstantNotifyOptIn,
 		"push_opt_in":           u.PushOptIn,
+		"auth_methods":          u.AuthMethods,
 	}
 }

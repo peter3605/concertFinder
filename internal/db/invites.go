@@ -326,7 +326,7 @@ ON CONFLICT (spotify_user_id) DO UPDATE SET
   refresh_token_nonce     = EXCLUDED.refresh_token_nonce,
   email                   = COALESCE(EXCLUDED.email, users.email),
   updated_at              = now()
-RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_token_nonce,
+RETURNING id, COALESCE(spotify_user_id, ''), display_name, encrypted_refresh_token, refresh_token_nonce,
           COALESCE(email, ''), digest_opt_in, instant_notify_opt_in, push_opt_in,
           COALESCE(invited_with, ''), is_admin`
 	row := tx.QueryRow(ctx, upsert, u.ID, u.SpotifyUserID, u.DisplayName,
@@ -336,6 +336,18 @@ RETURNING id, spotify_user_id, display_name, encrypted_refresh_token, refresh_to
 		&out.RefreshTokenNonce, &out.Email, &out.DigestOptIn, &out.InstantNotifyOptIn,
 		&out.PushOptIn, &out.InvitedWith, &out.IsAdmin); err != nil {
 		return User{}, fmt.Errorf("upsert user: %w", err)
+	}
+	// In this transaction for the same reason the redemption is. Migration
+	// 0023's backfill only covers accounts that existed when it ran, so without
+	// this every later signup would have no identity, and a provider-aware
+	// lookup would take a returning user for a new one. The upsert also repairs
+	// any account that slipped past the backfill, at its next login.
+	const identity = `
+INSERT INTO user_identities (provider, subject, user_id)
+VALUES ('spotify', $1, $2)
+ON CONFLICT (provider, subject) DO UPDATE SET last_login_at = now()`
+	if _, err := tx.Exec(ctx, identity, out.SpotifyUserID, out.ID); err != nil {
+		return User{}, fmt.Errorf("upsert identity: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return User{}, fmt.Errorf("commit admission: %w", err)
