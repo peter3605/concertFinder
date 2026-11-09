@@ -49,6 +49,10 @@ shipped: `/.well-known/apple-app-site-association` was serving SPA HTML, and
 *Items 2 and 3 closed on 2026-08-25/26; they are kept in place, marked, because
 each records a trap that recurs on any rebuild.*
 
+*Superseded 2026-11-08: Extended Quota is closed to individuals, and the app
+reaches the public through the manual-picks path. See `docs/public-path.md`,
+which also replaces §10.1.4's review notes and §10.2 below.*
+
 **1. Spotify Extended Quota Mode ([§3.2](#32-spotify-development-mode)) —
 start this first.** Multi-week turnaround, approval not guaranteed, and
 nothing downstream shortens it. Until it is granted, only allowlisted accounts
@@ -1032,6 +1036,10 @@ The last paragraph's claim about disconnecting became true on 2026-08-31, when
 §10.1.2 shipped.
 
 ### 10.2 Guideline 4.8 and Sign in with Apple
+
+*Superseded 2026-11-08: once Spotify sign-in is optional this exemption no
+longer applies, and the app adds Sign in with Apple. See
+`docs/public-path.md` §6.*
 
 4.8 requires apps using a third-party login for the primary account to also
 offer a privacy-preserving alternative. It exempts, verbatim:
