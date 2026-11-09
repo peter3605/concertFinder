@@ -160,6 +160,10 @@ shell scrollback; clear it if that matters.
 
 ### 5. Submit the Spotify Extended Quota Mode application
 
+**Do not do this step.** Spotify accepts Extended Quota applications only from
+organizations with at least 250k monthly active users, so CF-09 was re-scoped
+on 2026-11-08. See `docs/public-path.md`.
+
 The long pole. Nothing downstream shortens it, and until it is granted only
 allowlisted accounts can sign in — **including App Review's own reviewer**.
 
@@ -291,6 +295,9 @@ authorized for, and the server picks the host per device.
 ## Before submission
 
 ### 9. Build the demo account
+
+**Superseded by CF-17's re-scope:** the reviewer now uses a seeded manual-path
+account, not an allowlisted Spotify account. See `docs/public-path.md` §6.2.
 
 App Review signs in with credentials you supply, and without Extended Quota
 Mode that account must be on the allowlist or the reviewer gets a 403 and a

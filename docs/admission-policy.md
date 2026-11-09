@@ -35,6 +35,32 @@ need for a gate:
 - Reservations are refunded. `scanQuotaFor` is an upper bound, and a warm scan
   hands most of it back.
 
+### The arithmetic with manual users (CF-26)
+
+Spotify now serves at most five people, so the twelve-cold-scans figure above
+is no longer the population limit. Everyone else uses the manual-picks path in
+`docs/public-path.md`, which costs far less per user because a pick already
+holds its attraction ID and needs no resolution call:
+
+| Fixed daily spend | Calls |
+|---|---|
+| Five Spotify users, worst-case day (5 × 400) | 2,000 |
+| Discover seed (8 cities × up to 10 pages) | 80 |
+| Onboarding allowance (10 signups × about 50 searches) | 500 |
+| **Left for manual users** | **2,420** |
+
+| Average picks | Calls per user per day | Active manual users that fit |
+|---|---|---|
+| 10 | 10 to 20 | 121 to 242 |
+| 20 | 20 to 40 | 60 to 121 |
+| 30 (the cap) | 30 to 60 | 40 to 80 |
+
+The range is one nightly scan versus a second scan after the 12h cache expires.
+A genre user costs at most 3 calls per genre per location, shared by everyone
+in the same location cell. Plan around **60 to 120 active manual users**.
+Batched attraction IDs would raise this past 1,000, but Ticketmaster does not
+document them; see `docs/public-path.md` §2.3.
+
 What makes exceeding it survivable is `rate_ledger_account`: since migration
 0017, running out produces a dated `retry_after` in both clients instead of
 upstream 403s that arrive looking exactly like artists with no shows. That is
@@ -49,14 +75,15 @@ Development Mode allowlist, maintained by hand in Spotify's dashboard
 (`internal/auth/handlers.go` returns a 403 with its own copy for this). That is
 a real gate. It has two problems:
 
-1. It is not ours, and it **disappears the moment Extended Quota Mode is
-   granted** (CF-09). That grant is the event this policy exists to survive:
-   the deployment would go from "25 accounts typed in by hand" to "anyone with
-   a Spotify account" with nothing in this repository noticing.
-2. It blocks App Review's own reviewer, which is why CF-17 exists.
+1. It is not ours, and it covers only Spotify. The manual-picks path
+   (`docs/public-path.md`) has no allowlist in front of it, so the invite code
+   is the only gate on those signups.
+2. It blocks App Review's own reviewer, which is why that path also carries the
+   review sign-in (CF-38).
 
-CF-09 is a multi-week external application with no guaranteed approval. The
-gate had to be built before it lands, not after.
+Extended Quota Mode will not lift this. Spotify accepts applications only from
+organizations and requires at least 250k monthly active users, so the Spotify
+path stays at five accounts and CF-09 was re-scoped accordingly.
 
 ---
 
@@ -84,10 +111,11 @@ gate had to be built before it lands, not after.
 
 Turn the gate off (`INVITE_REQUIRED=false`) when **all** of:
 
-1. Extended Quota Mode is granted (CF-09), so Spotify is no longer capping
-   accounts at 25 anyway; **and**
-2. the Ticketmaster account allowance has been raised, or measured usage shows
-   real headroom against the ~12 cold scans/day above; **and**
+1. the manual-picks path is live, since it is the only route open to anyone
+   outside the five Spotify accounts; **and**
+2. the Ticketmaster account allowance has been raised, or measured
+   `rate_ledger_account` usage shows real headroom against the manual-user
+   figures above; **and**
 3. SES is out of sandbox (CF-08), so admitted users actually receive the
    digests they opt into.
 
@@ -203,8 +231,8 @@ That line is the only thing standing between "the flag was never granted" and
   spent code can never delete or block a user.
 - **Codes are stored in the clear**, unlike session tokens (migration 0018).
   The reasoning is written out in migration 0021: an invite code does not
-  authenticate as anybody — redeeming one still requires a full Spotify OAuth
-  grant — so a code read out of a backup is worth one signup slot, not one
+  authenticate as anybody — redeeming one still requires completing a sign-in
+  with Spotify, Apple or an emailed link — so a code read out of a backup is worth one signup slot, not one
   account. Against that, the operator has to be able to answer "which code did
   I give to whom" and re-send one lost in a spam folder.
 - **`invite_required` in `/api/site-info` is a rendering hint.** It tells a
