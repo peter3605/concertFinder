@@ -1,10 +1,11 @@
 # concertFinder on the shared apps box
 
-**Status: dormant until the cutover (step 26).** concertfinder.app is still
-served by the old box in the management account, deployed by
-`.github/workflows/deploy.yml` from `docker-compose.prod.yml` + `Caddyfile` on
-every merge to `main`. Nothing on this page changes that. This page describes
-what runs on the shared box in the apps account (`426433020884`), built by
+**Status: live since the cutover (step 26).** concertfinder.app is served by
+the shared box in the apps account (`426433020884`), deployed by
+`.github/workflows/image.yml` on every merge to `main`. `deploy.yml` only runs
+the checks now; its old-box deploy job was removed at the cutover. The old box
+in the management account stays up, api stopped, as the rollback until step 27
+(apps-infra `cutover/cutover.sh rollback`). Built by
 [apps-infra](https://github.com/peter3605/apps-infra).
 
 ## What runs where

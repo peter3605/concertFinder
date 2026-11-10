@@ -19,8 +19,8 @@ name: Image
 #   BOX_INSTANCE_ID      the box (terraform output box_instance_id). Required
 #                        when DEPLOY_TO_BOX is 'true'.
 #
-# At cutover, deploy.yml's deploy job has to be turned off in the same breath
-# as DEPLOY_TO_BOX goes on, or both boxes keep deploying.
+# deploy.yml's old-box deploy job was removed at the cutover, in the same
+# evening DEPLOY_TO_BOX went on, so only one box deploys.
 #
 # Unlike deploy.yml's deploy job this does not wait for the test job: GitHub
 # cannot make one workflow `needs:` another. Every merge to main already went
