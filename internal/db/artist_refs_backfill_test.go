@@ -29,7 +29,7 @@ func TestMigration0024BackfillsArtistRefsFromTheSharedRow(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 
-	updates := backfillStatements(t, "../../migrations/0024_per_user_artist_refs.up.sql")
+	updates := updateStatements(t, "../../migrations/0024_per_user_artist_refs.up.sql", 2)
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -108,9 +108,10 @@ func TestMigration0024BackfillsArtistRefsFromTheSharedRow(t *testing.T) {
 	}
 }
 
-// backfillStatements returns the UPDATE statements of a migration file, with
-// comments stripped.
-func backfillStatements(t *testing.T, path string) []string {
+// updateStatements returns the UPDATE statements of a migration file, with
+// comments stripped, and fails unless there are exactly want of them -- so a
+// statement added to or dropped from the file cannot go untested.
+func updateStatements(t *testing.T, path string, want int) []string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -130,10 +131,74 @@ func backfillStatements(t *testing.T, path string) []string {
 			out = append(out, stmt)
 		}
 	}
-	if len(out) != 2 {
-		t.Fatalf("found %d UPDATE statements in %s, want 2 (snapshots and saves)", len(out), path)
+	if len(out) != want {
+		t.Fatalf("found %d UPDATE statements in %s, want %d", len(out), path, want)
 	}
 	return out
+}
+
+// Migration 0025 is the second half of CF-28: with every reader overlaying
+// the viewer's own refs, the shared row's leftover identity is removed. What
+// must hold is narrow, and each half of it fails silently if wrong: exactly
+// id and genres go (the name is what DedupKey is built from, and a row losing
+// its venue or links is a card that renders blank), and rows written since
+// 0024 are not rewritten at all.
+func TestMigration0025StripsOnlyArtistIdentityFromSharedRows(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	strip := updateStatements(t, "../../migrations/0025_strip_shared_artist_identity.up.sql", 1)[0]
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE concerts (LIKE public.concerts INCLUDING DEFAULTS) ON COMMIT DROP`); err != nil {
+		t.Fatalf("shadow concerts: %v", err)
+	}
+
+	exec(t, tx, `INSERT INTO concerts (dedup_key, data, event_date) VALUES
+	  ('legacy',     '{"artist":{"id":"sp1","name":"A","genres":["indie"]},"venue":"V","links":[{"source":"ticketmaster","url":"u"}]}', now()),
+	  ('id-only',    '{"artist":{"id":"sp2","name":"B"}}', now()),
+	  ('since-0024', '{"artist":{"name":"C"},"venue":"W"}', now()),
+	  ('no-artist',  '{"venue":"X"}', now()),
+	  ('null-artist','{"artist":null}', now())`)
+
+	tag, err := tx.Exec(ctx, strip)
+	if err != nil {
+		t.Fatalf("strip failed: %v\n%s", err, strip)
+	}
+	if got := tag.RowsAffected(); got != 2 {
+		t.Errorf("strip rewrote %d rows, want 2 (only the rows still carrying id or genres)", got)
+	}
+
+	want := map[string]string{
+		"legacy":      `{"links": [{"url": "u", "source": "ticketmaster"}], "venue": "V", "artist": {"name": "A"}}`,
+		"id-only":     `{"artist": {"name": "B"}}`,
+		"since-0024":  `{"venue": "W", "artist": {"name": "C"}}`,
+		"no-artist":   `{"venue": "X"}`,
+		"null-artist": `{"artist": null}`,
+	}
+	for key, w := range want {
+		var got string
+		if err := tx.QueryRow(ctx, `SELECT data::text FROM concerts WHERE dedup_key = $1`, key).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		if got != w {
+			t.Errorf("%s after strip = %s, want %s", key, got, w)
+		}
+	}
+
+	// A second run is a no-op, so a re-applied or hand-run copy cannot do
+	// anything the first did not.
+	tag, err = tx.Exec(ctx, strip)
+	if err != nil {
+		t.Fatalf("second strip: %v", err)
+	}
+	if tag.RowsAffected() != 0 {
+		t.Errorf("second strip rewrote %d rows, want 0", tag.RowsAffected())
+	}
 }
 
 func exec(t *testing.T, tx pgx.Tx, q string, args ...any) {
