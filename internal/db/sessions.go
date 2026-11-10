@@ -42,11 +42,15 @@ type SessionUser struct {
 // the only thing auth.RequireAdmin reads. Dropping it would not error -- the
 // field would scan as false, every admin request would 403, and the console
 // would be unreachable with nothing in the logs saying why.
+// auth_methods is read here too, rather than by a second query from the
+// handlers, because the mobile exchange spends its one-time code in this same
+// statement: a separate read failing afterwards would burn the login.
 const sessionUserColumns = `s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at,
-       u.id, u.spotify_user_id, u.display_name,
+       u.id, COALESCE(u.spotify_user_id, ''), u.display_name,
        u.encrypted_refresh_token, u.refresh_token_nonce,
        COALESCE(u.email, ''), u.digest_opt_in, u.instant_notify_opt_in, u.push_opt_in,
-       u.is_admin`
+       u.is_admin,
+       ARRAY(SELECT i.provider FROM user_identities i WHERE i.user_id = u.id ORDER BY i.provider)`
 
 func scanSessionUser(row interface{ Scan(...any) error }) (SessionUser, error) {
 	var out SessionUser
@@ -56,7 +60,7 @@ func scanSessionUser(row interface{ Scan(...any) error }) (SessionUser, error) {
 		&out.User.ID, &out.User.SpotifyUserID, &out.User.DisplayName,
 		&out.User.EncryptedRefreshToken, &out.User.RefreshTokenNonce,
 		&out.User.Email, &out.User.DigestOptIn, &out.User.InstantNotifyOptIn, &out.User.PushOptIn,
-		&out.User.IsAdmin,
+		&out.User.IsAdmin, &out.User.AuthMethods,
 	)
 	if err != nil {
 		return SessionUser{}, err

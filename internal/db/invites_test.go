@@ -413,3 +413,51 @@ func TestInviteCodeStatePrefersTheDeliberateReason(t *testing.T) {
 		})
 	}
 }
+
+// Migration 0023's backfill only reaches accounts that existed when it ran, so
+// every later signup depends on this write. A missing row raises no error: the
+// account simply reports no auth methods, and a provider-aware lookup would
+// take it for a new user.
+func TestAdmissionRecordsTheSpotifyIdentity(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	spotifyID := "spotify-identity-" + uuid.NewString()
+	dropUser(t, pool, spotifyID)
+
+	identity := func() (owner uuid.UUID, rows int) {
+		t.Helper()
+		err := pool.QueryRow(ctx, `
+SELECT COALESCE(max(user_id::text), '00000000-0000-0000-0000-000000000000')::uuid, count(*)
+FROM user_identities WHERE provider = 'spotify' AND subject = $1`, spotifyID).Scan(&owner, &rows)
+		if err != nil {
+			t.Fatalf("read identity: %v", err)
+		}
+		return owner, rows
+	}
+
+	created, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false)
+	if err != nil {
+		t.Fatalf("signup: %v", err)
+	}
+	if owner, rows := identity(); rows != 1 || owner != created.ID {
+		t.Fatalf("after signup: %d rows owned by %s, want 1 owned by %s", rows, owner, created.ID)
+	}
+
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false); err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if owner, rows := identity(); rows != 1 || owner != created.ID {
+		t.Fatalf("after second login: %d rows owned by %s, want 1 owned by %s", rows, owner, created.ID)
+	}
+
+	// An account that slipped past the backfill is repaired at its next login.
+	if _, err := pool.Exec(ctx, `DELETE FROM user_identities WHERE user_id = $1`, created.ID); err != nil {
+		t.Fatalf("delete identity: %v", err)
+	}
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false); err != nil {
+		t.Fatalf("repairing login: %v", err)
+	}
+	if owner, rows := identity(); rows != 1 || owner != created.ID {
+		t.Fatalf("after repair: %d rows owned by %s, want 1 owned by %s", rows, owner, created.ID)
+	}
+}
