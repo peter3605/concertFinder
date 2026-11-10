@@ -178,20 +178,6 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		return searchErr
 	}
 
-	// Normalized snapshots (migration 0012): upsert each concert into the
-	// shared `concerts` table, then persist only the array of dedup_keys
-	// on the user's snapshot row. Storage is now shared across users —
-	// two users following the same Taylor Swift show write one row, not two.
-	dedupKeys := make([]string, len(found))
-	rows := make([]db.ConcertRow, len(found))
-	for i, c := range found {
-		body, err := json.Marshal(c)
-		if err != nil {
-			return err
-		}
-		rows[i] = db.ConcertRow{DedupKey: c.DedupKey, Data: body, EventDate: c.Date}
-		dedupKeys[i] = c.DedupKey
-	}
 	// A quota-capped scan can't do better until the ledger's UTC day turns
 	// over, so record when it's worth trying again. Any other flavor of
 	// incompleteness (budget overrun) leaves this nil and retries freely.
@@ -203,14 +189,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	// Persist partial results too — a half-filled page beats an empty one —
 	// but record that they're partial so the SWR handler keeps treating the
 	// snapshot as stale instead of sitting on it for the full window.
-	if err := persistScan(ctx, poolStore{pool: w.Pool}, rows, db.ConcertSnapshot{
-		UserID:      user.ID,
-		LocationKey: LocationKey(loc),
-		DedupKeys:   dedupKeys,
-		ComputedAt:  time.Now(),
-		Complete:    incomplete == nil,
-		RetryAfter:  retryAfter,
-	}); err != nil {
+	if err := PersistScanResults(ctx, w.Pool, user.ID, loc, found, incomplete == nil, retryAfter); err != nil {
 		return err
 	}
 	slog.Info("scan_concerts done",
@@ -251,6 +230,46 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 		return searchErr
 	}
 	return nil
+}
+
+// PersistScanResults writes one scan's results: each concert into the shared
+// `concerts` table, and the user's snapshot of dedup_keys pointing at them.
+//
+// Normalized snapshots (migration 0012) mean storage is shared across users —
+// two users following the same Taylor Swift show write one row, not two.
+// Which is exactly why the row may hold nothing about *this* user's artist:
+// it is last-writer-wins across everyone sharing the key. The artist's ID and
+// genres go on this user's snapshot instead (CF-28; see
+// concerts.ApplyArtistRefs), and EncodeSharedRow is what keeps them out of
+// the row.
+//
+// Exported so a test can drive the real write path for two users colliding
+// on one dedup_key without standing up the Spotify and Ticketmaster halves
+// of a scan.
+func PersistScanResults(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, loc concerts.Location, found []concerts.Concert, complete bool, retryAfter *time.Time) error {
+	dedupKeys := make([]string, len(found))
+	rows := make([]db.ConcertRow, len(found))
+	for i, c := range found {
+		body, err := concerts.EncodeSharedRow(c)
+		if err != nil {
+			return err
+		}
+		rows[i] = db.ConcertRow{DedupKey: c.DedupKey, Data: body, EventDate: c.Date}
+		dedupKeys[i] = c.DedupKey
+	}
+	artistRefs, err := json.Marshal(concerts.RefsOf(found))
+	if err != nil {
+		return err
+	}
+	return persistScan(ctx, poolStore{pool: pool}, rows, db.ConcertSnapshot{
+		UserID:      userID,
+		LocationKey: LocationKey(loc),
+		DedupKeys:   dedupKeys,
+		ComputedAt:  time.Now(),
+		Complete:    complete,
+		RetryAfter:  retryAfter,
+		ArtistRefs:  artistRefs,
+	})
 }
 
 // persistBudget is how long the writes that follow a scan get. They run on a
@@ -445,7 +464,7 @@ WHERE last_seen_at > now() - interval '14 days'
 type SendDigestWorker struct {
 	river.WorkerDefaults[SendDigestArgs]
 	Pool             *pgxpool.Pool
-	Sender           *email.Sender
+	Sender           MailSender
 	UnsubscribeBase  string // e.g. https://your-domain.com — the /api/me/unsubscribe path is appended
 	UnsubscribeToken func(userID uuid.UUID) string
 	// Fallback is the server-wide default location, used when the user never
@@ -500,6 +519,11 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	if err != nil {
 		return err
 	}
+	refs, err := concerts.DecodeArtistRefs(snap.ArtistRefs)
+	if err != nil {
+		return err
+	}
+	concerts.ApplyArtistRefs(all, refs)
 	// First-ever digest caps at 60 days out so we don't dump an entire tour
 	// year into one email. Detected by an exact count of prior sends: the
 	// old "every candidate happens to be unsent" heuristic also fired for
@@ -572,7 +596,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 type SendInstantNotifyWorker struct {
 	river.WorkerDefaults[SendInstantNotifyArgs]
 	Pool             *pgxpool.Pool
-	Sender           *email.Sender
+	Sender           MailSender
 	UnsubscribeBase  string
 	UnsubscribeToken func(userID uuid.UUID) string
 }
@@ -616,6 +640,9 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	}
 	fresh, err := concerts.AssembleByKey(keys, blobs)
 	if err != nil {
+		return err
+	}
+	if err := applyUserArtistRefs(ctx, w.Pool, user.ID, keys, fresh); err != nil {
 		return err
 	}
 	if len(fresh) == 0 {
@@ -841,5 +868,19 @@ WHERE s.last_seen_at > now() - interval '14 days'
 			slog.Warn("scan fanout enqueue failed", "user", t.id, "err", err)
 		}
 	}
+	return nil
+}
+
+// applyUserArtistRefs lays this user's own artist identity over rows loaded
+// straight from the shared concerts table by dedup_key. The jobs that start
+// from keys rather than a snapshot (instant-notify, push) need it as much as
+// the feed does: the shared row is last-writer-wins and holds no artist ID or
+// genres of anybody's (CF-28).
+func applyUserArtistRefs(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, keys []string, cs []concerts.Concert) error {
+	raw, err := db.GetArtistRefs(ctx, pool, userID, keys)
+	if err != nil {
+		return err
+	}
+	concerts.ApplyArtistRefs(cs, concerts.ArtistRefsFromRaw(raw))
 	return nil
 }

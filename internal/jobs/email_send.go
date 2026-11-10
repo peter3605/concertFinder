@@ -20,11 +20,12 @@ import (
 // SendPushArgs settled on, for the same reason.
 const EmailMaxAttempts = 3
 
-// mailSender is the slice of *email.Sender the digest workers use. An
+// MailSender is the slice of *email.Sender the digest workers use. An
 // interface so the ordering in sendAndRecord -- which is the half that decides
 // whether a user is ever told about a show -- is testable without an SMTP
-// server, exactly as pushSender exists for the APNs side.
-type mailSender interface {
+// server, exactly as pushSender exists for the APNs side. Exported so a test
+// outside this package can read what a worker actually rendered.
+type MailSender interface {
 	Send(ctx context.Context, m email.Message) error
 }
 
@@ -69,7 +70,7 @@ type recordSent func(ctx context.Context, dedupKeys []string) error
 // answers 554 MessageRejected for an unverified recipient, and telling that
 // apart from a temporary refusal reliably is a much larger job that optimises
 // for the rarer failure.
-func sendAndRecord(ctx context.Context, sender mailSender, msg email.Message, dedupKeys []string, record recordSent) error {
+func sendAndRecord(ctx context.Context, sender MailSender, msg email.Message, dedupKeys []string, record recordSent) error {
 	if err := sender.Send(ctx, msg); err != nil {
 		return err
 	}
