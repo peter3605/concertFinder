@@ -85,6 +85,9 @@ func (w *SendPushWorker) Work(ctx context.Context, job *river.Job[SendPushArgs])
 	if err != nil {
 		return err
 	}
+	if err := applyUserArtistRefs(ctx, w.Pool, job.Args.UserID, keys, fresh); err != nil {
+		return err
+	}
 	if len(fresh) == 0 {
 		return nil
 	}

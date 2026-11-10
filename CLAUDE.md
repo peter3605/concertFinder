@@ -379,6 +379,29 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   correct trade. `reason` is applied per request like `Saved` and
   `Subscribed` and is never persisted in a snapshot, whose lifetime is
   unrelated to the profile's.
+- **The shared `concerts` row holds no viewer's artist identity; each viewer's
+  comes from their own snapshot and saves.** `dedup_key` is artist *name* +
+  venue day + venue + city, so every user whose scan finds a show shares one
+  row, and `UpsertConcerts` is last-writer-wins. Until CF-28 each scan wrote
+  its artist ID and genres into that row, which was harmless only while every
+  writer was a Spotify user: once a manual-picks user exists, whoever scanned
+  last decides what both see — a manual user served Spotify-derived fields,
+  a Spotify user's bell re-pointed at a `tm:` ID their subscriptions do not
+  hold — with no error in either direction. `concerts.EncodeSharedRow` is the
+  only encoder for `concerts.data` and drops ID and genres by type
+  (`sharedRow` shadows `Concert.Artist`); `user_concert_snapshots.artist_refs`
+  and `user_saved_concerts.artist_ref` (migration 0024, the latter copied from
+  the user's newest snapshot at save time because a save outlives the feed)
+  carry the identity, and `concerts.ApplyArtistRefs` lays it back on read in
+  all five readers — feed, saved, digest, instant-notify, push — **before**
+  subscribe tagging, reasons, facets and the genre filter, all of which read
+  it. A row with no ref for this viewer gets **no** ID, never the row's own:
+  falling back reintroduces the leak for exactly the rows that lack a ref.
+  A new reader of `concerts.data` must go through the overlay;
+  `internal/http/cross_viewer_test.go` drives both write orders through every
+  current one. Stripping the fields from rows written before 0024 is its own
+  later migration, shipped only after the readers are deployed — a rollback
+  onto stripped rows leaves the previous binary with no artist IDs at all.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 

@@ -189,7 +189,15 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			} else if assembled, err := concerts.AssembleByKey(snap.DedupKeys, blobs); err != nil {
 				slog.Warn("concerts: assemble failed", "err", err, "user", u.ID)
 				hasSnap = false
+			} else if refs, err := concerts.DecodeArtistRefs(snap.ArtistRefs); err != nil {
+				slog.Warn("concerts: artist refs decode failed", "err", err, "user", u.ID)
+				hasSnap = false
 			} else {
+				// The shared rows hold no artist ID or genres; this user's
+				// come from their own snapshot. Before the cache, so a hit
+				// is already overlaid, and before facets, filters and the
+				// subscribe tag below, all of which read them (CF-28).
+				concerts.ApplyArtistRefs(assembled, refs)
 				found = assembled
 				if h.SnapshotCache != nil {
 					h.SnapshotCache.Put(u.ID, locKey, snap.ComputedAt, assembled)

@@ -22,11 +22,24 @@ import (
 func SaveConcert(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, dedupKey string, maxSaved int) (bool, error) {
 	const q = `
 WITH inserted AS (
-  INSERT INTO user_saved_concerts (user_id, dedup_key, saved_at)
+  INSERT INTO user_saved_concerts (user_id, dedup_key, saved_at, artist_ref)
   -- Casts because the parameters first appear inside an INSERT ... SELECT,
   -- where Postgres resolves their types from the SELECT rather than from the
   -- target columns.
-  SELECT $1::uuid, $2::text, now()
+  --
+  -- artist_ref is copied from the user's newest snapshot holding this key
+  -- (migration 0024). A save has to outlive the feed, and the shared concerts
+  -- row cannot answer "which artist is this, for this user" -- see
+  -- concerts.ApplyArtistRefs. NULL when no snapshot of theirs holds the key,
+  -- which reads back as an act with no artist ID rather than borrowing
+  -- someone else's.
+  SELECT $1::uuid, $2::text, now(), (
+    SELECT s.artist_refs -> $2::text
+    FROM user_concert_snapshots s
+    WHERE s.user_id = $1 AND s.artist_refs ? $2::text
+    ORDER BY s.computed_at DESC
+    LIMIT 1
+  )
   WHERE (SELECT count(*) FROM user_saved_concerts WHERE user_id = $1) < $3::int
   ON CONFLICT (user_id, dedup_key) DO NOTHING
   RETURNING 1
@@ -48,8 +61,16 @@ func UnsaveConcert(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, de
 	return err
 }
 
-// GetSavedConcerts returns the raw concert bodies this user has saved,
-// ordered by event date.
+// SavedConcert is one saved row: the shared concert body plus this user's own
+// artist identity for it (migration 0024). ArtistRef is nil for a save made
+// when no snapshot of the user's held the key.
+type SavedConcert struct {
+	Data      []byte
+	ArtistRef []byte
+}
+
+// GetSavedConcerts returns the concerts this user has saved, ordered by event
+// date.
 //
 // This joins user_saved_concerts straight to the shared concerts table
 // rather than reading the user's snapshot. Saving has to outlive the feed:
@@ -60,9 +81,9 @@ func UnsaveConcert(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, de
 //
 // Saves whose concert row has been pruned (the janitor drops events more
 // than 7 days past) simply don't come back; the join skips them.
-func GetSavedConcerts(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) ([][]byte, error) {
+func GetSavedConcerts(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) ([]SavedConcert, error) {
 	const q = `
-SELECT c.data
+SELECT c.data, s.artist_ref
 FROM user_saved_concerts s
 JOIN concerts c ON c.dedup_key = s.dedup_key
 WHERE s.user_id = $1
@@ -73,13 +94,13 @@ ORDER BY c.event_date, c.dedup_key
 		return nil, err
 	}
 	defer rows.Close()
-	var out [][]byte
+	var out []SavedConcert
 	for rows.Next() {
-		var b []byte
-		if err := rows.Scan(&b); err != nil {
+		var sc SavedConcert
+		if err := rows.Scan(&sc.Data, &sc.ArtistRef); err != nil {
 			return nil, err
 		}
-		out = append(out, b)
+		out = append(out, sc)
 	}
 	return out, rows.Err()
 }

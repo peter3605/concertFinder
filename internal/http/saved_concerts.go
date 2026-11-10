@@ -38,11 +38,16 @@ func (h *SavedConcertsHandler) List(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	blobs, err := db.GetSavedConcerts(r.Context(), h.Pool, u.ID)
+	rows, err := db.GetSavedConcerts(r.Context(), h.Pool, u.ID)
 	if err != nil {
 		slog.Error("saved concerts: load failed", "err", err, "user", u.ID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	blobs := make([][]byte, len(rows))
+	rawRefs := make(map[string][]byte, len(rows))
+	for i, row := range rows {
+		blobs[i] = row.Data
 	}
 	saved, err := concerts.Assemble(blobs)
 	if err != nil {
@@ -50,6 +55,13 @@ func (h *SavedConcertsHandler) List(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// Each save carries this user's own artist identity, copied when it was
+	// made; the shared row holds nobody's (CF-28). Before the subscribe tag
+	// and the genre facets, both of which read it.
+	for i, row := range rows {
+		rawRefs[saved[i].DedupKey] = row.ArtistRef
+	}
+	concerts.ApplyArtistRefs(saved, concerts.ArtistRefsFromRaw(rawRefs))
 	// Everything here is saved by definition; tag it so the star renders
 	// filled without the client having to infer it.
 	for i := range saved {
