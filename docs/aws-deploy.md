@@ -928,7 +928,7 @@ restore time it prints is the data-layer RTO through the tunnel from a laptop.
 Record it here when you first measure it, and remember it excludes noticing,
 deciding, and pointing `DATABASE_URL` at the result.
 
-**Measured RTO:** not yet measured; first run at cutover (CF-10).
+**Measured RTO:** 20 s restore (33 s wall clock) on 2026-11-10, cutover night: the 1.6 MB weekly dump, through the SSM tunnel from the laptop (CF-10).
 
 The whole-database restore into production, when it is not a drill, is still
 the manual path in §7 above.

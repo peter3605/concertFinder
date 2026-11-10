@@ -3,7 +3,7 @@ name: Deploy
 # `pull_request` runs the two checking jobs on the PR itself. Without it they
 # only ran on push to main — i.e. after merge, as part of the deploy — so a red
 # `test` was a fix-forward on main rather than a PR that simply won't merge.
-# The `deploy` job is guarded below so this stays a check, not a deploy.
+# Since the cutover (step 26) this workflow only checks; image.yml deploys.
 # `ios/**` is excluded from both triggers. The app ships through Xcode and
 # App Store Connect, not through this workflow, so a Swift-only commit has
 # nothing to deploy — without the filter it would still rebuild the image on
@@ -212,100 +212,10 @@ jobs:
       - name: Validate Caddyfile and compose files
         run: ./scripts/check-deploy-config.sh
 
-  deploy:
-    needs: [test, deploy-config]
-    # Never from a pull_request run — those exist to check the branch, not to
-    # ship it. Phrased as != 'pull_request' rather than == 'push' so
-    # workflow_dispatch still deploys.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write # OIDC federation to AWS; scoped to this job only
-      contents: read
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # NOTE: the image is built on the EC2 instance. `build` is a separate
-      # step from `up -d` on purpose — `up -d --build` tears down the running
-      # containers as part of the same command, so a build that fails or runs
-      # the 2 GB box out of memory took the site down with it. Split, a failed
-      # build leaves the current containers serving and fails the SSM command
-      # loudly instead.
-      #
-      # `up -d --wait` blocks on the api container's healthcheck instead of
-      # returning the moment the container is started. Without it a container
-      # that exits immediately — which config.Validate does deliberately on a
-      # bad .env — still produced a zero exit, an SSM "Success" and a green
-      # workflow while `restart: unless-stopped` crash-looped it and the site
-      # stayed down. verify-deploy.sh then probes the whole chain through
-      # Caddy, which is the half `--wait` cannot see: the healthcheck runs
-      # inside the api container and proves only that the Go process answers
-      # itself, while every deploy defect this repo has shipped was a Caddy
-      # crash loop beside a healthy api container.
-      #
-      # A `--wait` failure is swallowed on purpose so verify-deploy.sh still
-      # runs: it is the authoritative verdict and it dumps `ps` + container
-      # logs on the way out, which is the output you actually need. It fails
-      # the SSM command by itself if the site is really down.
-      #
-      # Building in this workflow and pushing to ECR would remove the risk
-      # entirely (and free the instance from carrying a Node toolchain); it
-      # needs an ECR repository plus pull permissions on the instance profile,
-      # which is a change in /infra rather than here.
-      #
-      # The checkout resets to github.sha, not origin/main. They are usually the
-      # same commit and occasionally are not: two merges landing close together
-      # mean the older run's deploy step builds the newer run's tree, so what
-      # ships is a commit this workflow never tested. Pinning the SHA also makes
-      # the concurrency queue safe — the run that waits still deploys its own
-      # commit when it gets the lock.
-      #
-      # The built image is tagged with the commit SHA and prune-images.sh keeps
-      # the last three, so a rollback is `docker tag concertfinder-api:<sha>
-      # concertfinder-api:latest` plus a restart, rather than a rebuild on a
-      # 2 GiB box at the moment the site is already unhappy. See
-      # docs/aws-deploy.md §8.
-      - name: Deploy via SSM
-        id: ssm
-        run: |
-          set -euo pipefail
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
-            --document-name AWS-RunShellScript \
-            --comment "Deploy from GitHub Actions run ${{ github.run_id }}" \
-            --parameters commands='[
-              "set -euo pipefail",
-              "cd /opt/concertfinder",
-              "sudo -u concertfinder git fetch origin",
-              "sudo -u concertfinder git reset --hard ${{ github.sha }}",
-              "sudo ./scripts/render-env.sh",
-              "sudo -u concertfinder docker compose -f docker-compose.prod.yml pull || true",
-              "sudo -u concertfinder docker compose -f docker-compose.prod.yml build",
-              "sudo -u concertfinder docker tag concertfinder-api:latest concertfinder-api:${{ github.sha }}",
-              "sudo -u concertfinder docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 240 || echo compose-wait-failed-verify-deploy-below-is-the-verdict",
-              "sudo -u concertfinder ./scripts/verify-deploy.sh",
-              "sudo -u concertfinder ./scripts/prune-images.sh"
-            ]' \
-            --query 'Command.CommandId' \
-            --output text)
-          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
-          echo "Started SSM command $COMMAND_ID"
-
-      - name: Wait for deploy to finish
-        run: |
-          set -euo pipefail
-          aws ssm wait command-executed \
-            --command-id "${{ steps.ssm.outputs.command_id }}" \
-            --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
-
-      - name: Print deploy output
-        if: always()
-        run: |
-          aws ssm get-command-invocation \
-            --command-id "${{ steps.ssm.outputs.command_id }}" \
-            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-            --query '{status:Status, stdout:StandardOutputContent, stderr:StandardErrorContent}' \
-            --output json
+  # There is no deploy job here any more. It deployed to the old box in the
+  # management account with AWS-RunShellScript, and retired at the cutover
+  # (step 26). Production is the shared box in the apps account, deployed by
+  # image.yml's push job (ECR image + the concertfinder-deploy SSM document)
+  # while the repo variable DEPLOY_TO_BOX is true. The old box stays up, api
+  # stopped, as the rollback until step 27; apps-infra cutover/cutover.sh
+  # rollback restarts it. Restoring this job is part of a rollback that lasts.
