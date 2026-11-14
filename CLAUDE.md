@@ -416,7 +416,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   `Artist.Name`, which is part of the shared `dedup_key`, so `POST /me/picks`
   accepts only `attraction_id` and takes the name from `picks.Service.Lookup`
   (a recent search result, else one charged by-ID call). **A user with no
-  Spotify identity and no picks must never enqueue:** a missing snapshot reads
+  Spotify identity and no picks (artist or genre) must never enqueue:** a missing snapshot reads
   as stale, so the SWR read answers `needs_picks: true` (omitempty, so Spotify
   users' responses and the iOS goldens are unchanged), refresh answers 409, and
   the fanout's query skips them. And `ScanConcertsWorker` only calls the
@@ -427,6 +427,33 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   profile. Tests that run a real scan use `testdb.Isolated`, a database of
   their own, because cached `tm:` rows break `TestScanCachedConcerts` in the
   shared one.
+- **Genre picks (CF-31) are the one cached listing truncated on purpose.**
+  `user_genre_picks` holds top-level Ticketmaster Music genres only (capped at
+  `db.MaxGenrePicks` = 5; sub-genres measured too sparse to be a feed), and
+  `POST /me/genres` accepts an ID only from `picks.GenreCatalog`, storing
+  Ticketmaster's name. A listing is fetched `sort=date,asc` and stopped at
+  `ticketmaster.MaxGenrePages` (3) — New York jazz is 16 pages — and that cut
+  is **cached**, with its `horizon` in `concert_cache.horizon`: the written
+  exception to "a truncated fetch is never cached", because a date-sorted
+  prefix is correct up to its last day. A cut by a refused permit or a failed
+  page is a fragment and is not cached. The horizon is **exclusive** — rows on
+  that day may be partial and are dropped — and travels through
+  `user_concert_snapshots.genre_horizon` to the feed's `genre_horizon`
+  (omitempty), so the feed says "before <day>" rather than implying it holds
+  everything. Listings are keyed on `concerts.GenreCell`, the location snapped
+  to a 0.25° grid with a 15-mile pad, then filtered back to the user's circle
+  with `Near`; without snapping no two users ever share one, since cache keys
+  are exact to four decimals. The genre part of a snapshot is capped at
+  `concerts.MaxGenreFeedConcerts` (300) on a day boundary, and the digest at
+  `email.DigestMaxEvents` (25) events with a link to the feed — only what is
+  listed is recorded as sent, so the rest lead the next digest instead of being
+  marked delivered by an email that never named them. "Has nothing to scan"
+  is decided in three places (`loadPickState`, the fanout query,
+  `ScanConcertsWorker.Work`) and all three count genre picks; one that forgets
+  tells a genre-only user `needs_picks` forever or never scans them.
+  `ticketmaster.IsSeatPackage` drops attractions such as "Club Level Seating"
+  at decode time, because a genre listing's acts come from Ticketmaster's
+  lineup, not from anything the user chose.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 

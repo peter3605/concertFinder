@@ -18,14 +18,18 @@ func TestScanQuotaFor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		targets []concerts.Target
+		genres  int
 		want    int
 	}{
-		{"picks only", picks, 3},
-		{"profile only", profile, 4},
-		{"both", append(append([]concerts.Target{}, picks...), profile...), 7},
-		{"nothing", nil, 0},
+		{"picks only", picks, 0, 3},
+		{"profile only", profile, 0, 4},
+		{"both", append(append([]concerts.Target{}, picks...), profile...), 0, 7},
+		{"nothing", nil, 0, 0},
+		// A genre listing reserves its worst case, three pages, on top.
+		{"genres only", nil, 2, 6},
+		{"picks and genres", picks, 5, 18},
 	} {
-		if got := scanQuotaFor(tc.targets); got != tc.want {
+		if got := scanQuotaFor(tc.targets, tc.genres); got != tc.want {
 			t.Errorf("%s: scanQuotaFor = %d, want %d", tc.name, got, tc.want)
 		}
 	}

@@ -38,17 +38,23 @@ type ConcertSnapshot struct {
 	// concerts.ApplyArtistRefs. Raw JSON so this package stays
 	// concert-shape-agnostic. Nil is stored as an empty object.
 	ArtistRefs []byte
+	// GenreHorizon is the venue-local day ("2006-01-02") before which the
+	// genre part of this feed is complete (migration 0027). Genre listings
+	// are capped date-sorted prefixes, so the feed holds the next shows up
+	// to here and none after. "" when the user has no genre picks or nothing
+	// was cut.
+	GenreHorizon string
 }
 
 // GetConcertSnapshot returns (snapshot, true, nil) on hit, (zero, false, nil) on miss.
 func GetConcertSnapshot(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, locationKey string) (ConcertSnapshot, bool, error) {
 	const q = `
-SELECT user_id, location_key, dedup_keys, computed_at, complete, retry_after, artist_refs
+SELECT user_id, location_key, dedup_keys, computed_at, complete, retry_after, artist_refs, COALESCE(genre_horizon, '')
 FROM user_concert_snapshots
 WHERE user_id = $1 AND location_key = $2
 `
 	var s ConcertSnapshot
-	err := pool.QueryRow(ctx, q, userID, locationKey).Scan(&s.UserID, &s.LocationKey, &s.DedupKeys, &s.ComputedAt, &s.Complete, &s.RetryAfter, &s.ArtistRefs)
+	err := pool.QueryRow(ctx, q, userID, locationKey).Scan(&s.UserID, &s.LocationKey, &s.DedupKeys, &s.ComputedAt, &s.Complete, &s.RetryAfter, &s.ArtistRefs, &s.GenreHorizon)
 	if err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ConcertSnapshot{}, false, nil
@@ -63,17 +69,18 @@ WHERE user_id = $1 AND location_key = $2
 // moment the scan finished rather than the moment the row was written.
 func UpsertConcertSnapshot(ctx context.Context, pool *pgxpool.Pool, s ConcertSnapshot) error {
 	const q = `
-INSERT INTO user_concert_snapshots (user_id, location_key, dedup_keys, computed_at, complete, retry_after, artist_refs, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::jsonb, '{}'::jsonb), now())
+INSERT INTO user_concert_snapshots (user_id, location_key, dedup_keys, computed_at, complete, retry_after, artist_refs, genre_horizon, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::jsonb, '{}'::jsonb), NULLIF($8::text, ''), now())
 ON CONFLICT (user_id, location_key) DO UPDATE SET
   dedup_keys  = EXCLUDED.dedup_keys,
   computed_at = EXCLUDED.computed_at,
   complete    = EXCLUDED.complete,
   retry_after = EXCLUDED.retry_after,
   artist_refs = EXCLUDED.artist_refs,
+  genre_horizon = EXCLUDED.genre_horizon,
   updated_at  = now()
 `
-	_, err := pool.Exec(ctx, q, s.UserID, s.LocationKey, s.DedupKeys, s.ComputedAt, s.Complete, s.RetryAfter, nullableJSON(s.ArtistRefs))
+	_, err := pool.Exec(ctx, q, s.UserID, s.LocationKey, s.DedupKeys, s.ComputedAt, s.Complete, s.RetryAfter, nullableJSON(s.ArtistRefs), s.GenreHorizon)
 	return err
 }
 
