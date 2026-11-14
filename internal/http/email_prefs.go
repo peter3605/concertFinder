@@ -52,8 +52,17 @@ func (h *EmailPrefsHandler) Put(w http.ResponseWriter, r *http.Request) {
 	// an address, and requiring one would make "push me but do not email me"
 	// unexpressible.
 	wantsAnyOn := (req.DigestOptIn != nil && *req.DigestOptIn) || (req.InstantNotifyOptIn != nil && *req.InstantNotifyOptIn)
+	//
+	// The answer used to be a 400 telling the user to log in again and grant
+	// Spotify's email scope. Spotify no longer returns the address
+	// (docs/public-path.md section 4.4), so no re-login could ever satisfy
+	// it. The remedy now is the confirm-an-address step, POST /api/me/email,
+	// and 409 says the request is fine but the account is not ready for it.
 	if wantsAnyOn && full.Email == "" {
-		http.Error(w, "log in again to grant email access before opting in", http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusConflict, map[string]string{
+			"error":   "email_required",
+			"message": "Add and confirm an email address before turning on email updates.",
+		})
 		return
 	}
 	if req.DigestOptIn != nil {

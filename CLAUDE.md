@@ -151,6 +151,30 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   pre-warm (`jobs.LoginPrewarm`) skips them. Gate on the **identity**, never on
   "has picks": genre-only accounts (CF-31) are a second non-Spotify scan source.
 
+- **Email sign-in (CF-33) consumes on POST only, and says nothing about who
+  has an account.** `auth.EmailLogin`; migration 0028; design in
+  `docs/public-path.md` §4.2. `POST /api/auth/email/start` answers 202 for
+  every well-formed address and does the lookup and send *after* answering,
+  so neither status nor latency distinguishes a known address from a stranger
+  (an unknown address with no invite is simply not mailed). The link lands on
+  `GET /app/auth/email`, which renders a button and consumes nothing — the
+  unsubscribe rule again, because mail gateways fetch every URL, and a
+  consuming GET would sign the scanner in or burn the link unseen. Only
+  hashes are stored (`HashEmailLoginToken`; `db.EmailCodeHash` salts the
+  6-digit code with the token hash); tokens are single-use, 15 minutes, five
+  code guesses. An unknown address is a signup: the invite rides in the token
+  row and is redeemed by `db.ConsumeEmailLoginToken` in the transaction that
+  marks the token used and creates the user, so an unclicked link spends
+  nothing. Accounts are **never** linked by matching `users.email` — only an
+  `email` identity counts, and a signed-in user adds one through
+  `POST /api/me/email` + confirm, which is also what replaced the old 400
+  "log in again to grant email access" (now 409 `email_required`). The
+  consume form POST checks Origin, or a page elsewhere could sign a browser
+  into the attacker's account. Limits: the `/api/auth` IP bucket, a tighter
+  IP bucket on `start`, 3 per address per hour, and `EMAIL_LOGIN_DAILY_CAP`
+  (200) across everyone, because SES reputation is shared with the digests.
+  `/app/auth/email` is in apple-app-site-association ahead of any app build
+  that handles it, because iOS caches that file.
 - **`users.is_admin` is the only authorization tier, and the gate is welded to
   the routes rather than to the call site.** Before migration 0022 there was no
   role, no permission and no `is_admin` anywhere: `auth.RequireUser` was the

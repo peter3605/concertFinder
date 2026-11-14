@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { apiFetch } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import DiscoverSection from '@/pages/discover';
+import { EmailSignIn } from '@/components/email-sign-in';
 
 type SiteInfo = { invite_required?: boolean };
 
@@ -84,6 +85,9 @@ export default function LoginPage() {
           <Button asChild size="lg" className="w-full">
             <a href={loginHref}>Log in with Spotify</a>
           </Button>
+          {/* The invite box above serves both: an email signup carries the
+              code in its token and spends it only when the link is used. */}
+          <EmailSignIn invite={inviteRequired ? invite : ''} />
           <p className="text-center text-xs text-muted-foreground">
             We only read your library — never post, follow, or change anything.
             See{' '}

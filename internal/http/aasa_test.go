@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/peterho/concertfinder/internal/auth"
 )
 
 const testAppID = "L3MY7DN27B.com.concertfinder.ph"
@@ -63,11 +65,13 @@ func TestAASANamesAppInBothServices(t *testing.T) {
 		t.Errorf("webcredentials apps = %v, want [%s]", body.WebCredentials.Apps, testAppID)
 	}
 
-	// The claim stays scoped to the OAuth return path. "*" would pull the
-	// privacy and terms pages -- which App Review opens in a browser -- into
-	// the app.
+	// The claim stays scoped to the two auth return paths: OAuth and the
+	// email sign-in link (CF-33). "*" would pull the privacy and terms pages
+	// -- which App Review opens in a browser -- into the app. The email path
+	// must match auth.EmailLinkPath, or the link the mail carries is not the
+	// one iOS hands to the app.
 	comps := body.Applinks.Details[0].Components
-	if len(comps) != 1 || comps[0]["/"] != "/app/auth/callback" {
-		t.Errorf("components = %v, want only /app/auth/callback", comps)
+	if len(comps) != 2 || comps[0]["/"] != "/app/auth/callback" || comps[1]["/"] != auth.EmailLinkPath {
+		t.Errorf("components = %v, want exactly /app/auth/callback and %s", comps, auth.EmailLinkPath)
 	}
 }

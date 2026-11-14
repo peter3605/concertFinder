@@ -28,9 +28,15 @@ func (h *AASAHandler) Get(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Only the OAuth return path is claimed. Claiming "*" would route every
-	// link on the domain into the app, including the privacy and terms pages
-	// that App Review opens in a browser.
+	// Only the two auth return paths are claimed: the OAuth return and the
+	// email sign-in link (CF-33). Claiming "*" would route every link on the
+	// domain into the app, including the privacy and terms pages that App
+	// Review opens in a browser.
+	//
+	// iOS caches this file, so the email path ships here ahead of any app
+	// build that handles it. Until one does, an installed app that receives
+	// the link has nothing to do with it; the web confirmation page is what
+	// a browser gets.
 	//
 	// webcredentials is a separate service from applinks and is NOT optional
 	// here: ASWebAuthenticationSession's https(host:path:) callback -- the only
@@ -46,6 +52,7 @@ func (h *AASAHandler) Get(w http.ResponseWriter, r *http.Request) {
 					"appIDs": []string{h.AppID},
 					"components": []map[string]any{
 						{"/": "/app/auth/callback", "comment": "OAuth return"},
+						{"/": "/app/auth/email", "comment": "Email sign-in link"},
 					},
 				},
 			},

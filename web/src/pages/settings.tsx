@@ -10,6 +10,7 @@ import { mutatingFetch, NETWORK_ERROR_MESSAGE, statusMessage } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { Me } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/use-document-title';
+import { EmailAddressForm } from '@/components/email-sign-in';
 
 export default function SettingsPage() {
   useDocumentTitle('Settings');
@@ -34,7 +35,12 @@ export default function SettingsPage() {
       if (!r.ok) {
         // Never the response body: these are Go http.Error strings, and on a
         // bad gateway they are the proxy's HTML.
-        setErr(statusMessage(r.status, { 400: "That setting didn't save. Reload and try again." }));
+        setErr(
+          statusMessage(r.status, {
+            400: "That setting didn't save. Reload and try again.",
+            409: 'Add and confirm an email address first.',
+          }),
+        );
         return;
       }
       setMe({ ...me, ...patch });
@@ -54,7 +60,7 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Account</CardTitle>
-          <CardDescription>Your Spotify identity + email.</CardDescription>
+          <CardDescription>Your sign-in identities + email.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm">
           <div className="flex justify-between">
@@ -65,15 +71,15 @@ export default function SettingsPage() {
             <span className="text-muted-foreground">Spotify ID</span>
             <span className="font-mono text-xs">{me.spotify_user_id}</span>
           </div>
-          <div className="flex justify-between">
+          {/* Replaces "Log in again to grant email access", which no
+              re-login could satisfy once Spotify stopped returning the
+              address. Confirming one also makes it a way to sign in. */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
             <span className="text-muted-foreground">Email</span>
-            <span>
-              {me.email || (
-                <a href="/api/auth/login" className="text-primary hover:underline">
-                  Log in again to grant email access
-                </a>
-              )}
-            </span>
+            <div className="flex flex-col items-start gap-2 sm:items-end">
+              {me.email && <span>{me.email}</span>}
+              <EmailAddressForm current={me.email ?? ''} onVerified={(email) => setMe({ ...me, email })} />
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -86,7 +92,7 @@ export default function SettingsPage() {
           <CardDescription>
             {me.email
               ? `Delivered to ${me.email}.`
-              : 'Log in again with the email scope to enable notifications.'}
+              : 'Add and confirm an email address above to enable notifications.'}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-6">
