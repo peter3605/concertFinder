@@ -93,8 +93,21 @@ func (c *Client) SearchGenreEvents(ctx context.Context, genreID string, lat, lng
 	}
 	q := c.eventsQuery(lat, lng, radiusMiles)
 	q.Set("genreId", genreID)
+	return c.datePrefix(ctx, q, permit, MaxGenrePages)
+}
+
+// datePrefix fetches a query date ascending up to maxPages and describes the
+// result as a prefix: horizon is the venue-local day of the last row when the
+// cap (or a short stop) cut the listing, "" when it is whole, and cacheable is
+// false only for a short stop -- a refused permit or a failed later page,
+// which leave a fragment rather than a prefix.
+//
+// Shared by SearchGenreEvents and SearchEventsNear, the two listings that are
+// truncated on purpose, so the rule that makes a capped listing cacheable is
+// stated once.
+func (c *Client) datePrefix(ctx context.Context, q url.Values, permit PagePermit, maxPages int) (events []Event, horizon string, cacheable bool, err error) {
 	q.Set("sort", "date,asc")
-	evs, stop, err := c.pagedEventsN(ctx, q, permit, MaxGenrePages)
+	evs, stop, err := c.pagedEventsN(ctx, q, permit, maxPages)
 	if stop != stopDone && len(evs) > 0 {
 		horizon = evs[len(evs)-1].LocalDate
 	}

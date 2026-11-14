@@ -38,8 +38,9 @@ func (rt rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 // writtenRow is one cache write the worker attempted.
 type writtenRow struct {
-	key  string
-	blob []byte
+	key     string
+	blob    []byte
+	horizon string
 }
 
 type seedRecorder struct {
@@ -47,10 +48,10 @@ type seedRecorder struct {
 	rows []writtenRow
 }
 
-func (r *seedRecorder) save(_ context.Context, key string, blob []byte) error {
+func (r *seedRecorder) save(_ context.Context, key string, blob []byte, horizon string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rows = append(r.rows, writtenRow{key: key, blob: blob})
+	r.rows = append(r.rows, writtenRow{key: key, blob: blob, horizon: horizon})
 	return nil
 }
 
@@ -137,39 +138,121 @@ func TestSeedDiscoverWritesOneRowPerCityUnderTheDiscoverPrefix(t *testing.T) {
 	}
 }
 
-// The rule loadOrFetchTM follows for the same reason: a truncated listing
-// written here is served for the life of the row, and no later run can
-// correct it while the row is still answering.
-//
-// Truncation without an error is the case that matters, because that is the
-// one a caller can mistake for a complete answer. A market deep enough to hit
-// ticketmaster.MaxEventPages produces exactly that: every request succeeds and
-// the result is still short.
-func TestSeedDiscoverDoesNotCacheATruncatedCity(t *testing.T) {
-	var mu sync.Mutex
-	var requests int
-	w, rec := newSeedWorker(t, testCities[:1], func(rw http.ResponseWriter, r *http.Request) {
+// denseMarket replies like New York at radius 50: always another page, far
+// more of them than MaxEventPages, so the listing can never be complete. Page
+// p holds one event on day p+1 of June 2099, which makes the date-ascending
+// order visible and the horizon predictable.
+func denseMarket(mu *sync.Mutex, requests *int, sorts *[]string) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		requests++
+		*requests++
+		*sorts = append(*sorts, r.URL.Query().Get("sort"))
 		mu.Unlock()
-		page := r.URL.Query().Get("page")
-		if page == "" {
-			page = "0"
+		page := 0
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
 		}
 		rw.Header().Set("Content-Type", "application/json")
-		// Always another page to fetch, so the client stops at its own limit
-		// rather than at the end of the listing.
-		fmt.Fprintf(rw, `{"_embedded":{"events":[{"id":"e%s","name":"Show","dates":{"start":{"localDate":"2099-06-01"}},"_embedded":{"venues":[{"name":"Room","city":{"name":"NY"},"location":{"latitude":"40.71","longitude":"-74.00"}}]}}]},"page":{"size":100,"totalPages":99,"number":%s}}`, page, page)
+		fmt.Fprintf(rw, `{"_embedded":{"events":[{"id":"e%d","name":"Show %d","dates":{"start":{"localDate":"2099-06-%02d"}},"_embedded":{"venues":[{"name":"Room","city":{"name":"NY"},"location":{"latitude":"40.71","longitude":"-74.00"}}]}}]},"page":{"size":100,"totalPages":%d,"number":%d}}`,
+			page, page, page+1, denseMarketPages, page)
+	}
+}
+
+// 37 is what New York reported at radius 50 on 2026-11-08 (CF-B23).
+const denseMarketPages = 37
+
+// CF-B23: a market deeper than ticketmaster.MaxEventPages used to be fetched
+// to the deep-paging limit every day and then not written, because the fetch
+// was "incomplete". It is now a date-ascending prefix capped at MaxNearPages
+// and cached with a horizon, which is correct up to that day.
+func TestSeedDiscoverCachesADenseMarketAsADatedPrefix(t *testing.T) {
+	if denseMarketPages <= ticketmaster.MaxEventPages {
+		t.Fatalf("fixture reports %d pages; the point is more than MaxEventPages (%d)", denseMarketPages, ticketmaster.MaxEventPages)
+	}
+	var mu sync.Mutex
+	var requests int
+	var sorts []string
+	w, rec := newSeedWorker(t, testCities[:1], denseMarket(&mu, &requests, &sorts))
+
+	if err := w.Work(context.Background(), &river.Job[SeedDiscoverArgs]{}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if requests != ticketmaster.MaxNearPages {
+		t.Errorf("made %d requests, want %d — a city that cannot complete must stop at its own cap", requests, ticketmaster.MaxNearPages)
+	}
+	for i, s := range sorts {
+		if s != "date,asc" {
+			t.Errorf("request %d sort = %q, want date,asc — only a date-sorted prefix is correct up to a horizon", i, s)
+		}
+	}
+	rows := rec.written()
+	if len(rows) != 1 {
+		t.Fatalf("wrote %d rows for New York, want 1", len(rows))
+	}
+	city := testCities[0]
+	wantKey := concerts.DiscoverSeedCacheKey(concerts.DiscoverSeedLocation(city.Latitude, city.Longitude))
+	if rows[0].key != wantKey {
+		t.Errorf("key = %q, want %q", rows[0].key, wantKey)
+	}
+	wantHorizon := fmt.Sprintf("2099-06-%02d", ticketmaster.MaxNearPages)
+	if rows[0].horizon != wantHorizon {
+		t.Errorf("horizon = %q, want %q (the last fetched day)", rows[0].horizon, wantHorizon)
+	}
+	var evs []ticketmaster.Event
+	if err := json.Unmarshal(rows[0].blob, &evs); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	// The horizon day may be partial and the discover view does not read
+	// horizons, so it is dropped before the write.
+	if len(evs) != ticketmaster.MaxNearPages-1 {
+		t.Errorf("cached %d events, want %d (every fetched day before the horizon)", len(evs), ticketmaster.MaxNearPages-1)
+	}
+	for _, e := range evs {
+		if e.LocalDate >= wantHorizon {
+			t.Errorf("cached %s, which is on or after the horizon %s", e.LocalDate, wantHorizon)
+		}
+	}
+}
+
+// A fragment is still never cached. A later page failing leaves a listing
+// missing an unknown tail AND reports an error, and whatever yesterday's run
+// wrote is worth more than it.
+func TestSeedDiscoverDoesNotCacheAFragment(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	var sorts []string
+	dense := denseMarket(&mu, &requests, &sorts)
+	w, rec := newSeedWorker(t, testCities[:1], func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			// 400, not a 5xx: the client retries 5xx, which would turn this
+			// into a success on the second attempt.
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		dense(rw, r)
 	})
 
 	if err := w.Work(context.Background(), &river.Job[SeedDiscoverArgs]{}); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
-	if requests != ticketmaster.MaxEventPages {
-		t.Errorf("made %d requests, want %d (the deep-paging limit)", requests, ticketmaster.MaxEventPages)
-	}
 	if rows := rec.written(); len(rows) != 0 {
-		t.Fatalf("wrote %d rows for a truncated fetch, want 0 — a short listing cached here cannot be corrected", len(rows))
+		t.Fatalf("wrote %d rows for a fragment, want 0", len(rows))
+	}
+}
+
+// The prefix is cut on whole days, and a run whose every row sits on the
+// horizon day has no whole day to offer. Writing an empty listing would
+// erase yesterday's.
+func TestBeforeHorizon(t *testing.T) {
+	evs := []ticketmaster.Event{{LocalDate: "2099-06-01"}, {LocalDate: "2099-06-02"}, {LocalDate: "2099-06-02"}}
+	if got := beforeHorizon(evs, ""); len(got) != 3 {
+		t.Errorf("no horizon kept %d, want 3", len(got))
+	}
+	if got := beforeHorizon(evs, "2099-06-02"); len(got) != 1 || got[0].LocalDate != "2099-06-01" {
+		t.Errorf("horizon 06-02 kept %+v, want only 06-01", got)
+	}
+	if got := beforeHorizon(evs, "2099-06-01"); len(got) != 0 {
+		t.Errorf("horizon 06-01 kept %d, want 0", len(got))
 	}
 }
 
