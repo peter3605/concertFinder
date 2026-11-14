@@ -394,8 +394,8 @@ type SeedCity struct {
 // is the coordinate the signed-out web page is hardcoded to and therefore the
 // one city where an empty cache is guaranteed to be visible.
 //
-// Eight of them, at up to ticketmaster.MaxEventPages requests each, is at
-// most 80 of the account's 5000 daily Ticketmaster calls -- deliberately a
+// Eight of them, at up to ticketmaster.MaxNearPages requests each, is at
+// most 40 of the account's 5000 daily Ticketmaster calls -- deliberately a
 // rounding error against what signed-in users spend, because this is a
 // backdrop and they are the product.
 var defaultSeedCities = []SeedCity{

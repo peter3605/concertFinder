@@ -382,9 +382,16 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   The rows are **ordinary `tm:` rows** under `concerts.DiscoverSeedCacheKey`,
   so `FromCachedTicketmaster` reads them with no special case and the janitor's
   7-day prune expires them like any other — a key outside that prefix would be
-  invisible to the view it exists to fill *and* immortal. A **truncated fetch
-  is not cached at all**, the same rule `loadOrFetchTM` follows and for the same
-  reason: a short listing written here is served for the life of the row. The
+  invisible to the view it exists to fill *and* immortal. A **fragment is not
+  cached at all** — a refused permit or a failed later page — the same rule
+  `loadOrFetchTM` follows and for the same reason: a short listing written here
+  is served for the life of the row. A listing cut at its **page cap** is
+  different and *is* cached (CF-B23): `SearchEventsNear` is a date-ascending
+  prefix capped at `MaxNearPages`, the exception the genre listing already
+  makes, and the seed drops rows on the horizon day before writing because
+  the discover view reads `tm:` rows without consulting a horizon. Before
+  that, New York (37 pages at radius 50) could never complete, so the one city
+  `discover.tsx` is hardcoded to spent ten calls a day and wrote nothing. The
   seed radius must **cover** `DiscoverDefaultRadius`, or the edge of every
   seeded city is filtered against events that were never fetched
   (`internal/http/discover_seed_radius_test.go` pins them, since `jobs` cannot

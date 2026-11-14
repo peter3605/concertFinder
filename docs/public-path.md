@@ -143,6 +143,14 @@ York, the coordinate the web discover page is hardcoded to, appears to spend up
 to 10 calls a day and write nothing. Filed as CF-B23. It was not confirmed
 against the production table.
 
+**Fixed by CF-B23.** `SearchEventsNear` now takes the same exception as the
+genre listing: date ascending, capped at `MaxNearPages` (5), and cached with a
+horizon when the cap is what cut it. The seed drops rows on the horizon day
+before writing, since the discover view reads `tm:` rows without consulting a
+horizon. Only a fragment (a refused permit or a failed later page) is still
+not cached, and every city logs one `discover seed: city` line with
+`cached=true|false`.
+
 ---
 
 ## 2. Call budget
