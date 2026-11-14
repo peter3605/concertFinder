@@ -1,9 +1,12 @@
-package db
+package db_test
 
 import (
 	"context"
 	"sync"
 	"testing"
+
+	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/testdb"
 )
 
 // Migrate has to be safe against a second migrator running at the same time.
@@ -26,14 +29,15 @@ func TestMigrateIsSafeUnderConcurrency(t *testing.T) {
 	// fail -- which is what happened on CI, where pgxpool's default of
 	// max(4, NumCPU) is 4 on a 2-core runner and the job simply hung. A dev
 	// machine with more cores hides it, so the constraint is pinned.
-	pool := testPoolWithMaxConns(t, 2)
-
-	// testPool has already migrated, so start from a clean schema to make the
-	// migrations genuinely pending -- otherwise every caller no-ops and the
-	// race has nothing to race over.
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatalf("reset schema: %v", err)
-	}
+	//
+	// The database is a fresh, empty one of the test's own (testdb.Empty), so
+	// every migration is genuinely pending -- otherwise every caller no-ops
+	// and the race has nothing to race over. It used to get there by running
+	// DROP SCHEMA public CASCADE on the shared TEST_DATABASE_URL database,
+	// which deadlocked against other packages' tests running in parallel on
+	// CI, and when it did not deadlock it wiped their tables mid-test
+	// (CF-B24).
+	pool := testdb.Empty(t, 2)
 
 	const racers = 4 // > pool max conns, on purpose
 	errs := make([]error, racers)
@@ -45,7 +49,7 @@ func TestMigrateIsSafeUnderConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			start.Wait() // release them together
-			errs[i] = Migrate(ctx, pool, "../../migrations")
+			errs[i] = db.Migrate(ctx, pool, "../../migrations")
 		}()
 	}
 	start.Done()
