@@ -28,9 +28,37 @@ func SaveCachedConcerts(ctx context.Context, pool *pgxpool.Pool, key string, blo
 	const q = `
 INSERT INTO concert_cache (cache_key, results, fetched_at)
 VALUES ($1, $2, now())
-ON CONFLICT (cache_key) DO UPDATE SET results = EXCLUDED.results, fetched_at = EXCLUDED.fetched_at
+ON CONFLICT (cache_key) DO UPDATE SET results = EXCLUDED.results, fetched_at = EXCLUDED.fetched_at, horizon = NULL
 `
 	_, err := pool.Exec(ctx, q, key, blob)
+	return err
+}
+
+// GetCachedListing is GetCachedConcerts for a genre listing, which also
+// carries its horizon (migration 0027): the venue-local day of the first date
+// the listing does not fully cover, "" when it is complete.
+func GetCachedListing(ctx context.Context, pool *pgxpool.Pool, key string, ttl time.Duration) (blob []byte, horizon string, ok bool, err error) {
+	const q = `SELECT results, COALESCE(horizon, '') FROM concert_cache WHERE cache_key = $1 AND fetched_at > $2`
+	err = pool.QueryRow(ctx, q, key, time.Now().Add(-ttl)).Scan(&blob, &horizon)
+	if err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	return blob, horizon, true, nil
+}
+
+// SaveCachedListing stores a genre listing with its horizon. The payload is
+// the same []ticketmaster.Event shape every other tm: row holds, so the
+// signed-out discover view reads these rows like any other.
+func SaveCachedListing(ctx context.Context, pool *pgxpool.Pool, key string, blob []byte, horizon string) error {
+	const q = `
+INSERT INTO concert_cache (cache_key, results, fetched_at, horizon)
+VALUES ($1, $2, now(), NULLIF($3::text, ''))
+ON CONFLICT (cache_key) DO UPDATE SET results = EXCLUDED.results, fetched_at = EXCLUDED.fetched_at, horizon = EXCLUDED.horizon
+`
+	_, err := pool.Exec(ctx, q, key, blob, horizon)
 	return err
 }
 

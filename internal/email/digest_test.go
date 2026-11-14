@@ -1,6 +1,7 @@
 package email
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,10 @@ func TestRenderDigestSubjectPluralization(t *testing.T) {
 		one[0],
 		{Artist: concerts.ArtistRef{Name: "Y"}, Date: when.AddDate(0, 0, 1), Venue: "V2", City: "C"},
 	}
-	if got := RenderDigest("peter", "p@ex", one, "https://ex/unsub").Subject; !strings.Contains(got, "1 new show") || strings.Contains(got, "shows") {
+	if got := RenderDigest("peter", "p@ex", one, "https://ex/unsub", DigestMore{}).Subject; !strings.Contains(got, "1 new show") || strings.Contains(got, "shows") {
 		t.Errorf("singular subject wrong: %q", got)
 	}
-	if got := RenderDigest("peter", "p@ex", two, "https://ex/unsub").Subject; !strings.Contains(got, "2 new shows") {
+	if got := RenderDigest("peter", "p@ex", two, "https://ex/unsub", DigestMore{}).Subject; !strings.Contains(got, "2 new shows") {
 		t.Errorf("plural subject wrong: %q", got)
 	}
 }
@@ -31,7 +32,7 @@ func TestRenderDigestIncludesArtistVenueUnsub(t *testing.T) {
 		{Artist: concerts.ArtistRef{Name: "Olivia Rodrigo"}, Date: when, Venue: "Capital One Arena", City: "Washington", State: "DC",
 			Links: []concerts.TicketLink{{Source: concerts.SourceTicketmaster, URL: "https://tm.example/1"}}},
 	}
-	m := RenderDigest("peter", "p@ex", cs, "https://site.example/api/unsubscribe?token=abc")
+	m := RenderDigest("peter", "p@ex", cs, "https://site.example/api/unsubscribe?token=abc", DigestMore{})
 	for _, needle := range []string{"Olivia Rodrigo", "Capital One Arena", "Washington", "https://tm.example/1", "https://site.example/api/unsubscribe?token=abc"} {
 		if !strings.Contains(m.Text, needle) {
 			t.Errorf("text body missing %q\n%s", needle, m.Text)
@@ -48,7 +49,7 @@ func TestRenderDigestGroupsByMonth(t *testing.T) {
 		{Artist: concerts.ArtistRef{Name: "B"}, Date: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Venue: "V2", City: "C"},
 		{Artist: concerts.ArtistRef{Name: "C"}, Date: time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC), Venue: "V3", City: "C"},
 	}
-	m := RenderDigest("peter", "p@ex", cs, "https://ex/u")
+	m := RenderDigest("peter", "p@ex", cs, "https://ex/u", DigestMore{})
 	// August entries appear before September header — check ordering by
 	// scanning positions.
 	aug := strings.Index(m.Text, "August 2026")
@@ -80,7 +81,7 @@ func festival(names ...string) []concerts.Concert {
 // The digest's net-new set is per (artist, show), so a festival arrives as one
 // Concert per matched artist and the renderer has to fold them.
 func TestRenderDigestCountsEventsNotConcerts(t *testing.T) {
-	m := RenderDigest("peter", "p@ex", festival("A", "B", "C", "D", "E", "F"), "https://ex/u")
+	m := RenderDigest("peter", "p@ex", festival("A", "B", "C", "D", "E", "F"), "https://ex/u", DigestMore{})
 	if !strings.Contains(m.Subject, "1 new show") || strings.Contains(m.Subject, "shows") {
 		t.Errorf("six acts on one bill must count as one show; got %q", m.Subject)
 	}
@@ -175,5 +176,66 @@ func TestRenderInstantNotifyKeepsDistinctNightsApart(t *testing.T) {
 	m := RenderInstantNotify("peter", "p@ex", cs, "https://ex/u")
 	if !strings.Contains(m.Subject, "2 new shows") {
 		t.Errorf("two nights at one room are two shows; got %q", m.Subject)
+	}
+}
+
+// CF-31: a genre pick in a dense city is hundreds of shows, and the digest
+// had no length limit. A 600-show feed mails at most DigestMaxEvents, says how
+// many more there are, and links to the feed for them.
+func TestDigestOfA600ShowGenreFeedIsCapped(t *testing.T) {
+	start := time.Date(2026, 12, 1, 20, 0, 0, 0, time.UTC)
+	cs := make([]concerts.Concert, 0, 600)
+	for i := 0; i < 600; i++ {
+		c := concerts.Concert{
+			Artist: concerts.ArtistRef{Name: fmt.Sprintf("Act %d", i)},
+			Date:   start.Add(time.Duration(i) * time.Hour),
+			Venue:  fmt.Sprintf("Room %d", i), City: "New York",
+		}
+		c.DedupKey = concerts.DedupKey(c.Artist.Name, c.LocalDay(), c.Venue, c.City)
+		cs = append(cs, c)
+	}
+
+	kept, more := CapDigest(cs, DigestMaxEvents)
+	if n := concerts.CountEventKeys(kept); n > DigestMaxEvents {
+		t.Fatalf("kept %d events, cap is %d", n, DigestMaxEvents)
+	}
+	if more != 600-DigestMaxEvents {
+		t.Errorf("more = %d, want %d", more, 600-DigestMaxEvents)
+	}
+	const feed = "https://site.example/"
+	m := RenderDigest("peter", "p@ex", kept, "https://site.example/api/unsubscribe?token=abc", DigestMore{Events: more, URL: feed})
+
+	listed := 0
+	for i := 0; i < 600; i++ {
+		if strings.Contains(m.Text, fmt.Sprintf("Act %d —", i)) {
+			listed++
+		}
+	}
+	if listed > DigestMaxEvents {
+		t.Errorf("text lists %d shows, cap is %d", listed, DigestMaxEvents)
+	}
+	if !strings.Contains(m.Subject, "600 new shows") {
+		t.Errorf("subject %q should count every new show, listed or not", m.Subject)
+	}
+	for name, body := range map[string]string{"text": m.Text, "html": m.HTML} {
+		if !strings.Contains(body, fmt.Sprintf("%d more", more)) || !strings.Contains(body, feed) {
+			t.Errorf("%s body does not say how many more there are and link to the feed", name)
+		}
+	}
+}
+
+// The cap cuts on events, not rows: a festival that matched several acts is
+// kept or dropped whole.
+func TestCapDigestKeepsWholeEvents(t *testing.T) {
+	when := time.Date(2026, 12, 1, 20, 0, 0, 0, time.UTC)
+	cs := []concerts.Concert{
+		{Artist: concerts.ArtistRef{Name: "A"}, Date: when, Venue: "Fest", City: "C"},
+		{Artist: concerts.ArtistRef{Name: "B"}, Date: when, Venue: "Fest", City: "C"},
+		{Artist: concerts.ArtistRef{Name: "D"}, Date: when, Venue: "Club", City: "C"},
+		{Artist: concerts.ArtistRef{Name: "E"}, Date: when, Venue: "Fest", City: "C"},
+	}
+	kept, more := CapDigest(cs, 1)
+	if len(kept) != 3 || more != 1 {
+		t.Errorf("kept %d rows, %d more events; want all three Fest acts and the Club held back", len(kept), more)
 	}
 }

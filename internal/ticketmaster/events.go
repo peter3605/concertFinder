@@ -40,6 +40,11 @@ type Event struct {
 	// drift.
 	LocalDate string
 	Venue     Venue
+	// Genre is Ticketmaster's own genre for the event ("Jazz", "Rock"), from
+	// its primary classification; "" when it has none or says "Undefined".
+	// A genre listing's acts take their genre from here, which is also what
+	// the feed's genre facet buckets them by (docs/public-path.md §5).
+	Genre string `json:",omitempty"`
 }
 
 // Attraction is one act on an event's bill.
@@ -79,6 +84,10 @@ type eventsResp struct {
 				Timezone string `json:"timezone"`
 			} `json:"dates"`
 			Classifications []struct {
+				Primary bool `json:"primary"`
+				Genre   struct {
+					Name string `json:"name"`
+				} `json:"genre"`
 				SubType struct {
 					Name string `json:"name"`
 				} `json:"subType"`
@@ -215,10 +224,34 @@ func (c *Client) eventsQuery(lat, lng float64, radiusMiles int) url.Values {
 // MaxEventPages matching the API's 1000-result deep-paging refusal -- is
 // stated once here rather than in two copies that agree today.
 func (c *Client) pagedEvents(ctx context.Context, q url.Values, permit PagePermit) (events []Event, complete bool, err error) {
+	out, stop, err := c.pagedEventsN(ctx, q, permit, MaxEventPages)
+	return out, stop == stopDone, err
+}
+
+// pageStop is why a paging loop ended.
+type pageStop int
+
+const (
+	// stopDone: every page the query has was fetched.
+	stopDone pageStop = iota
+	// stopCap: maxPages was reached with pages still outstanding. Nothing
+	// went wrong; the caller asked for a prefix.
+	stopCap
+	// stopShort: the permit refused or a page failed. The result is a
+	// fragment, whatever order it is in.
+	stopShort
+)
+
+// pagedEventsN is the paging loop with an explicit page cap. The cap and the
+// failure modes are reported apart because one caller can use the
+// difference: a date-sorted genre listing cut at its page cap is a correct
+// prefix (SearchGenreEvents), where one cut by a refused permit is not what
+// the caller asked for.
+func (c *Client) pagedEventsN(ctx context.Context, q url.Values, permit PagePermit, maxPages int) (events []Event, stop pageStop, err error) {
 	var out []Event
-	for page := 0; page < MaxEventPages; page++ {
+	for page := 0; page < maxPages; page++ {
 		if page > 0 && (permit == nil || !permit()) {
-			return out, false, nil
+			return out, stopShort, nil
 		}
 		// page=0 is the default; omitting it keeps the first request
 		// byte-for-byte what it has always been.
@@ -230,29 +263,29 @@ func (c *Client) pagedEvents(ctx context.Context, q url.Values, permit PagePermi
 		body, _, err := c.doGETRetry(ctx, u)
 		if err != nil {
 			if page == 0 {
-				return nil, false, fmt.Errorf("tm events: %w", err)
+				return nil, stopShort, fmt.Errorf("tm events: %w", err)
 			}
 			// Later pages already cost permits and page 0 is real data.
 			// Report it incomplete rather than discarding the lot.
-			return out, false, fmt.Errorf("tm events page %d: %w", page, err)
+			return out, stopShort, fmt.Errorf("tm events page %d: %w", page, err)
 		}
 		var resp eventsResp
 		if err := json.Unmarshal(body, &resp); err != nil {
 			if page == 0 {
-				return nil, false, fmt.Errorf("decode tm events: %w", err)
+				return nil, stopShort, fmt.Errorf("decode tm events: %w", err)
 			}
-			return out, false, fmt.Errorf("decode tm events page %d: %w", page, err)
+			return out, stopShort, fmt.Errorf("decode tm events page %d: %w", page, err)
 		}
 		out = append(out, decodeEvents(resp)...)
 
 		// totalPages is 0 on an empty result set, which the loop must read as
 		// "nothing further", not as "keep going".
 		if resp.Page.TotalPages <= page+1 {
-			return out, true, nil
+			return out, stopDone, nil
 		}
 	}
-	// Fell out at MaxEventPages with pages still outstanding.
-	return out, false, nil
+	// Fell out at maxPages with pages still outstanding.
+	return out, stopCap, nil
 }
 
 // decodeEvents turns one decoded page into Events, skipping the rows that
@@ -293,16 +326,31 @@ func decodeEvents(resp eventsResp) []Event {
 		}
 		lineup := make([]Attraction, 0, len(e.Embedded.Attractions))
 		for _, a := range e.Embedded.Attractions {
-			if a.Name == "" {
+			if a.Name == "" || IsSeatPackage(a.Name) {
 				continue
 			}
 			lineup = append(lineup, Attraction{ID: a.ID, Name: a.Name})
 		}
+		// A listing for a seat upgrade rather than a show, with no act left
+		// once the package is dropped, would otherwise become a card named
+		// after the upgrade through the event-name fallback.
+		if len(lineup) == 0 && IsSeatPackage(e.Name) {
+			continue
+		}
 		isFestival := false
+		genre := ""
 		for _, cl := range e.Classifications {
 			if strings.EqualFold(cl.SubType.Name, "Festival") {
 				isFestival = true
-				break
+			}
+			g := strings.TrimSpace(cl.Genre.Name)
+			// "Undefined" is a real value Ticketmaster sends, and a facet
+			// reading "Undefined" is worse than none.
+			if g == "" || strings.EqualFold(g, "Undefined") {
+				continue
+			}
+			if genre == "" || cl.Primary {
+				genre = g
 			}
 		}
 		events = append(events, Event{
@@ -314,6 +362,7 @@ func decodeEvents(resp eventsResp) []Event {
 			Start:      start,
 			LocalDate:  localDate,
 			Venue:      v,
+			Genre:      genre,
 		})
 	}
 	return events

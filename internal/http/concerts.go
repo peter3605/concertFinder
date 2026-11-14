@@ -69,6 +69,13 @@ type concertsResponse struct {
 	// false keeps every response a Spotify user already receives byte-for-byte
 	// what it was, so the iOS golden fixtures do not move.
 	NeedsPicks bool `json:"needs_picks,omitempty"`
+	// GenreHorizon is set when the genre part of this feed is a capped
+	// listing (CF-31): it holds every genre show before this venue-local day
+	// ("2006-01-02") and none on or after it. Genre listings are the next
+	// few hundred shows, not everything on sale, and the feed says so rather
+	// than implying otherwise. Omitted when there is no genre pick or nothing
+	// was cut, so other users' responses are unchanged.
+	GenreHorizon string `json:"genre_horizon,omitempty"`
 }
 
 type facetSet struct {
@@ -182,6 +189,8 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		// retryAfter, when set, is the earliest time a re-scan could do
 		// any better (the user's daily upstream quota resets then).
 		retryAfter *time.Time
+		// genreHorizon: see concertsResponse.GenreHorizon.
+		genreHorizon string
 	)
 	if snap, hit, err := db.GetConcertSnapshot(r.Context(), h.Pool, u.ID, locKey); err != nil {
 		slog.Warn("concerts: snapshot read failed", "err", err, "user", u.ID)
@@ -189,6 +198,7 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		hasSnap = true
 		complete = snap.Complete
 		retryAfter = snap.RetryAfter
+		genreHorizon = snap.GenreHorizon
 		t := snap.ComputedAt
 		computedAt = &t
 		// Cache lookup keyed on (user, location, computed_at). A new scan
@@ -308,9 +318,10 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		Refreshing: refreshing,
 		// A missing snapshot isn't "incomplete", it's "not built yet" —
 		// that's what Refreshing communicates.
-		Complete:   !hasSnap || complete,
-		RetryAfter: retryAfter,
-		NeedsPicks: pickState == needsPicks,
+		Complete:     !hasSnap || complete,
+		RetryAfter:   retryAfter,
+		NeedsPicks:   pickState == needsPicks,
+		GenreHorizon: genreHorizon,
 	})
 }
 
@@ -332,7 +343,11 @@ const (
 
 // loadPickState returns the user's picked artist IDs (for the reason line)
 // and whether they have anything to scan. A Spotify user always has a
-// subject -- their profile -- whatever their picks.
+// subject -- their profile -- whatever their picks; anyone else needs an
+// artist pick or a genre pick. This is one of three places that decide "has
+// nothing to scan", with FanoutScanConcertsWorker's query and
+// ScanConcertsWorker.Work; all three must agree, or a genre-only user is told
+// needs_picks forever, or never scanned.
 func loadPickState(ctx context.Context, pool *pgxpool.Pool, u auth.CurrentUser) (map[string]struct{}, pickState) {
 	picks, err := db.ListArtistPicks(ctx, pool, u.ID)
 	if err != nil {
@@ -347,7 +362,16 @@ func loadPickState(ctx context.Context, pool *pgxpool.Pool, u auth.CurrentUser) 
 		ids[jobs.PickArtistID(p.AttractionID)] = struct{}{}
 	}
 	if u.SpotifyUserID == "" && len(picks) == 0 {
-		return ids, needsPicks
+		// Genre picks are a subject too (CF-31). Asked only when nothing
+		// else is, so a Spotify or artist-picks user pays no extra query.
+		genres, err := db.ListGenrePicks(ctx, pool, u.ID)
+		if err != nil {
+			slog.Warn("concerts: genre picks lookup failed", "err", err, "user", u.ID)
+			return ids, pickStateUnknown
+		}
+		if len(genres) == 0 {
+			return ids, needsPicks
+		}
 	}
 	return ids, hasSubject
 }

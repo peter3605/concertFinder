@@ -22,6 +22,7 @@ import (
 	"github.com/peterho/concertfinder/internal/email"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
+	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
 // RefreshAffinityWorker recomputes one user's profile.
@@ -115,14 +116,20 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if err != nil {
 		return err
 	}
-	targets, err := w.targetsFor(ctx, user)
+	genrePicks, err := db.ListGenrePicks(ctx, w.Pool, user.ID)
+	if err != nil {
+		return fmt.Errorf("load genre picks: %w", err)
+	}
+	genres := genreTargets(genrePicks)
+	targets, err := w.targetsFor(ctx, user, len(genres) > 0)
 	if err != nil {
 		return err
 	}
-	if len(targets) == 0 {
-		// No Spotify identity and no picks: there is nothing to search for,
-		// and no snapshot is written, because an empty complete snapshot would
-		// read as "your area is quiet" for the full staleness window. The SWR
+	if len(targets) == 0 && len(genres) == 0 {
+		// No Spotify identity and no picks of either kind: there is nothing
+		// to search for, and no snapshot is written, because an empty
+		// complete snapshot would read as "your area is quiet" for the full
+		// staleness window. The SWR
 		// handler answers needs_picks for this user and does not enqueue, so
 		// this is only reachable from a job queued before the picks went.
 		slog.Info("scan_concerts: nothing to scan", "user", user.ID)
@@ -133,7 +140,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	// source instead of one per call, sized to the workload. Whatever we
 	// don't spend goes back at the end. Release uses a detached context so
 	// an expired scan budget can't leave the block charged.
-	reservations := w.Ledger.ReserveAll(ctx, user.ID, scanQuotaFor(targets))
+	reservations := w.Ledger.ReserveAll(ctx, user.ID, scanQuotaFor(targets, len(genres)))
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer releaseCancel()
@@ -149,9 +156,15 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	deps := w.Deps()
 	deps.MinFallbackScore = w.MinFallbackScore
 
+	// Genres first: at most ticketmaster.MaxGenrePages calls each, usually
+	// none (a listing is shared by everyone in the grid cell), so they are
+	// never the thing a 200-artist profile starves of quota.
+	genreFound, genreHorizon, genreErr := concerts.SearchGenres(ctx, deps, genres, loc)
+
 	// A non-nil error here still carries usable partial results; see
 	// concerts.IncompleteError.
 	found, searchErr := concerts.Search(ctx, deps, targets, loc)
+	found, searchErr = mergeGenreResults(found, searchErr, genreFound, genreErr)
 	var incomplete *concerts.IncompleteError
 	switch {
 	case searchErr == nil:
@@ -200,7 +213,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	// Persist partial results too — a half-filled page beats an empty one —
 	// but record that they're partial so the SWR handler keeps treating the
 	// snapshot as stale instead of sitting on it for the full window.
-	if err := PersistScanResults(ctx, w.Pool, user.ID, loc, found, incomplete == nil, retryAfter); err != nil {
+	if err := persistScanResults(ctx, w.Pool, user.ID, loc, found, incomplete == nil, retryAfter, genreHorizon); err != nil {
 		return err
 	}
 	slog.Info("scan_concerts done",
@@ -258,6 +271,10 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 // on one dedup_key without standing up the Spotify and Ticketmaster halves
 // of a scan.
 func PersistScanResults(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, loc concerts.Location, found []concerts.Concert, complete bool, retryAfter *time.Time) error {
+	return persistScanResults(ctx, pool, userID, loc, found, complete, retryAfter, "")
+}
+
+func persistScanResults(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, loc concerts.Location, found []concerts.Concert, complete bool, retryAfter *time.Time, genreHorizon string) error {
 	dedupKeys := make([]string, len(found))
 	rows := make([]db.ConcertRow, len(found))
 	for i, c := range found {
@@ -273,14 +290,68 @@ func PersistScanResults(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUI
 		return err
 	}
 	return persistScan(ctx, poolStore{pool: pool}, rows, db.ConcertSnapshot{
-		UserID:      userID,
-		LocationKey: LocationKey(loc),
-		DedupKeys:   dedupKeys,
-		ComputedAt:  time.Now(),
-		Complete:    complete,
-		RetryAfter:  retryAfter,
-		ArtistRefs:  artistRefs,
+		UserID:       userID,
+		LocationKey:  LocationKey(loc),
+		DedupKeys:    dedupKeys,
+		ComputedAt:   time.Now(),
+		Complete:     complete,
+		RetryAfter:   retryAfter,
+		ArtistRefs:   artistRefs,
+		GenreHorizon: genreHorizon,
 	})
+}
+
+// mergeGenreResults folds a scan's genre listings into its artist results.
+//
+// Artist results go in first, so where a show is both -- a picked or profile
+// artist playing a night that is also in a picked genre -- the identity the
+// snapshot records is the artist's own (a Spotify ID and the profile's
+// genres, or the pick's), and the genre listing only contributes links. The
+// two incompleteness reports are combined rather than either winning, since
+// either alone is reason to keep the snapshot stale.
+func mergeGenreResults(found []concerts.Concert, searchErr error, genreFound []concerts.Concert, genreErr error) ([]concerts.Concert, error) {
+	var gi *concerts.IncompleteError
+	if genreErr != nil && !errors.As(genreErr, &gi) {
+		gi = &concerts.IncompleteError{Cause: genreErr}
+	}
+	if len(genreFound) > 0 {
+		m := concerts.NewMerger()
+		for _, c := range found {
+			m.Add(c)
+		}
+		for _, c := range genreFound {
+			m.Add(c)
+		}
+		found = m.All()
+	}
+	if gi == nil {
+		return found, searchErr
+	}
+	var si *concerts.IncompleteError
+	switch {
+	case searchErr == nil:
+		return found, gi
+	case errors.As(searchErr, &si):
+		merged := *si
+		merged.SkippedArtists += gi.SkippedArtists
+		merged.TotalArtists += gi.TotalArtists
+		merged.RateCapped = merged.RateCapped || gi.RateCapped
+		if merged.Cause == nil {
+			merged.Cause = gi.Cause
+		}
+		return found, &merged
+	default:
+		return found, searchErr
+	}
+}
+
+// genreTargets turns genre picks into the genre listings a scan fetches.
+func genreTargets(picks []db.GenrePick) []concerts.GenreTarget {
+	out := make([]concerts.GenreTarget, 0, len(picks))
+	for _, p := range picks {
+		out = append(out, concerts.GenreTarget{ID: p.GenreID, Name: p.Name})
+	}
+	return out
 }
 
 // persistBudget is how long the writes that follow a scan get. They run on a
@@ -356,8 +427,11 @@ func nextQuotaReset(now time.Time) time.Time {
 // cost against the user's daily cap and the shared account ceiling for the
 // length of the scan, which is exactly when other users' scans are drawing on
 // it. The reservation hands back whatever cache hits mean we never spend.
-func scanQuotaFor(targets []concerts.Target) int {
-	n := 0
+//
+// A genre listing reserves ticketmaster.MaxGenrePages, its worst case on a
+// cache miss; most scans in a shared cell spend none and hand it back.
+func scanQuotaFor(targets []concerts.Target, genres int) int {
+	n := genres * ticketmaster.MaxGenrePages
 	for _, t := range targets {
 		if t.AttractionID != "" {
 			n++
@@ -383,7 +457,10 @@ func scanQuotaFor(targets []concerts.Target) int {
 // transient Spotify failure must not quietly persist a complete snapshot
 // missing every profile artist, which would then be trusted for the full
 // staleness window.
-func (w *ScanConcertsWorker) targetsFor(ctx context.Context, user db.User) ([]concerts.Target, error) {
+//
+// hasGenres counts as having picks for that last rule: a disconnected Spotify
+// user with genre picks still has a feed to build.
+func (w *ScanConcertsWorker) targetsFor(ctx context.Context, user db.User, hasGenres bool) ([]concerts.Target, error) {
 	picks, err := db.ListArtistPicks(ctx, w.Pool, user.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load picks: %w", err)
@@ -394,7 +471,7 @@ func (w *ScanConcertsWorker) targetsFor(ctx context.Context, user db.User) ([]co
 		switch {
 		case err == nil:
 			profile = artists
-		case errors.Is(err, auth.ErrSpotifyDisconnected) && len(picks) > 0:
+		case errors.Is(err, auth.ErrSpotifyDisconnected) && (len(picks) > 0 || hasGenres):
 			slog.Info("scan_concerts: spotify disconnected, scanning picks only", "user", user.ID, "picks", len(picks))
 		default:
 			return nil, err
@@ -428,7 +505,7 @@ func pickTargets(picks []db.ArtistPick) []concerts.Target {
 
 // PickArtistID is the viewer-facing artist ID of a pick. Exported because the
 // feed's reason line and the subscribe control must spell it identically.
-func PickArtistID(attractionID string) string { return "tm:" + attractionID }
+func PickArtistID(attractionID string) string { return concerts.TicketmasterArtistID(attractionID) }
 
 // mergeTargets puts picks first and fills from the profile up to limit,
 // dropping a profile artist whose name matches a pick: the pick already
@@ -680,8 +757,18 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		slog.Info("digest: nothing new", "user", user.ID)
 		return nil
 	}
+	// Cap the listing (CF-31): a genre pick in a dense city is hundreds of
+	// shows. Only what is listed goes into sendKeys, so the held-back shows
+	// are still unsent tomorrow and lead that digest; the email links to the
+	// feed for them meanwhile.
+	fresh, moreEvents := email.CapDigest(fresh, email.DigestMaxEvents)
+	sendKeys = sendKeys[:0]
+	for _, c := range fresh {
+		sendKeys = append(sendKeys, c.DedupKey)
+	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
-	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub)
+	more := email.DigestMore{Events: moreEvents, URL: w.UnsubscribeBase + "/"}
+	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub, more)
 	// Send first, record only what landed. See sendAndRecord for why this
 	// order, and why the earlier one turned a rejected recipient into shows
 	// the user is never told about.
@@ -695,7 +782,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	// Both counts: the sent-set is per (artist, show) but the email reads one
 	// entry per event, so a lone "concerts" number no longer matches what the
 	// recipient sees.
-	slog.Info("digest sent", "user", user.ID, "concerts", len(fresh), "events", concerts.CountEventKeys(fresh))
+	slog.Info("digest sent", "user", user.ID, "concerts", len(fresh), "events", concerts.CountEventKeys(fresh), "held_back_events", moreEvents)
 	return nil
 }
 
@@ -946,7 +1033,8 @@ JOIN users u ON u.id = s.user_id
 LEFT JOIN user_locations ul ON ul.user_id = s.user_id
 WHERE s.last_seen_at > now() - interval '14 days'
   AND (u.spotify_user_id IS NOT NULL
-       OR EXISTS (SELECT 1 FROM user_artist_picks p WHERE p.user_id = s.user_id))
+       OR EXISTS (SELECT 1 FROM user_artist_picks p WHERE p.user_id = s.user_id)
+       OR EXISTS (SELECT 1 FROM user_genre_picks g WHERE g.user_id = s.user_id))
 `
 	rows, err := w.Pool.Query(ctx, q)
 	if err != nil {

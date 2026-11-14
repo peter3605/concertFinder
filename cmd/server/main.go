@@ -166,6 +166,7 @@ func main() {
 		accountH     *webhttp.AccountHandler
 		subscribedH  *webhttp.SubscribedArtistsHandler
 		picksH       *webhttp.ArtistPicksHandler
+		genresH      *webhttp.GenrePicksHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
 		unsubscribeH *webhttp.UnsubscribeHandler
 		devicesH     *webhttp.DevicesHandler
@@ -587,6 +588,13 @@ func main() {
 			Picks:  &picks.Service{TM: tmClient},
 			Ledger: rateLedger,
 		}
+		// Genre picks (CF-31). One catalog for the process: it is one
+		// Ticketmaster call a day, whoever asks.
+		genresH = &webhttp.GenrePicksHandler{
+			Pool:    pool,
+			Catalog: &picks.GenreCatalog{TM: tmClient},
+			Ledger:  rateLedger,
+		}
 
 		// Wire the login-success hook so new sessions trigger a pre-warm
 		// snapshot job. Uses a detached background context so a browser
@@ -783,6 +791,11 @@ func main() {
 			r.Post("/picks", picksH.Add)
 			r.Delete("/picks/{attractionID}", picksH.Delete)
 			r.With(artistSearchLimiter.Middleware).Get("/picks/search", picksH.Search)
+			// Genre picks (CF-31): top-level Ticketmaster genres, capped at 5.
+			r.Get("/genres", genresH.List)
+			r.With(artistSearchLimiter.Middleware).Get("/genres/available", genresH.Available)
+			r.Post("/genres", genresH.Add)
+			r.Delete("/genres/{genreID}", genresH.Delete)
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)

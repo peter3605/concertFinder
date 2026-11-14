@@ -102,6 +102,9 @@ export type ConcertsResponse = {
   // Set when the shortfall was the daily upstream quota, which resets at
   // this time. Absent when another scan could help sooner.
   retry_after?: string;
+  // Set when the user's genre picks are a capped listing: genre shows are
+  // complete before this venue-local day ("2006-01-02") and absent after it.
+  genre_horizon?: string;
 };
 
 // GET /api/discover — the signed-out "popular shows near you" list. Same

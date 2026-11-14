@@ -20,12 +20,59 @@ import (
 // only — the caller's net-new bookkeeping stays keyed on dedup_key, one per
 // (artist, show), so an act added to a bill the user has already been emailed
 // about still mails on its own.
-func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, unsubURL string) Message {
+//
+// more describes what CapDigest held back: those shows are not listed, the
+// subject and greeting count them, and the body links to the feed for the
+// rest. The zero value means nothing was held back.
+func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, unsubURL string, more DigestMore) Message {
 	events := concerts.GroupEvents(newConcerts)
-	subject := fmt.Sprintf("ConcertFinder digest — %d new show%s", len(events), plural(len(events)))
-	text := renderDigestText(displayName, events, unsubURL)
-	htmlBody := renderDigestHTML(displayName, events, unsubURL)
+	total := len(events) + more.Events
+	subject := fmt.Sprintf("ConcertFinder digest — %d new show%s", total, plural(total))
+	text := renderDigestText(displayName, events, unsubURL, more)
+	htmlBody := renderDigestHTML(displayName, events, unsubURL, more)
 	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
+}
+
+// DigestMaxEvents is the most events one digest lists (CF-31). There was no
+// limit while every row came from an artist the user follows; a genre pick
+// in a dense city is hundreds of shows -- New York rock alone is ~600 -- and
+// an email listing them all is one nobody reads and most clients clip.
+const DigestMaxEvents = 25
+
+// DigestMore is what a capped digest held back, and where to see it.
+type DigestMore struct {
+	// Events is how many events were not listed.
+	Events int
+	// URL is the feed, where the rest are. Required whenever Events > 0.
+	URL string
+}
+
+// CapDigest keeps the concerts belonging to the first max events, in the
+// order given, and reports how many further events were dropped. It cuts on
+// events rather than concerts so a festival is never mailed with half its
+// matched acts.
+//
+// The caller records only kept as sent. The rest stay unsent and lead the
+// next digest, so a large genre feed is mailed a page a day instead of being
+// marked delivered by an email that never listed it.
+func CapDigest(cs []concerts.Concert, max int) (kept []concerts.Concert, moreEvents int) {
+	seen := make(map[string]struct{}, max)
+	dropped := make(map[string]struct{})
+	kept = make([]concerts.Concert, 0, len(cs))
+	for _, c := range cs {
+		k := concerts.EventKey(c.LocalDay(), c.Venue, c.City)
+		if _, ok := seen[k]; ok {
+			kept = append(kept, c)
+			continue
+		}
+		if len(seen) < max {
+			seen[k] = struct{}{}
+			kept = append(kept, c)
+			continue
+		}
+		dropped[k] = struct{}{}
+	}
+	return kept, len(dropped)
 }
 
 func plural(n int) string {
@@ -88,10 +135,11 @@ func groupByMonth(es []concerts.Event) []monthGroup {
 	return out
 }
 
-func renderDigestText(displayName string, es []concerts.Event, unsub string) string {
+func renderDigestText(displayName string, es []concerts.Event, unsub string, more DigestMore) string {
 	var b strings.Builder
+	total := len(es) + more.Events
 	fmt.Fprintf(&b, "Hi %s,\n\n", displayName)
-	fmt.Fprintf(&b, "%d new show%s in your area since your last digest:\n\n", len(es), plural(len(es)))
+	fmt.Fprintf(&b, "%d new show%s in your area since your last digest:\n\n", total, plural(total))
 	for _, g := range groupByMonth(es) {
 		fmt.Fprintf(&b, "== %s ==\n", g.label)
 		for _, e := range g.items {
@@ -106,16 +154,20 @@ func renderDigestText(displayName string, es []concerts.Event, unsub string) str
 		}
 		b.WriteString("\n")
 	}
+	if more.Events > 0 {
+		fmt.Fprintf(&b, "...and %d more. See them all: %s\n", more.Events, more.URL)
+	}
 	fmt.Fprintf(&b, "\n---\nManage or unsubscribe: %s\n", unsub)
 	return b.String()
 }
 
-func renderDigestHTML(displayName string, es []concerts.Event, unsub string) string {
+func renderDigestHTML(displayName string, es []concerts.Event, unsub string, more DigestMore) string {
 	var b strings.Builder
+	total := len(es) + more.Events
 	b.WriteString(`<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;max-width:600px;margin:2rem auto;line-height:1.5;color:#222">`)
 	fmt.Fprintf(&b, `<h2 style="margin-bottom:0.2rem">ConcertFinder digest</h2>`)
 	fmt.Fprintf(&b, `<p style="color:#666;margin-top:0">Hi %s — %d new show%s in your area since your last digest.</p>`,
-		html.EscapeString(displayName), len(es), plural(len(es)))
+		html.EscapeString(displayName), total, plural(total))
 
 	for _, g := range groupByMonth(es) {
 		fmt.Fprintf(&b, `<h3 style="border-bottom:1px solid #eee;padding-bottom:0.3rem;margin-top:1.5rem">%s</h3>`,
@@ -143,6 +195,10 @@ func renderDigestHTML(displayName string, es []concerts.Event, unsub string) str
 			b.WriteString(`</li>`)
 		}
 		b.WriteString(`</ul>`)
+	}
+	if more.Events > 0 {
+		fmt.Fprintf(&b, `<p style="margin-top:1rem">…and %d more. <a href="%s" style="color:#1db954">See them all</a></p>`,
+			more.Events, html.EscapeString(more.URL))
 	}
 
 	fmt.Fprintf(&b, `<p style="margin-top:2rem;font-size:0.8em;color:#888">Powered by Spotify · <a href="%s" style="color:#888">Manage or unsubscribe</a></p>`,

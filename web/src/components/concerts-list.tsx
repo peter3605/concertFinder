@@ -94,6 +94,14 @@ export function ConcertsList({
         </p>
       )}
 
+      {data.genre_horizon && (
+        <p className="text-sm text-muted-foreground">
+          Shows from your genres are listed before{' '}
+          {formatLocalDay(data.genre_horizon)}: the next few hundred near you,
+          not everything on sale.
+        </p>
+      )}
+
       {isFirstTime && (
         <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
           {data.refreshing ? firstTimeMessage : STALLED_MESSAGE}
@@ -160,4 +168,17 @@ function groupByMonth(events: Event[]) {
       });
       return { key, label, items: groups.get(key)! };
     });
+}
+
+// formatLocalDay renders a venue-local "2006-01-02" day. Parsed as a calendar
+// date, not as an instant: new Date("2026-12-01") is UTC midnight, which most
+// US timezones would display as the day before.
+function formatLocalDay(day: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  if (!y || !m || !d) return day;
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
