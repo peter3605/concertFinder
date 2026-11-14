@@ -490,7 +490,14 @@ func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a Target, loc Loc
 	// With Bandsintown gone this is the single secondary source, so it now
 	// carries every artist TM doesn't cover rather than only those neither
 	// primary knew about.
-	if len(out) == 0 && !capped && d.Fallback != nil && a.Score >= d.MinFallbackScore {
+	//
+	// A target that arrived with its attraction ID (a hand pick) never
+	// escalates: it is by definition a Ticketmaster artist, and Ticketmaster
+	// having nothing on sale for it is the ordinary state of most picks, not a
+	// coverage gap (docs/public-path.md §5). Gated on the ID rather than on a
+	// low Score, because MinFallbackScore is operator-configurable and zero
+	// would let a zero-scored pick straight through.
+	if len(out) == 0 && !capped && d.Fallback != nil && a.AttractionID == "" && a.Score >= d.MinFallbackScore {
 		fs.eligible.Add(1)
 		// Don't even enter the chain once the scan-wide fallback budget is
 		// spent — every lookup inside would queue on a 1 req/sec turnstile

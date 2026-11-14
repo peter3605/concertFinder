@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -60,6 +61,14 @@ type concertsResponse struct {
 	// quota, which only resets on the hour named here. Lets the UI say when
 	// more results are expected instead of implying an imminent refresh.
 	RetryAfter *time.Time `json:"retry_after,omitempty"`
+	// NeedsPicks is true for an account with no Spotify identity and no
+	// artist picks: there is nothing to scan, so no scan is queued and the
+	// client should send the user to the picker rather than poll (CF-30).
+	//
+	// omitempty on purpose. The field is additive, and leaving it out when
+	// false keeps every response a Spotify user already receives byte-for-byte
+	// what it was, so the iOS golden fixtures do not move.
+	NeedsPicks bool `json:"needs_picks,omitempty"`
 }
 
 type facetSet struct {
@@ -88,9 +97,18 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		saved      map[string]struct{}
 		subscribed map[string]struct{}
 		reasons    map[string]string
+		pickIDs    map[string]struct{}
+		// pickState is whether this user has anything to scan; see
+		// loadPickState. Read alongside the others because it gates the
+		// enqueue below on every poll.
+		pickState pickState
 	)
 	var pre sync.WaitGroup
-	pre.Add(4)
+	pre.Add(5)
+	go func() {
+		defer pre.Done()
+		pickIDs, pickState = loadPickState(r.Context(), h.Pool, u)
+	}()
 	go func() {
 		defer pre.Done()
 		userLoc, hit, err := db.GetUserLocation(r.Context(), h.Pool, u.ID)
@@ -221,6 +239,14 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if retryAfter != nil && time.Now().Before(*retryAfter) {
 		stale = false
 	}
+	// ...or there is nothing to scan. A user with no picks and no Spotify can
+	// never produce a snapshot, and a missing snapshot reads as stale, so
+	// without this the 10s poll would enqueue a scan every 10s forever. An
+	// unknown state (the lookup failed) also holds off; the next poll asks
+	// again.
+	if pickState != hasSubject {
+		stale = false
+	}
 
 	refreshing := false
 	if stale && h.River != nil {
@@ -263,6 +289,8 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		// as nothing on both clients, never as a placeholder.
 		if reason, ok := reasons[filtered[i].Artist.ID]; ok {
 			filtered[i].Reason = reason
+		} else if _, ok := pickIDs[filtered[i].Artist.ID]; ok {
+			filtered[i].Reason = PickedReason
 		}
 	}
 
@@ -282,7 +310,46 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		// that's what Refreshing communicates.
 		Complete:   !hasSnap || complete,
 		RetryAfter: retryAfter,
+		NeedsPicks: pickState == needsPicks,
 	})
+}
+
+// PickedReason is the feed's reason line for an artist the user picked by
+// hand (docs/public-path.md §5).
+const PickedReason = "You picked them"
+
+// pickState is whether a user has anything a scan could search for.
+type pickState int
+
+const (
+	// pickStateUnknown: the lookup failed, so nothing is known either way.
+	pickStateUnknown pickState = iota
+	// hasSubject: a Spotify identity, at least one pick, or both.
+	hasSubject
+	// needsPicks: no Spotify identity and no picks.
+	needsPicks
+)
+
+// loadPickState returns the user's picked artist IDs (for the reason line)
+// and whether they have anything to scan. A Spotify user always has a
+// subject -- their profile -- whatever their picks.
+func loadPickState(ctx context.Context, pool *pgxpool.Pool, u auth.CurrentUser) (map[string]struct{}, pickState) {
+	picks, err := db.ListArtistPicks(ctx, pool, u.ID)
+	if err != nil {
+		slog.Warn("concerts: picks lookup failed", "err", err, "user", u.ID)
+		if u.SpotifyUserID != "" {
+			return nil, hasSubject
+		}
+		return nil, pickStateUnknown
+	}
+	ids := make(map[string]struct{}, len(picks))
+	for _, p := range picks {
+		ids[jobs.PickArtistID(p.AttractionID)] = struct{}{}
+	}
+	if u.SpotifyUserID == "" && len(picks) == 0 {
+		return ids, needsPicks
+	}
+	return ids, hasSubject
 }
 
 // ManualRefreshMinInterval is how recently a scan must have run before the
@@ -318,6 +385,16 @@ func (h *ConcertsHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.River == nil {
 		http.Error(w, "background jobs disabled", http.StatusServiceUnavailable)
+		return
+	}
+	// The same short-circuit as Get: a scan for a user with nothing to search
+	// produces nothing, and spends a worker slot finding that out.
+	switch _, st := loadPickState(r.Context(), h.Pool, u); st {
+	case needsPicks:
+		writeJSONStatus(w, http.StatusConflict, refreshResponse{Refreshing: false, Reason: "needs_picks"})
+		return
+	case pickStateUnknown:
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 

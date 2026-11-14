@@ -80,3 +80,34 @@ func TestSearchOne_KnownAttractionSkipsResolution(t *testing.T) {
 		t.Errorf("artist_resolutions row written for %s", target.ID)
 	}
 }
+
+// A pick with nothing on Ticketmaster stays empty: the fallback chain is for
+// profile artists Ticketmaster does not know, and a pick is by definition one
+// it does. The Score is set well above MinFallbackScore so the only thing
+// holding the chain shut is the attraction ID.
+func TestSearchOne_KnownAttractionNeverEscalates(t *testing.T) {
+	fb := &stubFallbacker{out: []Concert{{Artist: ArtistRef{Name: "x"}, Venue: "v", City: "c"}}}
+	d := SearchDeps{
+		Pool:             statsTestPool(t),
+		TM:               ticketmaster.NewClient(&http.Client{Transport: &recordingRoundTripper{}}, "test-key"),
+		CacheTTL:         time.Hour,
+		Parallelism:      1,
+		Fallback:         fb,
+		MinFallbackScore: 0,
+	}
+	attraction := fmt.Sprintf("K8vNoShows%d", time.Now().UnixNano())
+	target := Target{ID: "tm:" + attraction, Name: "Between Tours", Score: 99, AttractionID: attraction}
+
+	var fs fallbackStats
+	ctx := context.Background()
+	out, err := searchOne(ctx, ctx, d, target, Location{RadiusMiles: 50}, &fs)
+	if err != nil {
+		t.Fatalf("searchOne: %v", err)
+	}
+	if fb.calls != 0 || len(out) != 0 {
+		t.Errorf("fallback chain ran for a pick: calls=%d out=%d", fb.calls, len(out))
+	}
+	if got := fs.eligible.Load(); got != 0 {
+		t.Errorf("eligible = %d, want 0", got)
+	}
+}
