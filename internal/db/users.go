@@ -50,6 +50,14 @@ type User struct {
 	AuthMethods []string
 }
 
+// HasSpotifyCredential reports whether a Spotify API call can be made on this
+// account's behalf: it has a Spotify identity and a credential that was not
+// zeroed by DisconnectSpotify. It is the predicate every Spotify-only path
+// gates on (CF-32); FanoutAffinityRefreshWorker spells it in SQL.
+func (u User) HasSpotifyCredential() bool {
+	return u.SpotifyUserID != "" && len(u.EncryptedRefreshToken) > 0 && len(u.RefreshTokenNonce) > 0
+}
+
 // GetUserByID returns the user or (User{}, pgx.ErrNoRows) if none exists.
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (User, error) {
 	const q = `

@@ -52,7 +52,20 @@ func (w *RefreshAffinityWorker) Work(ctx context.Context, job *river.Job[Refresh
 	if err != nil {
 		return err
 	}
+	// No Spotify identity, or one that was disconnected: there is no profile
+	// to refresh and never will be until they sign in with Spotify again.
+	// The fanout already skips both, so reaching this means a job enqueued
+	// before a disconnect; erroring would only buy river's retries of a
+	// refresh that cannot succeed.
+	if !user.HasSpotifyCredential() {
+		slog.Info("affinity refresh skipped: no spotify connection", "user_id", user.ID)
+		return nil
+	}
 	if _, err := w.Affinity.Compute(ctx, affinity.User{ID: user.ID, SpotifyUserID: user.SpotifyUserID}); err != nil {
+		if errors.Is(err, auth.ErrSpotifyDisconnected) {
+			slog.Info("affinity refresh skipped: spotify disconnected", "user_id", user.ID)
+			return nil
+		}
 		return err
 	}
 	slog.Info("refreshed affinity", "user_id", user.ID)
@@ -620,9 +633,17 @@ type FanoutAffinityRefreshWorker struct {
 }
 
 func (w *FanoutAffinityRefreshWorker) Work(ctx context.Context, _ *river.Job[FanoutAffinityRefreshArgs]) error {
+	// Only accounts with a live Spotify connection. A picks-only account has
+	// no profile to refresh, and a disconnected one has revoked the grant;
+	// enqueueing either produced one failing job per user per night, from
+	// auth.ErrSpotifyDisconnected (CF-32). The predicate is
+	// db.User.HasSpotifyCredential's, spelled in SQL.
 	const q = `
-SELECT DISTINCT user_id FROM sessions
-WHERE last_seen_at > now() - interval '14 days'
+SELECT DISTINCT s.user_id FROM sessions s
+JOIN users u ON u.id = s.user_id
+WHERE s.last_seen_at > now() - interval '14 days'
+  AND u.spotify_user_id IS NOT NULL
+  AND length(u.encrypted_refresh_token) > 0
 `
 	rows, err := w.Pool.Query(ctx, q)
 	if err != nil {

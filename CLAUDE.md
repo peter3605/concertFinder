@@ -118,9 +118,38 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   clause rather than a read-then-write. The arithmetic behind all of it: a cold
   scan reserves `artists * 2` = 400 permits, so `RATE_CAP_TM_ACCOUNT_DAILY`
   (5000) is ~12 cold scans/day and the nightly fanout spends one per active user.
-  Until Spotify grants Extended Quota Mode their Development Mode allowlist is a
-  second, stricter gate in front of this one; this exists so the day that lifts
-  is not also the day admission becomes unbounded.
+  For Spotify sign-ins, Spotify's Development Mode allowlist is a second,
+  stricter gate in front of this one, and it is **permanent**: Extended Quota
+  Mode is open only to organizations with 250k monthly active users, so it will
+  not be granted (CF-09 was re-scoped on 2026-11-08; `docs/public-path.md`).
+  Growth past five accounts comes through sign-ins that are not Spotify, and
+  this gate is what bounds those.
+
+- **Spotify stays at five accounts, and nobody else reaches Spotify (CF-32,
+  `docs/public-path.md` §7).** `SPOTIFY_MAX_USERS` (default 5; `0` means no new
+  Spotify accounts, not "unlimited") is checked in `db.UpsertUserWithAdmission`
+  on the signup branch only, **before** `redeemInviteTx`, so a refused signup
+  spends no code and a returning Spotify user is never refused, even after the
+  cap is lowered beneath them. A disconnected account keeps its
+  `spotify_user_id` and so keeps its place. The count-then-insert runs under a
+  transaction-scoped advisory lock, or two signups racing for the last place
+  both count four. The dashboard allowlist remains the real gate; this makes
+  the refusal ours, with a message. The other half is that **no Spotify request
+  is ever made for an account without a Spotify connection**, and it is
+  structural: every `spotify.Client` method takes an access token, the only
+  sources of one are the callback's `ExchangeCode` (the Spotify sign-in itself)
+  and `TokenService.AccessTokenFor`, and `AccessTokenFor` refuses an empty
+  `spotify_user_id` with `ErrSpotifyDisconnected` before touching the network.
+  `internal/auth/spotify_gate_test.go` walks the source to keep the call sites
+  and token sources to that list, so a new Spotify call fails CI until someone
+  has looked at it. On top of that the paths refuse early rather than error:
+  `GET /me/artists/search` is a 403 (never a 502) without a connection, the
+  nightly `FanoutAffinityRefresh` selects only accounts with
+  `db.User.HasSpotifyCredential` (spelled in SQL there) — without it every
+  picks- or genre-only account was a failing job per night —
+  `RefreshAffinityWorker` no-ops for one that slipped through, and the login
+  pre-warm (`jobs.LoginPrewarm`) skips them. Gate on the **identity**, never on
+  "has picks": genre-only accounts (CF-31) are a second non-Spotify scan source.
 
 - **`users.is_admin` is the only authorization tier, and the gate is welded to
   the routes rather than to the call site.** Before migration 0022 there was no
@@ -1030,7 +1059,7 @@ Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBA
 
 Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`,
 `DISCOVER_SEED_CITIES` (`Name:lat,lng;...`; unset uses the built-in list,
-`none` disables the seed), `DAILY_SEED_HOUR_UTC`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
+`none` disables the seed), `DAILY_SEED_HOUR_UTC`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `SPOTIFY_MAX_USERS` (default 5, the Development Mode allowlist; refuses new Spotify signups only), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
 operator contact on `/privacy` and `/terms` and the address in the
 MusicBrainz/Nominatim User-Agent; it used to fall back to a maintainer's
 personal address, which an unset variable then published as a public
@@ -1055,7 +1084,7 @@ empty config and fails on `DATABASE_URL`.
 When proposing or implementing work, check which phase it belongs to before expanding scope:
 
 - **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM only (BIT was in scope at the time and has since been removed), semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
-- **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. Begin Extended Quota Mode application.
+- **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. (The Extended Quota Mode application once planned here is closed to us — Spotify requires 250k MAU — so Spotify sign-in stays at five accounts; see `docs/public-path.md` §7.)
 - **Phase 3:** AWS single-instance deployment (EC2 t4g.small + Neon Postgres, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. The database was RDS db.t4g.micro until it became the largest line on the bill (~$14/mo); Neon's free plan replaced it, with nightly `pg_dump` to S3 (`scripts/backup-db.sh`) standing in for the 7-day RDS retention that was given up. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 
 If a request would pull Phase 2/3 work into Phase 1, flag it rather than silently expanding.

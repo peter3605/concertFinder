@@ -210,6 +210,9 @@ func main() {
 			// Gates signups, not logins. Defaults on; see
 			// config.Config.InviteRequired.
 			InviteRequired: cfg.InviteRequired,
+			// Refuses a new Spotify signup past the allowlist size, before
+			// any invite is spent. See config.Config.SpotifyMaxUsers.
+			MaxSpotifyUsers: cfg.SpotifyMaxUsers,
 		}
 
 		affinitySvc := &affinity.Service{
@@ -600,32 +603,18 @@ func main() {
 		// snapshot job. Uses a detached background context so a browser
 		// disconnect mid-callback doesn't cancel the enqueue.
 		authDeps.OnLoginSuccess = func(_ context.Context, userID uuid.UUID) {
-			ul, hit, err := db.GetUserLocation(context.Background(), pool, userID)
+			// jobs.LoginPrewarm holds the judgement and its reasons: no
+			// pre-warm for an account without a Spotify connection (CF-32),
+			// nor for one with no location of its own yet, which would scan
+			// a city the user never chose and file it where nothing reads.
+			args, skip, err := jobs.LoginPrewarm(context.Background(), pool, userID)
 			if err != nil {
-				logger.Warn("prewarm location lookup failed", "err", err, "user", userID)
+				logger.Warn("prewarm lookup failed", "err", err, "user", userID)
 				return
 			}
-			if !hit {
-				// No location of the user's own yet, so the only thing to
-				// scan is this deployment's USER_LATITUDE/USER_LONGITUDE —
-				// a city the user has never mentioned. That scan takes up to
-				// ScanBudget and reserves a chunk of a daily per-user cap
-				// sized at roughly one scan, and the moment the user names a
-				// real place the result is filed under a different
-				// location_key and never read. The user waited through it to
-				// be handed nothing.
-				//
-				// Both clients ask for a location before the first feed, and
-				// the SWR read enqueues the scan when the answer arrives.
-				logger.Info("prewarm skipped: user has no location yet", "user", userID)
+			if skip != "" {
+				logger.Info("prewarm skipped", "reason", string(skip), "user", userID)
 				return
-			}
-			loc := concerts.Location{Latitude: ul.Latitude, Longitude: ul.Longitude, RadiusMiles: ul.RadiusMiles}
-			args := jobs.ScanConcertsArgs{
-				UserID:      userID,
-				Latitude:    loc.Latitude,
-				Longitude:   loc.Longitude,
-				RadiusMiles: loc.RadiusMiles,
 			}
 			// Uniqueness comes from ScanConcertsArgs.InsertOpts (one scan in
 			// flight per user+location); passing opts here would override it.

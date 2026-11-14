@@ -175,7 +175,7 @@ func TestAdmissionRefusesSignupWithoutCode(t *testing.T) {
 	spotifyID := "spotify-nocode-" + uuid.NewString()
 	dropUser(t, pool, spotifyID)
 
-	_, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "", true)
+	_, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "", true, NoSpotifyCap)
 	if !errors.Is(err, ErrInviteRequired) {
 		t.Fatalf("err = %v, want ErrInviteRequired", err)
 	}
@@ -187,7 +187,7 @@ func TestAdmissionRefusesUnknownCode(t *testing.T) {
 	spotifyID := "spotify-badcode-" + uuid.NewString()
 	dropUser(t, pool, spotifyID)
 
-	_, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "CF-NOPE-NOPE", true)
+	_, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "CF-NOPE-NOPE", true, NoSpotifyCap)
 	if !errors.Is(err, ErrInviteInvalid) {
 		t.Fatalf("err = %v, want ErrInviteInvalid", err)
 	}
@@ -201,7 +201,7 @@ func TestAdmissionAcceptsValidCodeAndSpendsItExactlyOnce(t *testing.T) {
 	spotifyID := "spotify-good-" + uuid.NewString()
 	dropUser(t, pool, spotifyID)
 
-	u, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), invite.Code, true)
+	u, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), invite.Code, true, NoSpotifyCap)
 	if err != nil {
 		t.Fatalf("admission: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestAdmissionAcceptsValidCodeAndSpendsItExactlyOnce(t *testing.T) {
 	// The same person logging in again is a returning user, not a second
 	// signup: they must not be asked for a code and must not spend one.
 	// This is the property that grandfathers every pre-0021 account.
-	again, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", true)
+	again, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", true, NoSpotifyCap)
 	if err != nil {
 		t.Fatalf("returning login refused: %v", err)
 	}
@@ -235,10 +235,10 @@ func TestAdmissionRefusesSpentCode(t *testing.T) {
 	dropUser(t, pool, first)
 	dropUser(t, pool, second)
 
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(first), invite.Code, true); err != nil {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(first), invite.Code, true, NoSpotifyCap); err != nil {
 		t.Fatalf("first signup: %v", err)
 	}
-	_, err := UpsertUserWithAdmission(ctx, pool, newTestUser(second), invite.Code, true)
+	_, err := UpsertUserWithAdmission(ctx, pool, newTestUser(second), invite.Code, true, NoSpotifyCap)
 	if !errors.Is(err, ErrInviteInvalid) {
 		t.Fatalf("second signup err = %v, want ErrInviteInvalid", err)
 	}
@@ -254,7 +254,7 @@ func TestAdmissionMultiUseCodeSeatsSeveral(t *testing.T) {
 	for i := range 3 {
 		id := "spotify-multi-" + uuid.NewString()
 		dropUser(t, pool, id)
-		if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(id), invite.Code, true); err != nil {
+		if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(id), invite.Code, true, NoSpotifyCap); err != nil {
 			t.Fatalf("signup %d: %v", i, err)
 		}
 	}
@@ -262,7 +262,7 @@ func TestAdmissionMultiUseCodeSeatsSeveral(t *testing.T) {
 
 	overflow := "spotify-multi-overflow-" + uuid.NewString()
 	dropUser(t, pool, overflow)
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(overflow), invite.Code, true); !errors.Is(err, ErrInviteInvalid) {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(overflow), invite.Code, true, NoSpotifyCap); !errors.Is(err, ErrInviteInvalid) {
 		t.Fatalf("fourth signup err = %v, want ErrInviteInvalid", err)
 	}
 }
@@ -275,7 +275,7 @@ func TestAdmissionRefusesExpiredAndDisabledCodes(t *testing.T) {
 	expired := mintTestInvite(t, pool, 1, &past)
 	expiredUser := "spotify-expired-" + uuid.NewString()
 	dropUser(t, pool, expiredUser)
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(expiredUser), expired.Code, true); !errors.Is(err, ErrInviteInvalid) {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(expiredUser), expired.Code, true, NoSpotifyCap); !errors.Is(err, ErrInviteInvalid) {
 		t.Errorf("expired code err = %v, want ErrInviteInvalid", err)
 	}
 
@@ -285,7 +285,7 @@ func TestAdmissionRefusesExpiredAndDisabledCodes(t *testing.T) {
 	}
 	disabledUser := "spotify-disabled-" + uuid.NewString()
 	dropUser(t, pool, disabledUser)
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(disabledUser), disabled.Code, true); !errors.Is(err, ErrInviteInvalid) {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(disabledUser), disabled.Code, true, NoSpotifyCap); !errors.Is(err, ErrInviteInvalid) {
 		t.Errorf("disabled code err = %v, want ErrInviteInvalid", err)
 	}
 }
@@ -298,7 +298,7 @@ func TestAdmissionOffAdmitsWithoutCode(t *testing.T) {
 	spotifyID := "spotify-open-" + uuid.NewString()
 	dropUser(t, pool, spotifyID)
 
-	u, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "", false)
+	u, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "", false, NoSpotifyCap)
 	if err != nil {
 		t.Fatalf("open signup refused: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestAdmissionAcceptsUnnormalizedCode(t *testing.T) {
 	dropUser(t, pool, spotifyID)
 
 	sloppy := "  " + strings.ToLower(strings.ReplaceAll(invite.Code, "-", " ")) + " "
-	u, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), sloppy, true)
+	u, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), sloppy, true, NoSpotifyCap)
 	if err != nil {
 		t.Fatalf("admission with %q: %v", sloppy, err)
 	}
@@ -343,7 +343,7 @@ func TestInviteCodeUsableAgreesWithRedemption(t *testing.T) {
 	// Spend it, then ask again.
 	spent := "spotify-usable-" + uuid.NewString()
 	dropUser(t, pool, spent)
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spent), usable.Code, true); err != nil {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spent), usable.Code, true, NoSpotifyCap); err != nil {
 		t.Fatalf("spend: %v", err)
 	}
 	if ok, err := InviteCodeUsable(ctx, pool, usable.Code); err != nil || ok {
@@ -435,7 +435,7 @@ FROM user_identities WHERE provider = 'spotify' AND subject = $1`, spotifyID).Sc
 		return owner, rows
 	}
 
-	created, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false)
+	created, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false, NoSpotifyCap)
 	if err != nil {
 		t.Fatalf("signup: %v", err)
 	}
@@ -443,7 +443,7 @@ FROM user_identities WHERE provider = 'spotify' AND subject = $1`, spotifyID).Sc
 		t.Fatalf("after signup: %d rows owned by %s, want 1 owned by %s", rows, owner, created.ID)
 	}
 
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false); err != nil {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false, NoSpotifyCap); err != nil {
 		t.Fatalf("second login: %v", err)
 	}
 	if owner, rows := identity(); rows != 1 || owner != created.ID {
@@ -454,7 +454,7 @@ FROM user_identities WHERE provider = 'spotify' AND subject = $1`, spotifyID).Sc
 	if _, err := pool.Exec(ctx, `DELETE FROM user_identities WHERE user_id = $1`, created.ID); err != nil {
 		t.Fatalf("delete identity: %v", err)
 	}
-	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false); err != nil {
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), "", false, NoSpotifyCap); err != nil {
 		t.Fatalf("repairing login: %v", err)
 	}
 	if owner, rows := identity(); rows != 1 || owner != created.ID {

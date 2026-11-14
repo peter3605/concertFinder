@@ -79,6 +79,38 @@ var (
 	ErrInviteInvalid  = errors.New("invite code is not valid")
 )
 
+// ErrSpotifyFull means a new Spotify signup arrived while the deployment
+// already holds SPOTIFY_MAX_USERS Spotify accounts (docs/public-path.md §7).
+// It is checked before the invite is redeemed, so the refusal never spends a
+// code: the person can use it later through a sign-in that is not Spotify.
+var ErrSpotifyFull = errors.New("no Spotify sign-up places are left")
+
+// NoSpotifyCap passed as UpsertUserWithAdmission's maxSpotifyUsers disables
+// the Spotify account cap. It is negative because zero is a real cap: "no new
+// Spotify accounts at all".
+const NoSpotifyCap = -1
+
+// spotifySignupLock serializes the count-then-insert in
+// UpsertUserWithAdmission. Without it two signups racing for the last place
+// both count four, both insert, and the deployment holds six Spotify
+// accounts against an allowlist of five. The value is arbitrary; it only has
+// to be unique among this database's advisory locks.
+const spotifySignupLock int64 = 0x43463332 // "CF32"
+
+// CountSpotifyUsers is the number of accounts holding a Spotify identity.
+// A disconnected account (db.DisconnectSpotify) still counts: it keeps its
+// spotify_user_id, signing in again restores it without passing admission,
+// and the person is still on Spotify's dashboard allowlist.
+func CountSpotifyUsers(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) (int, error) {
+	var n int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM users WHERE spotify_user_id IS NOT NULL`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count spotify users: %w", err)
+	}
+	return n, nil
+}
+
 // inviteUsableSQL is the single predicate deciding whether a code may be
 // redeemed. It is a const shared by the read-only pre-check and the redemption
 // itself so that a code accepted at /login cannot be refused at /callback for
@@ -274,7 +306,12 @@ func InviteCodeUsable(ctx context.Context, pool *pgxpool.Pool, code string) (boo
 // code when the insert fails, and insert-then-redeem admits a user for free
 // when the redemption fails. Inside a transaction neither is reachable — the
 // code is spent if and only if the user exists.
-func UpsertUserWithAdmission(ctx context.Context, pool *pgxpool.Pool, u User, invite string, requireInvite bool) (User, error) {
+//
+// maxSpotifyUsers caps how many Spotify accounts may exist (SPOTIFY_MAX_USERS;
+// NoSpotifyCap disables it). Like the invite gate it fires only on a signup,
+// so a returning Spotify user is never refused, and it fires before the
+// redemption, so a refused signup never spends a code.
+func UpsertUserWithAdmission(ctx context.Context, pool *pgxpool.Pool, u User, invite string, requireInvite bool, maxSpotifyUsers int) (User, error) {
 	if u.ID == uuid.Nil {
 		u.ID = uuid.New()
 	}
@@ -300,6 +337,23 @@ func UpsertUserWithAdmission(ctx context.Context, pool *pgxpool.Pool, u User, in
 		u.ID = existingID
 	case errors.Is(err, pgx.ErrNoRows):
 		// New account: this is a signup, and signups are what the gate is for.
+		//
+		// The Spotify cap comes first. Spotify's Development Mode allowlist
+		// is the real gate, but a person it refuses has already been sent
+		// through consent and back; this one at least says why, and it must
+		// run before redeemInviteTx so that saying no costs nobody a code.
+		if maxSpotifyUsers >= 0 {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, spotifySignupLock); err != nil {
+				return User{}, fmt.Errorf("spotify cap lock: %w", err)
+			}
+			n, err := CountSpotifyUsers(ctx, tx)
+			if err != nil {
+				return User{}, err
+			}
+			if n >= maxSpotifyUsers {
+				return User{}, ErrSpotifyFull
+			}
+		}
 		if requireInvite {
 			if invite == "" {
 				return User{}, ErrInviteRequired
