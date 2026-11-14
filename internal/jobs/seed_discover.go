@@ -22,7 +22,7 @@ import (
 const SeedDiscoverMaxAttempts = 2
 
 // SeedDiscoverBudget bounds one run. Each city is at most
-// ticketmaster.MaxEventPages sequential requests, and the whole job exists to
+// ticketmaster.MaxNearPages sequential requests, and the whole job exists to
 // be cheap: a run that has not finished in this long is not going to be
 // improved by carrying on.
 const SeedDiscoverBudget = 3 * time.Minute
@@ -61,18 +61,19 @@ type SeedDiscoverWorker struct {
 	Ledger *rate.Ledger
 	Cities []config.SeedCity
 
-	// save writes one city's payload. Defaults to concert_cache; tests
-	// replace it to run the whole job without a database, the same seam
-	// webhttp.DiscoverHandler uses to read one without.
-	save func(ctx context.Context, key string, blob []byte) error
+	// save writes one city's payload and its horizon. Defaults to
+	// concert_cache; tests replace it to run the whole job without a
+	// database, the same seam webhttp.DiscoverHandler uses to read one
+	// without.
+	save func(ctx context.Context, key string, blob []byte, horizon string) error
 }
 
-func (w *SeedDiscoverWorker) writer() func(context.Context, string, []byte) error {
+func (w *SeedDiscoverWorker) writer() func(context.Context, string, []byte, string) error {
 	if w.save != nil {
 		return w.save
 	}
-	return func(ctx context.Context, key string, blob []byte) error {
-		return db.SaveCachedConcerts(ctx, w.Pool, key, blob)
+	return func(ctx context.Context, key string, blob []byte, horizon string) error {
+		return db.SaveCachedListing(ctx, w.Pool, key, blob, horizon)
 	}
 }
 
@@ -92,10 +93,10 @@ func (w *SeedDiscoverWorker) Work(ctx context.Context, _ *river.Job[SeedDiscover
 	}
 
 	// One block for the whole run, sized at the worst case: every city
-	// paging to the API's deep-paging limit. Reserving up front rather than
+	// paging to its cap. Reserving up front rather than
 	// per city is what makes a partly-funded run stop cleanly instead of
 	// getting halfway through each city.
-	want := len(w.Cities) * ticketmaster.MaxEventPages
+	want := len(w.Cities) * ticketmaster.MaxNearPages
 	res, err := w.Ledger.ReserveAccount(ctx, rate.SourceTicketmaster, want)
 	if err != nil {
 		// ReserveAccount grants nothing on a failed charge, on purpose: see
@@ -135,7 +136,20 @@ func (w *SeedDiscoverWorker) Work(ctx context.Context, _ *river.Job[SeedDiscover
 }
 
 // seedCity fetches and caches one city, returning how many events were
-// written. A truncated fetch is not written at all.
+// written.
+//
+// The fetch is a date-ascending prefix (ticketmaster.SearchEventsNear), so a
+// dense market cut at its page cap is still cached: it is correct up to its
+// horizon. Rows on the horizon day itself may be incomplete, and the discover
+// view reads tm: rows without consulting a horizon, so they are dropped here
+// and the stored listing holds only whole days. What is never cached is a
+// fragment -- a refused permit or a failed later page -- for the rule
+// loadOrFetchTM follows: a short listing written here is served for the life
+// of the row, and skipping the write self-heals tomorrow.
+//
+// Every city logs one line saying whether it was cached, because the failure
+// this replaced -- New York fetched daily and never written -- logged nothing
+// a reader would notice.
 func (w *SeedDiscoverWorker) seedCity(ctx context.Context, city config.SeedCity, res *rate.Reservation) (int, error) {
 	loc := concerts.DiscoverSeedLocation(city.Latitude, city.Longitude)
 	// The reservation is passed in rather than held on the worker: the worker
@@ -143,24 +157,49 @@ func (w *SeedDiscoverWorker) seedCity(ctx context.Context, city config.SeedCity,
 	// would be yesterday's.
 	morePages := func() bool { return res.Take() }
 
-	evs, complete, err := w.TM.SearchEventsNear(ctx, loc.Latitude, loc.Longitude, loc.RadiusMiles, morePages)
+	evs, horizon, cacheable, err := w.TM.SearchEventsNear(ctx, loc.Latitude, loc.Longitude, loc.RadiusMiles, morePages)
 	if err != nil {
 		return 0, err
 	}
-	if !complete {
-		// The same rule loadOrFetchTM follows, and for the same reason: a
-		// truncated listing written here is served for the life of the row,
-		// and no later run can correct it while the row is still being
-		// answered from. Skipping the write self-heals tomorrow.
-		slog.Info("discover seed: partial fetch not cached", "city", city.Name, "events", len(evs))
+	fetched := len(evs)
+	if !cacheable {
+		slog.Info("discover seed: city", "city", city.Name, "cached", false,
+			"reason", "fragment", "events", fetched)
+		return 0, nil
+	}
+	evs = beforeHorizon(evs, horizon)
+	if len(evs) == 0 && horizon != "" {
+		// Every row fetched sits on one possibly-incomplete day. Writing an
+		// empty listing would replace whatever yesterday's run left with
+		// nothing; keeping it costs at most a day of staleness.
+		slog.Info("discover seed: city", "city", city.Name, "cached", false,
+			"reason", "no whole day", "events", fetched, "horizon", horizon)
 		return 0, nil
 	}
 	blob, err := json.Marshal(evs)
 	if err != nil {
 		return 0, err
 	}
-	if err := w.writer()(ctx, concerts.DiscoverSeedCacheKey(loc), blob); err != nil {
+	if err := w.writer()(ctx, concerts.DiscoverSeedCacheKey(loc), blob, horizon); err != nil {
 		return 0, err
 	}
+	slog.Info("discover seed: city", "city", city.Name, "cached", true,
+		"events", len(evs), "fetched", fetched, "horizon", horizon)
 	return len(evs), nil
+}
+
+// beforeHorizon keeps the events strictly before horizon, all of them when
+// horizon is "". The listing is date ascending, but filtering rather than
+// cutting does not depend on that.
+func beforeHorizon(evs []ticketmaster.Event, horizon string) []ticketmaster.Event {
+	if horizon == "" {
+		return evs
+	}
+	out := evs[:0:0]
+	for _, e := range evs {
+		if e.LocalDate < horizon {
+			out = append(out, e)
+		}
+	}
+	return out
 }

@@ -14,7 +14,7 @@ import (
 func TestSearchEventsNearOmitsAttraction(t *testing.T) {
 	c, rec := newTestAPI(t, serveFixture(t, "events_venue.json"))
 
-	if _, _, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, nil); err != nil {
+	if _, _, _, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, nil); err != nil {
 		t.Fatalf("SearchEventsNear: %v", err)
 	}
 
@@ -38,7 +38,7 @@ func TestSearchEventsNearOmitsAttraction(t *testing.T) {
 func TestSearchEventsNearSharesQueryShapeWithSearchEvents(t *testing.T) {
 	c, rec := newTestAPI(t, serveFixture(t, "events_venue.json"))
 
-	if _, _, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, nil); err != nil {
+	if _, _, _, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, nil); err != nil {
 		t.Fatalf("SearchEventsNear: %v", err)
 	}
 	if _, _, err := c.SearchEvents(context.Background(), "K8vZ917Gku7", testLat, testLng, testRadius, nil); err != nil {
@@ -61,49 +61,27 @@ func TestSearchEventsNearSharesQueryShapeWithSearchEvents(t *testing.T) {
 	assertQuery(t, near, "unit", "miles")
 }
 
-// Pagination and the permit contract are shared with SearchEvents, but the
-// seed is the caller that pages hardest — a busy market really does run past
-// one page — so the behaviour is pinned here too rather than assumed.
+// The city-wide listing is a date-ascending prefix capped at MaxNearPages
+// (CF-B23). A cap stop is cacheable with a horizon; a short stop -- a refused
+// permit, or nil, which means first page only -- is a fragment and is not.
 func TestSearchEventsNearPaging(t *testing.T) {
 	tests := []struct {
-		name         string
-		totalPages   int
-		permit       func() bool
-		wantRequests int
-		wantComplete bool
+		name          string
+		totalPages    int
+		permit        func() bool
+		wantRequests  int
+		wantCacheable bool
+		wantHorizon   bool
 	}{
+		{name: "single page is whole", totalPages: 1, permit: func() bool { return true }, wantRequests: 1, wantCacheable: true},
+		{name: "follows pages while permitted", totalPages: 3, permit: func() bool { return true }, wantRequests: 3, wantCacheable: true},
 		{
-			name:         "single page is complete",
-			totalPages:   1,
-			permit:       func() bool { return true },
-			wantRequests: 1,
-			wantComplete: true,
+			// New York at radius 50: 37 pages, more than MaxEventPages.
+			name: "dense market stops at the cap, cacheable", totalPages: 37, permit: func() bool { return true },
+			wantRequests: MaxNearPages, wantCacheable: true, wantHorizon: true,
 		},
-		{
-			name:         "follows pages while permitted",
-			totalPages:   3,
-			permit:       func() bool { return true },
-			wantRequests: 3,
-			wantComplete: true,
-		},
-		{
-			// A refused permit is the account ledger saying the seed has
-			// spent its block. Stopping short is correct; reporting the
-			// result complete would let the caller cache a truncated city.
-			name:         "refused permit stops and reports incomplete",
-			totalPages:   3,
-			permit:       func() bool { return false },
-			wantRequests: 1,
-			wantComplete: false,
-		},
-		{
-			// nil means "first page only" everywhere in this package.
-			name:         "nil permit fetches one page",
-			totalPages:   3,
-			permit:       nil,
-			wantRequests: 1,
-			wantComplete: false,
-		},
+		{name: "refused permit is a fragment", totalPages: 3, permit: func() bool { return false }, wantRequests: 1, wantCacheable: false, wantHorizon: true},
+		{name: "nil permit fetches one page, a fragment", totalPages: 3, permit: nil, wantRequests: 1, wantCacheable: false, wantHorizon: true},
 	}
 
 	for _, tc := range tests {
@@ -122,18 +100,26 @@ func TestSearchEventsNearPaging(t *testing.T) {
 			if tc.permit != nil {
 				permit = tc.permit
 			}
-			evs, complete, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, permit)
+			evs, horizon, cacheable, err := c.SearchEventsNear(context.Background(), testLat, testLng, testRadius, permit)
 			if err != nil {
 				t.Fatalf("SearchEventsNear: %v", err)
 			}
 			if rec.count() != tc.wantRequests {
 				t.Errorf("requests = %d, want %d", rec.count(), tc.wantRequests)
 			}
-			if complete != tc.wantComplete {
-				t.Errorf("complete = %v, want %v", complete, tc.wantComplete)
+			if cacheable != tc.wantCacheable {
+				t.Errorf("cacheable = %v, want %v", cacheable, tc.wantCacheable)
+			}
+			if (horizon != "") != tc.wantHorizon {
+				t.Errorf("horizon = %q, want set=%v", horizon, tc.wantHorizon)
 			}
 			if len(evs) != tc.wantRequests {
 				t.Errorf("events = %d, want %d (one per page fetched)", len(evs), tc.wantRequests)
+			}
+			for i, req := range rec.requests() {
+				if got := req.Query().Get("sort"); got != "date,asc" {
+					t.Errorf("request %d sort = %q, want date,asc", i, got)
+				}
 			}
 		})
 	}

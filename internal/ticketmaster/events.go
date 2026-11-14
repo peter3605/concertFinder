@@ -192,13 +192,25 @@ func (c *Client) SearchEvents(ctx context.Context, attractionID string, lat, lng
 // deliberately the only query in this package that is not about a specific
 // artist.
 //
-// Same paging, permit and `complete` contract as SearchEvents. A caller that
-// caches the result must not cache it when complete is false, for the reason
-// loadOrFetchTM records: a truncated listing written to the cache is served
-// for the life of the entry and no later fetch can correct it.
-func (c *Client) SearchEventsNear(ctx context.Context, lat, lng float64, radiusMiles int, permit PagePermit) (events []Event, complete bool, err error) {
-	return c.pagedEvents(ctx, c.eventsQuery(lat, lng, radiusMiles), permit)
+// It is a date-ascending prefix capped at MaxNearPages, not the whole
+// listing, and it is cacheable when the cap is what cut it (CF-B23). It used
+// to follow the full SearchEvents contract -- page to MaxEventPages, cache
+// only when complete -- and a dense market can never be complete: the exact
+// query at radius 50 around New York reported 3,654 events and 37 pages, so
+// the seed spent ten calls a day on the one city the signed-out page is
+// hardcoded to and wrote nothing. A date-sorted prefix is the exception
+// SearchGenreEvents already makes (docs/public-path.md §1.2): it is correct up
+// to its last day, so horizon says where that is, and only a short stop -- a
+// refused permit or a failed later page -- leaves an uncacheable fragment.
+func (c *Client) SearchEventsNear(ctx context.Context, lat, lng float64, radiusMiles int, permit PagePermit) (events []Event, horizon string, cacheable bool, err error) {
+	return c.datePrefix(ctx, c.eventsQuery(lat, lng, radiusMiles), permit, MaxNearPages)
 }
+
+// MaxNearPages bounds one city-wide listing. The view it feeds shows at most
+// 50 events (webhttp.DiscoverMaxEvents), so the 500 earliest shows in a
+// 50-mile circle leave tenfold headroom for a visitor whose own circle covers
+// only part of it, at half the calls a full MaxEventPages walk would cost.
+const MaxNearPages = 5
 
 // eventsQuery builds the parameters every /events.json request shares. Kept
 // in one place so the city-wide query cannot drift from the per-artist one --
@@ -218,7 +230,7 @@ func (c *Client) eventsQuery(lat, lng float64, radiusMiles int) url.Values {
 
 // pagedEvents runs the /events.json paging loop for an already-composed query.
 //
-// Shared by both callers on purpose. Every property the comments above defend
+// Written to be shared rather than inlined in SearchEvents. Every property the comments above defend
 // -- one permit per request after the first, page 0 failing hard while a later
 // page degrades to incomplete, totalPages==0 reading as "nothing further",
 // MaxEventPages matching the API's 1000-result deep-paging refusal -- is
