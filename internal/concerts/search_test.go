@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/peterho/concertfinder/internal/db"
-	"github.com/peterho/concertfinder/internal/spotify"
 )
 
 // The regression these cover: Search used to swallow every per-artist
@@ -22,7 +21,7 @@ func TestSearch_CancelledContextReportsEveryArtistSkipped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	artists := []spotify.ScoredArtist{
+	artists := []Target{
 		{ID: "a1", Name: "Alpha"},
 		{ID: "a2", Name: "Beta"},
 		{ID: "a3", Name: "Gamma"},
@@ -61,7 +60,7 @@ func TestSearch_NoArtistsIsComplete(t *testing.T) {
 func TestSearch_UnusableArtistsDoNotCountAsSkipped(t *testing.T) {
 	// Entries missing an ID or name are input noise, not coverage we failed
 	// to deliver — they must not make a scan look partial.
-	artists := []spotify.ScoredArtist{
+	artists := []Target{
 		{ID: "", Name: "No ID"},
 		{ID: "a1", Name: ""},
 	}

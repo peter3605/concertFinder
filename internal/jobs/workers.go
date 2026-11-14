@@ -20,6 +20,7 @@ import (
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/email"
 	"github.com/peterho/concertfinder/internal/rate"
+	"github.com/peterho/concertfinder/internal/spotify"
 )
 
 // RefreshAffinityWorker recomputes one user's profile.
@@ -140,7 +141,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 
 	// A non-nil error here still carries usable partial results; see
 	// concerts.IncompleteError.
-	found, searchErr := concerts.Search(ctx, deps, artists, loc)
+	found, searchErr := concerts.Search(ctx, deps, profileTargets(artists), loc)
 	var incomplete *concerts.IncompleteError
 	switch {
 	case searchErr == nil:
@@ -883,4 +884,17 @@ func applyUserArtistRefs(ctx context.Context, pool *pgxpool.Pool, userID uuid.UU
 	}
 	concerts.ApplyArtistRefs(cs, concerts.ArtistRefsFromRaw(raw))
 	return nil
+}
+
+// profileTargets turns an affinity profile into concert-search targets.
+// Profile artists carry no attraction ID, so concerts.Search resolves each
+// by name through artist_resolutions, exactly as before CF-29. The
+// conversion lives here, not in internal/concerts, because that package must
+// not import internal/spotify (see concerts.Target).
+func profileTargets(artists []spotify.ScoredArtist) []concerts.Target {
+	out := make([]concerts.Target, len(artists))
+	for i, a := range artists {
+		out[i] = concerts.Target{ID: a.ID, Name: a.Name, Score: a.Score, Genres: a.Genres}
+	}
+	return out
 }

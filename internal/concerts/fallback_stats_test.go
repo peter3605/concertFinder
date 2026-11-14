@@ -12,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
@@ -66,7 +65,7 @@ type stubFallbacker struct {
 	out   []Concert
 }
 
-func (s *stubFallbacker) FindEvents(context.Context, spotify.ScoredArtist, Location) []Concert {
+func (s *stubFallbacker) FindEvents(context.Context, Target, Location) []Concert {
 	s.calls++
 	return s.out
 }
@@ -82,9 +81,9 @@ func statsDeps(t *testing.T, fb Fallbacker) SearchDeps {
 	}
 }
 
-func statsArtist(t *testing.T) spotify.ScoredArtist {
+func statsArtist(t *testing.T) Target {
 	t.Helper()
-	return spotify.ScoredArtist{
+	return Target{
 		ID:    fmt.Sprintf("test-artist-%s-%d", t.Name(), time.Now().UnixNano()),
 		Name:  "Nobody Ticketmaster Has Heard Of",
 		Score: 3.0,
