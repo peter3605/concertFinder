@@ -16,6 +16,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,33 @@ import (
 // migrationsDir is relative to the calling test's package directory, as with
 // db.Migrate.
 func Isolated(t testing.TB, migrationsDir string) *pgxpool.Pool {
+	t.Helper()
+	pool := Empty(t, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := db.Migrate(ctx, pool, migrationsDir); err != nil {
+		t.Fatalf("testdb: migrate: %v", err)
+	}
+	m, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		t.Fatalf("testdb: river migrator: %v", err)
+	}
+	if _, err := m.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
+		t.Fatalf("testdb: river migrate: %v", err)
+	}
+	return pool
+}
+
+// Empty is Isolated without the migrations: a freshly created, uniquely named
+// database next to TEST_DATABASE_URL's with nothing in it, dropped when the
+// test ends. It exists for a test whose subject is migrating itself, which
+// needs every migration genuinely pending and must not get there by dropping
+// a schema in the database every other package is using at that moment
+// (CF-B24: that DROP SCHEMA deadlocked against a parallel package on CI).
+//
+// maxConns > 0 bounds the returned pool; <= 0 leaves pgxpool's default.
+func Empty(t testing.TB, maxConns int) *pgxpool.Pool {
 	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
@@ -67,6 +95,11 @@ func Isolated(t testing.TB, migrationsDir string) *pgxpool.Pool {
 		t.Fatalf("testdb: parse TEST_DATABASE_URL: %v", err)
 	}
 	u.Path = "/" + name
+	if maxConns > 0 {
+		q := u.Query()
+		q.Set("pool_max_conns", strconv.Itoa(maxConns))
+		u.RawQuery = q.Encode()
+	}
 	pool, err := pgxpool.New(ctx, u.String())
 	if err != nil {
 		t.Fatalf("testdb: connect %s: %v", name, err)
@@ -74,16 +107,5 @@ func Isolated(t testing.TB, migrationsDir string) *pgxpool.Pool {
 	// Registered after the drop, so it runs first: the pool must be closed
 	// before its database is dropped.
 	t.Cleanup(pool.Close)
-
-	if err := db.Migrate(ctx, pool, migrationsDir); err != nil {
-		t.Fatalf("testdb: migrate: %v", err)
-	}
-	m, err := rivermigrate.New(riverpgxv5.New(pool), nil)
-	if err != nil {
-		t.Fatalf("testdb: river migrator: %v", err)
-	}
-	if _, err := m.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
-		t.Fatalf("testdb: river migrate: %v", err)
-	}
 	return pool
 }
