@@ -125,12 +125,15 @@ func (h *SubscribedArtistsHandler) SearchArtists(w http.ResponseWriter, r *http.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// Spotify search is for people who signed in with Spotify, and nobody
-	// else (docs/public-path.md §7): a picks-only account gets a 403 before
-	// any token is asked for, let alone a search sent. Picks use the
-	// Ticketmaster picker for everyone. Checked ahead of the empty-query
-	// shortcut so the answer does not depend on what was typed.
-	if u.SpotifyUserID == "" {
+	// Spotify search is for people with a Spotify connection, and nobody
+	// else (docs/public-path.md §7): a picks-only or disconnected account
+	// gets a 403 before any token is asked for, let alone a search sent.
+	// Picks use the Ticketmaster picker for everyone. Checked ahead of the
+	// empty-query shortcut so the answer does not depend on what was typed.
+	// The full user is what RequireUser already loaded; without it only the
+	// identity half can be checked, and AccessTokenFor below catches the rest.
+	full, hasFull := auth.FullUserFromContext(r.Context())
+	if u.SpotifyUserID == "" || (hasFull && !full.HasSpotifyCredential()) {
 		http.Error(w, "artist search needs a Spotify sign-in", http.StatusForbidden)
 		return
 	}
