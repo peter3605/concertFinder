@@ -120,7 +120,10 @@ struct SettingsView: View {
             Text("Notifications")
         } footer: {
             if me?.hasEmail != true {
-                Text("Sign in again to grant email access before turning on email notifications.")
+                // Signing in again cannot help: Spotify no longer returns the
+                // address. Confirming one is a web Settings step until the
+                // app has its own (CF-33).
+                Text("Add and confirm an email address in Settings on the ConcertFinder website to turn on email notifications.")
             } else {
                 Text("We only notify you about artists you follow here.")
             }

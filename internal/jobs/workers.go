@@ -919,6 +919,9 @@ func (w *JanitorWorker) Work(ctx context.Context, _ *river.Job[JanitorArgs]) err
 		// Single-use, so most rows vanish on redemption; these are the
 		// abandoned logins.
 		{"mobile_auth_codes", func(c context.Context) (int64, error) { return db.PruneExpiredMobileAuthCodes(c, w.Pool) }},
+		// Email sign-in mail (CF-33). Kept two days past sending, not past
+		// expiry, because the per-address and daily limits count these rows.
+		{"email_login_tokens", func(c context.Context) (int64, error) { return db.PruneEmailLoginTokens(c, w.Pool) }},
 		// Tokens APNs retired as permanently dead. The 30-day delay lets a
 		// device that reinstalls re-register onto its existing row instead
 		// of racing a delete.

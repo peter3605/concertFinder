@@ -152,6 +152,14 @@ type Config struct {
 	// in.
 	InviteRequired bool
 
+	// EmailLoginDailyCap is the most sign-in and verification mails the
+	// deployment sends in any 24 hours (EMAIL_LOGIN_DAILY_CAP, default 200).
+	// It protects SES sending reputation, which every user's digest shares:
+	// the per-IP and per-address limits bound one caller, this bounds all of
+	// them. Past it, /api/auth/email/start still answers 202 and sends
+	// nothing, and the refusal is logged. Zero or less disables the ceiling.
+	EmailLoginDailyCap int
+
 	// SpotifyMaxUsers caps how many accounts may hold a Spotify identity
 	// (SPOTIFY_MAX_USERS, default 5 -- the Development Mode allowlist).
 	// Only a new Spotify signup is refused; returning users never are, and
@@ -307,6 +315,7 @@ func Load() (*Config, error) {
 	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.InviteRequired = boolEnv("INVITE_REQUIRED", true)
+	c.EmailLoginDailyCap = intEnv("EMAIL_LOGIN_DAILY_CAP", 200)
 	c.SpotifyMaxUsers = intEnv("SPOTIFY_MAX_USERS", 5)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
