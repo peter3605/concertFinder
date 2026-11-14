@@ -16,7 +16,7 @@ Postgres, Caddy terminating TLS, secrets rendered from SSM Parameter Store at
 deploy time. `docs/aws-deploy.md` is the operator runbook.
 
 Sign-in is limited to accounts on the Spotify allowlist: the app is in
-Development Mode, and Extended Quota Mode has not been granted. Anyone else
+Development Mode, which Spotify does not lift for an app this size. Anyone else
 gets a 403 explaining why rather than a generic failure.
 
 A native iOS client lives in `ios/`. Its server-side half — bearer auth, the
@@ -152,8 +152,9 @@ fixed by scaling the infrastructure:
   shared ceiling surfaces as a dated `retry_after` rather than as upstream
   403s that look exactly like artists with no shows.
 - **Spotify** — the app runs in Development Mode, which caps authorized users.
-  Lifting it requires an approved Extended Quota Mode application, which has
-  not been started (design §9.1, §10.2).
+  Lifting it requires Extended Quota Mode, which Spotify grants only to
+  organizations with 250k monthly active users, so Spotify sign-in stays at
+  five accounts (`SPOTIFY_MAX_USERS`; `docs/public-path.md` §7).
 
 Raising either is a process with a third party, not an engineering task, so
 start early if the user count matters.

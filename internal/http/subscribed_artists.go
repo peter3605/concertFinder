@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -124,6 +125,15 @@ func (h *SubscribedArtistsHandler) SearchArtists(w http.ResponseWriter, r *http.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Spotify search is for people who signed in with Spotify, and nobody
+	// else (docs/public-path.md §7): a picks-only account gets a 403 before
+	// any token is asked for, let alone a search sent. Picks use the
+	// Ticketmaster picker for everyone. Checked ahead of the empty-query
+	// shortcut so the answer does not depend on what was typed.
+	if u.SpotifyUserID == "" {
+		http.Error(w, "artist search needs a Spotify sign-in", http.StatusForbidden)
+		return
+	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
 		writeJSON(w, map[string]any{"artists": []any{}})
@@ -138,6 +148,13 @@ func (h *SubscribedArtistsHandler) SearchArtists(w http.ResponseWriter, r *http.
 		return
 	}
 	token, err := h.Tokens.AccessTokenFor(r.Context(), u.ID)
+	if errors.Is(err, auth.ErrSpotifyDisconnected) {
+		// A Spotify account that disconnected (DELETE /me/spotify-connection)
+		// is in the same position as one that never connected. Not a 502:
+		// nothing upstream failed, and retrying will not help.
+		http.Error(w, "artist search needs a Spotify sign-in", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		slog.Error("search artists: token failed", "err", err, "user", u.ID)
 		http.Error(w, "spotify token error", http.StatusBadGateway)

@@ -102,7 +102,17 @@ func (s *TokenService) AccessTokenFor(ctx context.Context, userID uuid.UUID) (st
 	// not exactly NonceSize bytes, so the first background job or API call for
 	// a disconnected user would take down its goroutine. An ordinary,
 	// user-initiated state must not look like a crash.
-	if len(user.EncryptedRefreshToken) == 0 || len(user.RefreshTokenNonce) == 0 {
+	//
+	// An account with no Spotify identity at all (a picks-only or, later, an
+	// email or Apple sign-in) is refused here for the same reason and with the
+	// same error. Every Spotify API call needs the access token this function
+	// issues -- the login callback's own code exchange is the only other
+	// source, and it belongs to the Spotify sign-in itself -- so this is the
+	// one place that makes "no Spotify request on behalf of a user who never
+	// signed in with Spotify" structural rather than a check each caller has
+	// to remember (docs/public-path.md §7; TestNoSpotifyTokenForNonSpotifyUser
+	// and TestOnlyTokenServiceIssuesSpotifyTokens).
+	if user.SpotifyUserID == "" || len(user.EncryptedRefreshToken) == 0 || len(user.RefreshTokenNonce) == 0 {
 		return "", ErrSpotifyDisconnected
 	}
 	rt, err := DecryptToken(s.EncKey, user.EncryptedRefreshToken, user.RefreshTokenNonce)

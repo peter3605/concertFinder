@@ -159,12 +159,23 @@ func TestInviteGateDefaultsOn(t *testing.T) {
 
 func TestInviteGateCanBeTurnedOff(t *testing.T) {
 	// Turning it off has to be possible and has to take an explicit value --
-	// this is the switch an operator flips once Extended Quota Mode lands and
-	// the account cap has room.
+	// this is the switch an operator flips once the account cap has room.
 	for _, off := range []string{"0", "false", "FALSE", "no", "off"} {
 		t.Setenv("INVITE_REQUIRED", off)
 		if cfg := loadDefaults(t); cfg.InviteRequired {
 			t.Errorf("INVITE_REQUIRED=%q left the gate on", off)
+		}
+	}
+}
+
+// SPOTIFY_MAX_USERS defaults to Spotify's Development Mode allowlist size,
+// and zero is a real cap ("no new Spotify accounts") rather than "unlimited".
+// A negative or unparseable value keeps the default instead of disabling it.
+func TestSpotifyMaxUsers(t *testing.T) {
+	for v, want := range map[string]int{"": 5, "3": 3, "0": 0, "-1": 5, "lots": 5} {
+		t.Setenv("SPOTIFY_MAX_USERS", v)
+		if got := loadDefaults(t).SpotifyMaxUsers; got != want {
+			t.Errorf("SPOTIFY_MAX_USERS=%q -> %d, want %d", v, got, want)
 		}
 	}
 }

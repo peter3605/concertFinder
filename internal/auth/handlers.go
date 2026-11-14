@@ -51,6 +51,11 @@ type Deps struct {
 	// config.Config.InviteRequired for why it defaults on. Logins by
 	// existing users ignore it entirely.
 	InviteRequired bool
+	// MaxSpotifyUsers caps how many Spotify accounts may exist
+	// (SPOTIFY_MAX_USERS). Like InviteRequired it only ever refuses a
+	// signup. Callers must set it: zero is a real cap ("no new Spotify
+	// accounts"), and db.NoSpotifyCap disables it.
+	MaxSpotifyUsers int
 	// OnLoginSuccess is invoked after a successful callback + session
 	// creation. Used by main.go to enqueue a pre-warm concert scan for the
 	// new session's user so the first /me/concerts request finds a snapshot.
@@ -245,8 +250,20 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		EncryptedRefreshToken: ct,
 		RefreshTokenNonce:     nonce,
 		Email:                 me.Email,
-	}, hs.InviteCode, d.InviteRequired)
+	}, hs.InviteCode, d.InviteRequired, d.MaxSpotifyUsers)
 	switch {
+	case errors.Is(err, db.ErrSpotifyFull):
+		// Checked before the invite, so a code this person holds is still
+		// unspent. Like the other refusals it names nobody: no user row was
+		// written, so there is nothing of theirs to log.
+		slog.Info("signup refused: spotify user cap reached")
+		http.Error(w,
+			"ConcertFinder can't take any more Spotify accounts right now. "+
+				"If you have an invite code it has not been used, so you can still sign up another way. "+
+				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
+				"existing accounts are never affected.",
+			http.StatusForbidden)
+		return
 	case errors.Is(err, db.ErrInviteRequired):
 		// A refusal, not a fault, and the same shape as the Development Mode
 		// branch above: the person did nothing wrong and a retry will not

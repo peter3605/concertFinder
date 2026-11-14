@@ -145,11 +145,21 @@ type Config struct {
 	// at startup, because a gate nobody can see is the other way this goes
 	// wrong.
 	//
-	// Until Spotify grants Extended Quota Mode their Development Mode
-	// allowlist is a second, stricter gate sitting in front of this one.
-	// This exists so that the day that gate is lifted is not also the day
-	// admission becomes unbounded.
+	// Spotify's Development Mode allowlist is a second, stricter gate in
+	// front of this one for Spotify sign-ins, and it is permanent: Extended
+	// Quota Mode is open only to organizations with 250k monthly active
+	// users (docs/public-path.md). This gate is what bounds every other way
+	// in.
 	InviteRequired bool
+
+	// SpotifyMaxUsers caps how many accounts may hold a Spotify identity
+	// (SPOTIFY_MAX_USERS, default 5 -- the Development Mode allowlist).
+	// Only a new Spotify signup is refused; returning users never are, and
+	// the refusal happens before any invite code is spent. Zero is a real
+	// cap meaning "no new Spotify accounts". It does not replace the
+	// Spotify dashboard, which remains the real gate; it makes the refusal
+	// ours, with a message, instead of Spotify's.
+	SpotifyMaxUsers int
 
 	// ConcertCacheTTLHours is how long cached per-artist upstream responses
 	// stay trusted. 0 = package default (12h). Longer means fewer quota-
@@ -297,6 +307,7 @@ func Load() (*Config, error) {
 	c.RateCapTMAccountDaily = intEnv("RATE_CAP_TM_ACCOUNT_DAILY", 5000)
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.InviteRequired = boolEnv("INVITE_REQUIRED", true)
+	c.SpotifyMaxUsers = intEnv("SPOTIFY_MAX_USERS", 5)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
 
