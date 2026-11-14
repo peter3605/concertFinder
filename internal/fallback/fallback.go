@@ -12,7 +12,6 @@ import (
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/geocoding"
 	"github.com/peterho/concertfinder/internal/rate"
-	"github.com/peterho/concertfinder/internal/spotify"
 )
 
 // URLResolver finds an artist's official homepage URL by name. Implemented
@@ -45,7 +44,7 @@ func isCtxErr(err error) bool {
 
 // FindEvents returns concerts for an artist Ticketmaster missed. loc is the
 // user's location; results are haversine-filtered to it.
-func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location) []concerts.Concert {
+func (c *Chain) FindEvents(ctx context.Context, artist concerts.Target, loc concerts.Location) []concerts.Concert {
 	// Tier A — Songkick. (The "cached official URL" step from earlier
 	// designs collapsed into Tier B once the URL resolver got its own
 	// two-tier cache — Tier B is now cache-first-then-fetch by construction.)
@@ -97,7 +96,7 @@ func (c *Chain) FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc
 // per-artist-ID URL cache in artist_resolutions — Tier A.1 for the "we
 // already know this artist's site" case now hits mb_url_cache via
 // c.Resolver instead.
-func (c *Chain) tryOfficialSite(ctx context.Context, artist spotify.ScoredArtist, loc concerts.Location, officialURL string) []concerts.Concert {
+func (c *Chain) tryOfficialSite(ctx context.Context, artist concerts.Target, loc concerts.Location, officialURL string) []concerts.Concert {
 	if officialURL == "" {
 		return nil
 	}

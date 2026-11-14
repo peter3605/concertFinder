@@ -15,7 +15,6 @@ import (
 
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/rate"
-	"github.com/peterho/concertfinder/internal/spotify"
 	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
@@ -45,7 +44,7 @@ type Location struct {
 // Implemented by internal/fallback.Chain. Nil-safe: if unset, the fallback
 // stage is skipped entirely.
 type Fallbacker interface {
-	FindEvents(ctx context.Context, artist spotify.ScoredArtist, loc Location) []Concert
+	FindEvents(ctx context.Context, artist Target, loc Location) []Concert
 }
 
 // SearchDeps holds the wired-up clients + DB pool for the fan-out.
@@ -82,7 +81,7 @@ type SearchDeps struct {
 // DefaultCacheTTL is how long a cached per-artist upstream response stays
 // trusted. Design §7.3 originally said 4 hours, which turned out to be the
 // binding constraint on coverage rather than a freshness choice: a scan
-// covers MaxScoredArtists (200) artists, so once the cache lapses a full
+// covers spotify.MaxScoredArtists (200) artists, so once the cache lapses a full
 // scan needs ~200 fresh Ticketmaster calls against a 250/day per-user cap.
 // At 4h the cache expired several times a day and every expiry cost a fresh
 // call, so scans routinely ran out of quota partway and returned a fraction
@@ -264,7 +263,7 @@ func (e *IncompleteError) Unwrap() error { return e.Cause }
 // A non-nil error does NOT mean the returned slice is unusable: on an
 // *IncompleteError the results gathered so far come back too. Only a caller
 // that needs completeness (the snapshot writer) should act on the error.
-func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, loc Location) ([]Concert, error) {
+func Search(ctx context.Context, d SearchDeps, artists []Target, loc Location) ([]Concert, error) {
 	if d.Parallelism <= 0 {
 		d.Parallelism = 10
 	}
@@ -274,7 +273,7 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 
 	// Drop unusable entries up front so the skipped/total accounting below
 	// describes real work rather than input noise.
-	usable := make([]spotify.ScoredArtist, 0, len(artists))
+	usable := make([]Target, 0, len(artists))
 	for _, a := range artists {
 		if a.ID == "" || a.Name == "" {
 			continue
@@ -405,14 +404,26 @@ func Search(ctx context.Context, d SearchDeps, artists []spotify.ScoredArtist, l
 // fallbackCtx is the scan-wide fallback deadline (see SearchDeps.FallbackBudget);
 // it is a child of ctx, so it is never the longer-lived of the two.
 // fs accumulates what the escalation did for this artist; see fallbackStats.
-func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredArtist, loc Location, fs *fallbackStats) ([]Concert, error) {
+func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a Target, loc Location, fs *fallbackStats) ([]Concert, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	resolution, hit, err := db.GetArtistResolution(ctx, d.Pool, a.ID)
-	if err != nil {
-		slog.Warn("resolution lookup failed", "artist", a.Name, "err", err)
+	// A target that already names its attraction needs no resolution, and
+	// artist_resolutions (keyed by profile artist ID) has nothing to say
+	// about it.
+	var (
+		resolution db.ArtistResolution
+		hit        bool
+		err        error
+	)
+	if a.AttractionID != "" {
+		resolution, hit = db.ArtistResolution{TicketmasterAttractionID: a.AttractionID}, true
+	} else {
+		resolution, hit, err = db.GetArtistResolution(ctx, d.Pool, a.ID)
+		if err != nil {
+			slog.Warn("resolution lookup failed", "artist", a.Name, "err", err)
+		}
 	}
 
 	// Resolve against TM when we've never looked this artist up, or when a
@@ -494,7 +505,7 @@ func searchOne(ctx, fallbackCtx context.Context, d SearchDeps, a spotify.ScoredA
 			fs.produced.Add(1)
 		}
 		// Fallback emits concerts with only artist name/ID; attach genres from
-		// the ScoredArtist so downstream filters still work.
+		// the Target so downstream filters still work.
 		for i := range fb {
 			if len(fb[i].Artist.Genres) == 0 && len(a.Genres) > 0 {
 				fb[i].Artist.Genres = a.Genres
@@ -589,13 +600,13 @@ func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID str
 	return evs, nil
 }
 
-func artistRefFromScored(a spotify.ScoredArtist) ArtistRef {
+func artistRefFromTarget(a Target) ArtistRef {
 	return ArtistRef{ID: a.ID, Name: a.Name, Genres: a.Genres}
 }
 
-func tmEventToConcert(e ticketmaster.Event, a spotify.ScoredArtist) Concert {
+func tmEventToConcert(e ticketmaster.Event, a Target) Concert {
 	c := Concert{
-		Artist:    artistRefFromScored(a),
+		Artist:    artistRefFromTarget(a),
 		Date:      e.Start,
 		LocalDate: e.LocalDate,
 		Venue:     e.Venue.Name,
