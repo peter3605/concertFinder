@@ -16,6 +16,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/peterho/concertfinder/internal/affinity"
+	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/email"
@@ -114,16 +115,25 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if err != nil {
 		return err
 	}
-	artists, _, _, err := w.Affinity.LoadOrCompute(ctx, affinity.User{ID: user.ID, SpotifyUserID: user.SpotifyUserID})
+	targets, err := w.targetsFor(ctx, user)
 	if err != nil {
 		return err
+	}
+	if len(targets) == 0 {
+		// No Spotify identity and no picks: there is nothing to search for,
+		// and no snapshot is written, because an empty complete snapshot would
+		// read as "your area is quiet" for the full staleness window. The SWR
+		// handler answers needs_picks for this user and does not enqueue, so
+		// this is only reachable from a job queued before the picks went.
+		slog.Info("scan_concerts: nothing to scan", "user", user.ID)
+		return nil
 	}
 
 	// Take out this scan's quota up front (design §8.3): one upsert per
 	// source instead of one per call, sized to the workload. Whatever we
 	// don't spend goes back at the end. Release uses a detached context so
 	// an expired scan budget can't leave the block charged.
-	reservations := w.Ledger.ReserveAll(ctx, user.ID, scanQuotaFor(len(artists)))
+	reservations := w.Ledger.ReserveAll(ctx, user.ID, scanQuotaFor(targets))
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer releaseCancel()
@@ -141,7 +151,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 
 	// A non-nil error here still carries usable partial results; see
 	// concerts.IncompleteError.
-	found, searchErr := concerts.Search(ctx, deps, profileTargets(artists), loc)
+	found, searchErr := concerts.Search(ctx, deps, targets, loc)
 	var incomplete *concerts.IncompleteError
 	switch {
 	case searchErr == nil:
@@ -338,12 +348,112 @@ func nextQuotaReset(now time.Time) time.Time {
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 }
 
-// scanQuotaFor sizes the per-source reservation for a scan. Each artist can
-// cost at most a resolution call plus an events call against a given source,
-// so 2x the artist count is a true upper bound; the reservation hands back
-// whatever cache hits mean we never spend.
-func scanQuotaFor(artists int) int {
-	return artists * 2
+// scanQuotaFor sizes the per-source reservation for a scan. A profile artist
+// can cost a resolution call plus an events call, so it reserves two; a pick
+// already holds its attraction ID and costs only the events call, so it
+// reserves one (docs/public-path.md §2.1). Reserving two for a pick would not
+// overspend -- the block is handed back -- but it would hold twice the pick's
+// cost against the user's daily cap and the shared account ceiling for the
+// length of the scan, which is exactly when other users' scans are drawing on
+// it. The reservation hands back whatever cache hits mean we never spend.
+func scanQuotaFor(targets []concerts.Target) int {
+	n := 0
+	for _, t := range targets {
+		if t.AttractionID != "" {
+			n++
+		} else {
+			n += 2
+		}
+	}
+	return n
+}
+
+// targetsFor builds the list a scan searches: the user's picks first, then
+// their Spotify affinity profile, to spotify.MaxScoredArtists in all
+// (docs/public-path.md §3.5, §5).
+//
+// An account with no Spotify identity never reaches the affinity service at
+// all. That is what lets a picks-only scan run with no Spotify client wired
+// in, and it is the property the CF-30 test pins: such a user's scan requests
+// no Spotify URL.
+//
+// A Spotify user whose connection was revoked (DELETE /me/spotify-connection)
+// keeps their picks, so a disconnected user with picks gets a picks-only scan
+// instead of a failed one. Any other affinity error still fails the scan: a
+// transient Spotify failure must not quietly persist a complete snapshot
+// missing every profile artist, which would then be trusted for the full
+// staleness window.
+func (w *ScanConcertsWorker) targetsFor(ctx context.Context, user db.User) ([]concerts.Target, error) {
+	picks, err := db.ListArtistPicks(ctx, w.Pool, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load picks: %w", err)
+	}
+	var profile []spotify.ScoredArtist
+	if user.SpotifyUserID != "" && w.Affinity != nil {
+		artists, _, _, err := w.Affinity.LoadOrCompute(ctx, affinity.User{ID: user.ID, SpotifyUserID: user.SpotifyUserID})
+		switch {
+		case err == nil:
+			profile = artists
+		case errors.Is(err, auth.ErrSpotifyDisconnected) && len(picks) > 0:
+			slog.Info("scan_concerts: spotify disconnected, scanning picks only", "user", user.ID, "picks", len(picks))
+		default:
+			return nil, err
+		}
+	}
+	return mergeTargets(pickTargets(picks), profileTargets(profile), spotify.MaxScoredArtists), nil
+}
+
+// pickTargets turns hand picks into concert-search targets. Each carries its
+// attraction ID, which skips artist_resolutions and name resolution in
+// concerts.Search and keeps it out of the fallback chain, and a "tm:" ID,
+// which is the identity the viewer's snapshot records and their bell
+// subscribes to. The genre goes on the Target because tmEventToConcert copies
+// Target.Genres onto every Concert it produces, and from there into this
+// user's artist refs (CF-28) -- never into the shared concerts row.
+func pickTargets(picks []db.ArtistPick) []concerts.Target {
+	out := make([]concerts.Target, 0, len(picks))
+	for _, p := range picks {
+		t := concerts.Target{
+			ID:           PickArtistID(p.AttractionID),
+			Name:         p.Name,
+			AttractionID: p.AttractionID,
+		}
+		if p.Genre != "" {
+			t.Genres = []string{p.Genre}
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// PickArtistID is the viewer-facing artist ID of a pick. Exported because the
+// feed's reason line and the subscribe control must spell it identically.
+func PickArtistID(attractionID string) string { return "tm:" + attractionID }
+
+// mergeTargets puts picks first and fills from the profile up to limit,
+// dropping a profile artist whose name matches a pick: the pick already
+// searches that artist by ID for one call, where the profile entry would
+// spend up to two on the same shows.
+func mergeTargets(picks, profile []concerts.Target, limit int) []concerts.Target {
+	out := make([]concerts.Target, 0, min(len(picks)+len(profile), limit))
+	picked := make(map[string]struct{}, len(picks))
+	for _, p := range picks {
+		if len(out) == limit {
+			return out
+		}
+		picked[concerts.Normalize(p.Name)] = struct{}{}
+		out = append(out, p)
+	}
+	for _, a := range profile {
+		if len(out) == limit {
+			break
+		}
+		if _, dup := picked[concerts.Normalize(a.Name)]; dup {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // enqueueNotifications picks the subset of just-computed concerts that
@@ -825,11 +935,18 @@ func (w *FanoutScanConcertsWorker) Work(ctx context.Context, _ *river.Job[Fanout
 	// LEFT JOIN so users without a saved user_locations row still get a
 	// refresh — using the server-wide fallback location. Missing locations
 	// otherwise mean brand-new users never get a nightly snapshot.
+	//
+	// A user with neither a Spotify identity nor a pick has nothing to scan
+	// (CF-30), so they are not queued: each such job would take a worker slot
+	// to discover that.
 	const q = `
 SELECT DISTINCT s.user_id, ul.latitude, ul.longitude, ul.radius_miles
 FROM sessions s
+JOIN users u ON u.id = s.user_id
 LEFT JOIN user_locations ul ON ul.user_id = s.user_id
 WHERE s.last_seen_at > now() - interval '14 days'
+  AND (u.spotify_user_id IS NOT NULL
+       OR EXISTS (SELECT 1 FROM user_artist_picks p WHERE p.user_id = s.user_id))
 `
 	rows, err := w.Pool.Query(ctx, q)
 	if err != nil {

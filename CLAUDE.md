@@ -404,6 +404,29 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   past 0024 now** — the binary before it reads identity from exactly those
   fields, so on stripped rows every bell renders off and every alert goes
   unmatched, with no error. Roll back to a commit at or after 0024.
+- **Artist picks (CF-30) are searched by attraction ID, and four things about
+  that are load-bearing.** `user_artist_picks` holds Ticketmaster attraction
+  IDs, capped at `db.MaxArtistPicks` (30) inside the insert. A pick becomes a
+  `concerts.Target{ID: "tm:<id>", AttractionID: <id>}`, which skips
+  `artist_resolutions` (keyed by Spotify ID) and name resolution, reserves
+  **one** permit rather than two (`jobs.scanQuotaFor`), and never escalates to
+  the fallback chain — gated on `AttractionID` in `searchOne`, not on a low
+  Score, since `MinFallbackScore` is configurable and zero lets a zero score
+  through. **A pick's name is Ticketmaster's, never the client's:** it becomes
+  `Artist.Name`, which is part of the shared `dedup_key`, so `POST /me/picks`
+  accepts only `attraction_id` and takes the name from `picks.Service.Lookup`
+  (a recent search result, else one charged by-ID call). **A user with no
+  Spotify identity and no picks must never enqueue:** a missing snapshot reads
+  as stale, so the SWR read answers `needs_picks: true` (omitempty, so Spotify
+  users' responses and the iOS goldens are unchanged), refresh answers 409, and
+  the fanout's query skips them. And `ScanConcertsWorker` only calls the
+  affinity service when `SpotifyUserID` is set — a picks-only scan runs with no
+  Spotify client at all, and a revoked connection (`ErrSpotifyDisconnected`)
+  with picks degrades to picks only, while any *other* affinity error still
+  fails the scan rather than persisting a complete snapshot missing the whole
+  profile. Tests that run a real scan use `testdb.Isolated`, a database of
+  their own, because cached `tm:` rows break `TestScanCachedConcerts` in the
+  shared one.
 - **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
 - **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
 

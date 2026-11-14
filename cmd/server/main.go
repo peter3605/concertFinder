@@ -34,6 +34,7 @@ import (
 	webhttp "github.com/peterho/concertfinder/internal/http"
 	"github.com/peterho/concertfinder/internal/http/spa"
 	"github.com/peterho/concertfinder/internal/jobs"
+	"github.com/peterho/concertfinder/internal/picks"
 	"github.com/peterho/concertfinder/internal/push"
 	"github.com/peterho/concertfinder/internal/rate"
 	"github.com/peterho/concertfinder/internal/spotify"
@@ -164,6 +165,7 @@ func main() {
 		savedH       *webhttp.SavedConcertsHandler
 		accountH     *webhttp.AccountHandler
 		subscribedH  *webhttp.SubscribedArtistsHandler
+		picksH       *webhttp.ArtistPicksHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
 		unsubscribeH *webhttp.UnsubscribeHandler
 		devicesH     *webhttp.DevicesHandler
@@ -577,6 +579,14 @@ func main() {
 			Spotify: spotifyClient,
 			Tokens:  tokenSvc,
 		}
+		// One picks.Service for the process: its query cache and its record of
+		// attractions already shown are what keep a pick from costing a
+		// second Ticketmaster call.
+		picksH = &webhttp.ArtistPicksHandler{
+			Pool:   pool,
+			Picks:  &picks.Service{TM: tmClient},
+			Ledger: rateLedger,
+		}
 
 		// Wire the login-success hook so new sessions trigger a pre-warm
 		// snapshot job. Uses a detached background context so a browser
@@ -765,6 +775,14 @@ func main() {
 			r.Delete("/subscribed-artists/{artistID}", subscribedH.Delete)
 			// Mounted inside RequireUser so the limiter has a user to key on.
 			r.With(artistSearchLimiter.Middleware).Get("/artists/search", subscribedH.SearchArtists)
+			// Hand-picked artists (CF-30). The search spends Ticketmaster quota
+			// rather than Spotify's, and is charged to the caller per call, but
+			// gets the same per-user limiter: the ledger bounds a day, this
+			// bounds a burst.
+			r.Get("/picks", picksH.List)
+			r.Post("/picks", picksH.Add)
+			r.Delete("/picks/{attractionID}", picksH.Delete)
+			r.With(artistSearchLimiter.Middleware).Get("/picks/search", picksH.Search)
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)

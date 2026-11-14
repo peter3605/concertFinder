@@ -19,6 +19,7 @@ import (
 	"github.com/peterho/concertfinder/internal/db"
 	"github.com/peterho/concertfinder/internal/email"
 	"github.com/peterho/concertfinder/internal/jobs"
+	"github.com/peterho/concertfinder/internal/testdb"
 )
 
 // CF-28's acceptance test: two viewers whose scans produce the same dedup_key
@@ -33,12 +34,16 @@ import (
 // a `tm:` ID their subscriptions do not hold, so it renders off and never
 // fires.
 //
-// The manual-picks scan does not exist yet (CF-30 builds it). Its results are
-// therefore stated here and written through the real persistence path,
-// jobs.PersistScanResults, which is the layer this story changes and the one
-// both kinds of scan will share. Every read is the production one: the
+// The manual viewer's results come from the real picks scan (CF-30):
+// ScanConcertsWorker over a stub Ticketmaster, with no Spotify client wired in
+// at all. The Spotify viewer's results are stated and written through
+// jobs.PersistScanResults, the persistence step both scans share, because a
+// real profile scan needs Spotify. Every read is the production one: the
 // /me/concerts and /me/saved-concerts handlers behind the real session
 // middleware, and the digest and instant-notify workers.
+//
+// Its own database (testdb.Isolated), because the real scan caches tm: rows
+// that internal/db's TestScanCachedConcerts would count.
 //
 // Both orders, because last-writer-wins means a test of one order proves only
 // that the second writer sees itself.
@@ -68,7 +73,7 @@ func TestSharedConcertRowLeaksNoArtistIdentityBetweenViewers(t *testing.T) {
 }
 
 func runCrossViewer(t *testing.T, spotifyFirst bool) {
-	pool := adminTestPool(t)
+	pool := testdb.Isolated(t, "../../migrations")
 	ctx := context.Background()
 
 	run := uuid.NewString()[:8]
@@ -124,14 +129,38 @@ func runCrossViewer(t *testing.T, spotifyFirst bool) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM concerts WHERE dedup_key = $1`, key)
 	})
 
+	// The manual viewer picked the artist on Ticketmaster; the stub lists the
+	// same show the Spotify viewer's scan found.
+	attraction := strings.TrimPrefix(mn.artistID, "tm:")
+	if ok, err := db.AddArtistPick(ctx, pool, mn.userID, db.ArtistPick{
+		AttractionID: attraction, Name: "Phoebe Bridgers", Genre: mn.genres[0],
+	}); err != nil || !ok {
+		t.Fatalf("manual pick: ok=%v err=%v", ok, err)
+	}
+	stub := newTMStub(t, map[string][]tmShow{attraction: {{
+		artist: "Phoebe Bridgers", venue: venue, city: "Washington",
+		localDate: start.Format("2006-01-02"), lat: loc.Latitude, lng: loc.Longitude,
+	}}})
+	manualScan := picksScanWorker(pool, stub.client(), nil)
+
 	order := []*viewer{mn, sp}
 	if spotifyFirst {
 		order = []*viewer{sp, mn}
 	}
 	for _, v := range order {
+		if v == mn {
+			runScan(t, manualScan, mn.userID, loc)
+			continue
+		}
 		if err := jobs.PersistScanResults(ctx, pool, v.userID, loc, []concerts.Concert{show(v)}, true, nil); err != nil {
 			t.Fatalf("%s scan: persist: %v", v.label, err)
 		}
+	}
+	// The collision is the premise of the whole test, so check the real scan
+	// actually produced it rather than assuming the stub lined up.
+	if snap, hit, err := db.GetConcertSnapshot(ctx, pool, mn.userID, jobs.LocationKey(loc)); err != nil || !hit ||
+		len(snap.DedupKeys) != 1 || snap.DedupKeys[0] != key {
+		t.Fatalf("manual scan did not land on the shared dedup_key: hit=%v err=%v keys=%v", hit, err, snap.DedupKeys)
 	}
 
 	// The shared row holds what the event source said, and nobody's identity.
