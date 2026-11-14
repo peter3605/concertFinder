@@ -233,6 +233,10 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "spotify /me failed", http.StatusBadGateway)
 		return
 	}
+	// Answers docs/public-path.md section 4.4 -- does Spotify still return
+	// the address at all? -- from the next real sign-in. A boolean, never
+	// the value.
+	slog.Info("spotify login profile", "spotify_me_email_present", me.Email != "")
 
 	ct, nonce, err := EncryptToken(d.EncKey, []byte(tok.RefreshToken))
 	if err != nil {

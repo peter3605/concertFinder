@@ -168,6 +168,7 @@ func main() {
 		picksH       *webhttp.ArtistPicksHandler
 		genresH      *webhttp.GenrePicksHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
+		emailLoginH  *auth.EmailLogin
 		unsubscribeH *webhttp.UnsubscribeHandler
 		devicesH     *webhttp.DevicesHandler
 		riverClient  *river.Client[pgx.Tx]
@@ -419,6 +420,18 @@ func main() {
 		signingKey = auth.SigningKey(cfg.SigningKey, encKey)
 		unsubscribeH = &webhttp.UnsubscribeHandler{Pool: pool, Secret: signingKey}
 		emailPrefsH = &webhttp.EmailPrefsHandler{Pool: pool}
+		// Email sign-in links and address confirmation (CF-33). Same sender
+		// as the digests, so in SES sandbox it reaches only the verified
+		// recipient, like everything else.
+		emailLoginH = &auth.EmailLogin{
+			Pool:           pool,
+			Sender:         emailSender,
+			SiteBaseURL:    cfg.SiteBaseURL,
+			CookieDomain:   cfg.SessionCookieDomain,
+			PostLoginURL:   "/",
+			InviteRequired: cfg.InviteRequired,
+			DailyCap:       cfg.EmailLoginDailyCap,
+		}
 
 		// Background jobs live in the same process — no separate worker
 		// binary. See docs/design.md §10.2 (option 2 rationale in commit).
@@ -622,6 +635,9 @@ func main() {
 				logger.Warn("prewarm scan enqueue failed", "err", err, "user", userID)
 			}
 		}
+		// An email sign-in is a login like any other; the same pre-warm
+		// rules apply, and LoginPrewarm skips accounts with no Spotify.
+		emailLoginH.OnLoginSuccess = authDeps.OnLoginSuccess
 	}
 
 	r := chi.NewRouter()
@@ -731,6 +747,9 @@ func main() {
 		api.Route("/auth", func(r chi.Router) {
 			r.Use(authLimiter.Middleware)
 			auth.Mount(r, authDeps)
+			// /email/start carries its own, tighter per-IP bucket inside
+			// this one, since every call can send a mail.
+			emailLoginH.MountEmailAuth(r)
 		})
 		// Unauthenticated: HMAC-signed token in the URL is proof of identity
 		// for one-click unsubscribe from a mobile mail client with no session.
@@ -788,6 +807,9 @@ func main() {
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)
+			// Confirm an address (CF-33): POST /me/email sends the link and
+			// code, POST /me/email/verify takes the code.
+			emailLoginH.MountEmailMe(r)
 			r.Delete("/account", accountH.Delete)
 			// Disconnect Spotify without deleting the account. Guideline
 			// 5.1.1(v) asks for a revoke mechanism inside the app, and
@@ -820,6 +842,12 @@ func main() {
 	// no extension — falling through to the SPA would serve HTML with a 200
 	// and iOS would simply decline to associate the domain, silently.
 	r.Get("/.well-known/apple-app-site-association", (&webhttp.AASAHandler{AppID: cfg.IOSAppID}).Get)
+	// Where an email sign-in link lands (CF-33). Registered before the SPA
+	// catch-all. GET renders a confirmation page and consumes nothing: mail
+	// security gateways fetch every URL in a message. Its own limiter, as an
+	// unauthenticated page that reads the database.
+	emailPageLimiter := auth.NewIPRateLimit(2, 20)
+	r.With(emailPageLimiter.Middleware).Get(auth.EmailLinkPath, emailLoginH.HandleConfirmPage)
 
 	spaHandler := spa.Handler()
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) { spaHandler.ServeHTTP(w, r) })

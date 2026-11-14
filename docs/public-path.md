@@ -340,6 +340,12 @@ library, so no JWT dependency is needed for the client secret.
 
 ### 4.2 Email sign-in links
 
+**Built in CF-33** (migration 0028, `internal/auth/email_login.go`). Routes:
+`POST /api/auth/email/start`, `GET /app/auth/email` (confirmation page),
+`POST /api/auth/email/consume` (form, or JSON with the app's verifier),
+`POST /api/auth/email/code`, and for signed-in users `POST /api/me/email` and
+`POST /api/me/email/verify`. No iOS client work yet.
+
 ```
 email_login_tokens(token_hash, code_hash, email, purpose, user_id, invite_code,
                    app_challenge, attempts, expires_at, consumed_at)
