@@ -287,14 +287,18 @@ notification, it costs each tester every future one.
    unrestricted environment option — not Sandbox.
 2. **Download the `.p8` immediately.** Apple allows exactly one download.
 3. Note the new Key ID.
-4. In `infra/terraform.tfvars`:
-   ```hcl
-   apns_key_id      = "<new key id>"
-   apns_environment = "sandbox,production"
+4. Write the two plain parameters in the apps account. They were `String`
+   parameters on the old box; confirm with `aws ssm get-parameter --name
+   /concertfinder/APNS_KEY_ID` first and keep whatever type it already has:
+   ```bash
+   export AWS_PROFILE=apps-admin AWS_REGION=us-east-1
+   aws ssm put-parameter --name /concertfinder/APNS_KEY_ID --type String --overwrite --value '<new key id>'
+   aws ssm put-parameter --name /concertfinder/APNS_ENVIRONMENT --type String --overwrite --value 'sandbox,production'
    ```
-5. `cd infra && terraform apply` — then, **in the same sitting**,
-   `./scripts/set-secrets.sh` and answer `f` at the `APNS_P8_KEY` prompt with
-   the path to the new `.p8`.
+   (History: on the old box this was an edit to `infra/terraform.tfvars` and a
+   `terraform apply`; `infra/` was deleted in CF-B29.)
+5. **In the same sitting**, `./scripts/set-secrets.sh` and answer `f` at the
+   `APNS_P8_KEY` prompt with the path to the new `.p8`.
 6. `gh workflow run image.yml --ref main`
 7. Revoke the old key once push is confirmed working on a real device.
 

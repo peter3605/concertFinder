@@ -61,7 +61,7 @@ not work.
 ```bash
 go build ./... && go vet ./... && go test ./...
 npm --prefix web run lint && npm --prefix web run build
-./scripts/check-deploy-config.sh      # after touching Caddyfile or either compose file
+./scripts/check-deploy-config.sh      # after touching a compose file or a script the box runs
 ```
 
 ## Layout
@@ -113,7 +113,6 @@ Secrets and variables → Actions → *Variables*) drive it:
 | [`docs/shared-box.md`](docs/shared-box.md) | How concertFinder runs and deploys on the shared apps box. |
 | [`docs/aws-deploy.md`](docs/aws-deploy.md) | History: the retired old box (EC2 + Neon). Kept for its incident notes; describes nothing that runs. |
 | [`docs/launch-runbook.md`](docs/launch-runbook.md) | The human tasks left before launch, in order, with the commands. Backups, key rotation, the Spotify quota application, APNs, App Store. |
-| [`infra/README.md`](infra/README.md) | History: Terraform for the retired old box. Infrastructure now lives in apps-infra. |
 | [`CLAUDE.md`](CLAUDE.md) | Constraints that are easy to violate, and why. Worth reading before changing serving, jobs, or quota code. |
 
 Where `CLAUDE.md` and `docs/design.md` disagree about what the code does

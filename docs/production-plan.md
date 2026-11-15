@@ -2,6 +2,13 @@
 
 Derived from the full-stack review of 2026-09-01, written against `63ed196`.
 
+> **History.** This plan was worked against the old box, which was retired on
+> 2026-11-13; its files (`infra/`, `docker-compose.prod.yml`, the `Caddyfile`,
+> `backup-db.sh`, `prune-images.sh`, `watchdog.sh`) were deleted in CF-B29.
+> References to them below describe that box, not anything that runs. Remaining
+> work is tracked in Launch Control; production is described in
+> [`shared-box.md`](shared-box.md).
+
 **This file is the working state of the implementation run.** Tick boxes as you
 finish, record any judgement call under *Decisions taken*, and append one line
 per session under *Progress log*. A session that starts with a cleared context

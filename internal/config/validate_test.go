@@ -106,12 +106,10 @@ func TestFullyLocalConfigIsAllowed(t *testing.T) {
 	}
 }
 
-// SITE_DOMAIN is Caddy's, not the binary's, but nothing else can check it:
-// scripts/check-deploy-config.sh validates the Caddyfile against a synthetic
-// .env it writes itself, so it proves the wiring and never sees the real file.
-// Empty, `{$SITE_DOMAIN} {` collapses into a global options block and Caddy
-// dies with "unrecognized global option: encode" — a crash loop next to a
-// perfectly healthy api container.
+// SITE_DOMAIN is not the binary's own variable, but it is still required in
+// production and kept equal to SITE_BASE_URL's host, so the two cannot drift
+// apart in SSM (see config.Validate). Nothing but the api container ever sees
+// the real .env; the CI preflight writes a synthetic one.
 func TestSiteDomainRequiredInProduction(t *testing.T) {
 	c := prodConfig()
 	c.SiteDomain = ""

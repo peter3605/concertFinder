@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Validate the deployment config that nothing else exercises.
 #
-# docker-compose.prod.yml and the Caddyfile are the only files in this repo
-# that never run during local development — `docker-compose.yml` has no Caddy
-# service, and `go run` doesn't read either one. Three separate defects have
-# shipped in them as a result, each presenting identically: Caddy exits on a
-# config error, `restart: unless-stopped` turns that into a crash loop, and the
-# api container beside it looks perfectly healthy the whole time.
+# docker-compose.box.yml and the scripts the shared box runs (deploy-box.sh,
+# render-env.sh, verify-deploy.sh) never execute during local development:
+# `docker-compose.yml` is a different stack, and `go run` reads none of them.
+# Every deploy defect this repo has shipped was in a file of that kind, and
+# each presented as a failed or silently wrong deploy rather than as an error
+# anyone read. This is the only place they are exercised before production.
 #
-#   1. `header_up` written at site level instead of inside `reverse_proxy`.
-#   2. No `env_file` on the caddy service, so SITE_DOMAIN was empty inside the
-#      container and `{$SITE_DOMAIN} {` collapsed into a global options block.
-#   3. (the general case) any Caddyfile edit, since nothing parses it until it
-#      is already in production.
+# The retired old box's files (docker-compose.prod.yml, this repo's Caddyfile,
+# infra/, backup-db.sh, prune-images.sh, watchdog.sh) and the checks that
+# pinned them were deleted in CF-B29. The shared Caddy, the box's backup,
+# watchdog and image prune now live in apps-infra and are checked there.
 #
 # Run from the repo root. Requires docker.
 set -euo pipefail
@@ -20,63 +19,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$PWD"
 work="$(mktemp -d)"
-# The watchdog check below brings a throwaway compose project up; cleaning it
-# from the same trap means a failed assertion cannot leave containers running
-# on the developer's machine or the runner.
-wd_project="cfwatchdogcheck$$"
-cleanup() {
-    docker compose -p "$wd_project" -f "$work/watchdog-test.yml" down -t 1 >/dev/null 2>&1 || true
-    rm -rf "$work"
-}
-trap cleanup EXIT
+trap 'rm -rf "$work"' EXIT
 
 # Work on copies with a synthetic .env: never read the developer's real one,
 # and never print it — `docker compose config` echoes every variable it
 # resolves, secrets included.
-cp docker-compose.yml docker-compose.prod.yml docker-compose.box.yml Caddyfile "$work/"
-# A Neon-shaped DATABASE_URL, distinct from docker-compose.yml's dev value so
-# check 4b can tell which one won. The `&` is deliberate: real Neon URLs carry
-# channel_binding alongside sslmode.
-neon_url='postgres://u:p@ep-synthetic.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+cp docker-compose.yml docker-compose.box.yml "$work/"
+# An RDS-shaped DATABASE_URL, distinct from docker-compose.yml's dev value so
+# check 4b can tell which one won. The `&` is deliberate: it proves a query
+# string with more than one parameter survives interpolation intact.
+db_url='postgres://u:p@shared-postgres.synthetic.us-east-1.rds.amazonaws.com:5432/concertfinder?sslmode=require&connect_timeout=10'
 # docker-compose.box.yml takes its image from CONCERTFINDER_IMAGE, which
 # scripts/deploy-box.sh appends to the box's .env. An ECR-shaped value at a
 # full SHA, so check 10b can assert it arrives unchanged.
 box_image='426433020884.dkr.ecr.us-east-1.amazonaws.com/concertfinder-api:0123456789abcdef0123456789abcdef01234567'
-printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\nCONCERTFINDER_IMAGE=%s\n' "$neon_url" "$box_image" > "$work/.env"
+printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\nCONCERTFINDER_IMAGE=%s\n' "$db_url" "$box_image" > "$work/.env"
 
 fail() { printf '\n\033[31mFAIL\033[0m: %s\n' "$1" >&2; exit 1; }
 pass() { printf '\033[32m  ok\033[0m  %s\n' "$1"; }
 
 echo "Checking deployment config..."
-
-# 1. The prod compose file parses and its env_file resolves.
-rendered="$work/rendered.yml"
-if ! (cd "$work" && docker compose -f docker-compose.prod.yml config) > "$rendered" 2>"$work/err"; then
-    sed 's/^/    /' "$work/err" >&2
-    fail "docker-compose.prod.yml is not valid"
-fi
-pass "docker-compose.prod.yml parses"
-
-# 2. The caddy service actually receives SITE_DOMAIN. `docker compose config`
-#    folds env_file entries into `environment:`, so its absence here means the
-#    variable never reaches the container — which is defect 2 above, and is
-#    invisible to a plain `caddy validate` run with the variable exported.
-if ! awk '/^  caddy:/{f=1;next} /^  [a-z]/{f=0} f' "$rendered" | grep -q 'SITE_DOMAIN'; then
-    fail "the caddy service never receives SITE_DOMAIN — add env_file to it in docker-compose.prod.yml.
-      Without it the Caddyfile's {\$SITE_DOMAIN} expands to nothing, the site
-      block degenerates into a global options block, and Caddy refuses to start."
-fi
-pass "caddy service receives SITE_DOMAIN"
-
-# 3. The Caddyfile adapts. This is the check that would have caught defect 1.
-if ! out=$(docker run --rm -e SITE_DOMAIN=example.com \
-        -v "$work/Caddyfile":/etc/caddy/Caddyfile:ro \
-        caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile \
-        --adapter caddyfile 2>&1); then
-    echo "$out" | grep -i error | sed 's/^/    /' >&2
-    fail "Caddyfile is not valid"
-fi
-pass "Caddyfile adapts cleanly"
 
 # 4. The dev compose file too, so a typo there doesn't wait for someone's
 #    next `docker compose up`.
@@ -86,45 +48,42 @@ if ! (cd "$repo" && docker compose -f docker-compose.yml config) >/dev/null 2>"$
 fi
 pass "docker-compose.yml parses"
 
-# 4b. Every prod compose form reaches the database .env names (CF-B17). Run with the
-#     dev file first and the prod file second, docker-compose.yml's
-#     `environment: DATABASE_URL` (the compose `db` container) used to outrank
-#     the prod file's env_file, so `up` quietly swapped Neon for an empty dev
-#     Postgres. It did, for eight days, with every health check green. The
-#     prod file restating DATABASE_URL in `environment:` is what fixes it;
-#     this is what notices if that line goes.
+# 4b. Every box compose form reaches the database .env names (CF-B17). Run
+#     with the dev file first and the box file second, docker-compose.yml's
+#     `environment: DATABASE_URL` (the compose `db` container) outranks a bare
+#     env_file, so `up` would quietly swap the production database for an
+#     empty dev Postgres. On the old box it did, for eight days, with every
+#     health check green. The box file restating DATABASE_URL in
+#     `environment:` is what fixes it; this is what notices if that line goes.
 #
-#     Every form that can start production is pinned, not only the one that
-#     broke (CF-B18): the prod file alone is what deploy.yml runs, the two-file
-#     form is what a session types by hand, and a check covering one says
-#     nothing about the other. Removing the prod file's `environment:` entry
-#     fails the two-file row; the prod-only row is what fails if the api ever
-#     stops reading .env at all.
+#     Both forms are pinned, not only the one that broke (CF-B18): the box
+#     file alone is what scripts/deploy-box.sh runs, the two-file form is what
+#     a session types on the box by hand, and a check covering one says
+#     nothing about the other. Removing the `environment:` entry fails the
+#     two-file row; the box-only row is what fails if the api ever stops
+#     reading .env at all.
 api_db_url() {
     (cd "$work" && docker compose "$@" config --format json) 2>"$work/err4b" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["api"]["environment"]["DATABASE_URL"])'
 }
-#
-#     The shared-box file (CF-B21) carries the same guard and gets the same two
-#     rows: it alone is what scripts/deploy-box.sh runs, and the two-file form
-#     is the one a session will type on the box by hand.
-for form in "docker-compose.prod.yml" "docker-compose.yml docker-compose.prod.yml" \
-        "docker-compose.box.yml" "docker-compose.yml docker-compose.box.yml"; do
+for form in "docker-compose.box.yml" "docker-compose.yml docker-compose.box.yml"; do
     args=()
     for f in $form; do args+=(-f "$f"); done
     if ! got=$(api_db_url "${args[@]}"); then
         sed 's/^/    /' "$work/err4b" >&2
         fail "\`${args[*]} config\` does not render"
     fi
-    if [ "$got" != "$neon_url" ]; then
-        printf '    .env:     %s\n    rendered: %s\n' "$neon_url" "$got" >&2
+    if [ "$got" != "$db_url" ]; then
+        printf '    .env:     %s\n    rendered: %s\n' "$db_url" "$got" >&2
         fail "\`${args[*]}\` does not give the api the DATABASE_URL from .env.
       \`up\` in that form would run production against whatever it rendered
-      instead — docker-compose.prod.yml must set DATABASE_URL in the api
+      instead — docker-compose.box.yml must set DATABASE_URL in the api
       service's \`environment:\`."
     fi
     pass "\`${args[*]}\` gives the api .env's DATABASE_URL"
 done
+
+
 
 # ...and the dev file on its own still reaches the dev database, whatever the
 # .env says: the local .env holds the host-side URL for \`go run\`, which is
@@ -169,10 +128,10 @@ pass "verify-deploy.sh is executable"
         got=$(db_host "$1") || got="<refused>"
         [ "$got" = "$2" ] || { printf '    db_host gave %s, want %s\n' "$got" "$2" >&2; exit 1; }
     }
-    check_host "$neon_url" ep-synthetic.us-east-1.aws.neon.tech
+    check_host "$db_url" shared-postgres.synthetic.us-east-1.rds.amazonaws.com
     check_host 'postgres://concertfinder:concertfinder@db:5432/concertfinder?sslmode=disable' db
     check_host 'postgresql://u:p@127.0.0.1:5433/x' 127.0.0.1
-    check_host 'postgres://EP-Mixed.Neon.Tech/db' ep-mixed.neon.tech
+    check_host 'postgres://Shared-Postgres.Example.RDS.amazonaws.com/db' shared-postgres.example.rds.amazonaws.com
     check_host 'postgres://u:p@[::1]:5432/db' '[::1]'
     check_host 'postgres://u:p%40ss@h.example/db?options=a@b' h.example
     check_host 'host=h.example user=u password=secret dbname=d' h.example
@@ -182,20 +141,6 @@ pass "verify-deploy.sh is executable"
 ) || fail "verify-deploy.sh's db_host misparses a DSN"
 pass "verify-deploy.sh extracts database hosts and refuses the rest"
 
-# 7. backup-db.sh is in that same never-runs-locally category, and worse: it
-#    runs from a systemd timer at 03:00 with nobody watching, so a syntax error
-#    in it is silent until the night someone needs a dump that was never taken.
-#    Check both halves the same way.
-if ! out=$(bash -n "$repo/scripts/backup-db.sh" 2>&1); then
-    echo "$out" | sed 's/^/    /' >&2
-    fail "scripts/backup-db.sh has a syntax error"
-fi
-pass "backup-db.sh parses"
-
-if [ ! -x "$repo/scripts/backup-db.sh" ]; then
-    fail "scripts/backup-db.sh is not executable — run: chmod +x scripts/backup-db.sh"
-fi
-pass "backup-db.sh is executable"
 
 # 8. render-env.sh is the newest member of the never-runs-locally family, and
 #    the most load-bearing: it writes the .env every other container reads, and
@@ -212,20 +157,6 @@ if [ ! -x "$repo/scripts/render-env.sh" ]; then
 fi
 pass "render-env.sh is executable"
 
-# 9. prune-images.sh closes out every deploy, after verify-deploy.sh has
-#    already reported success. A syntax error there fails an SSM command for a
-#    deploy that actually worked, and a `set -euo pipefail` script that dies
-#    mid-way leaves the disk unreclaimed silently.
-if ! out=$(bash -n "$repo/scripts/prune-images.sh" 2>&1); then
-    echo "$out" | sed 's/^/    /' >&2
-    fail "scripts/prune-images.sh has a syntax error"
-fi
-pass "prune-images.sh parses"
-
-if [ ! -x "$repo/scripts/prune-images.sh" ]; then
-    fail "scripts/prune-images.sh is not executable — run: chmod +x scripts/prune-images.sh"
-fi
-pass "prune-images.sh is executable"
 
 # 9a. restore-drill.sh is the far end of the same family, and the one with the
 #     longest fuse: it is not run by a deploy or by a timer, it is run by a
@@ -243,19 +174,22 @@ if [ ! -x "$repo/scripts/restore-drill.sh" ]; then
 fi
 pass "restore-drill.sh is executable"
 
-# 9b. The drill restores what backup-db.sh dumps, with the same tool, so the
-#     two must agree on the Postgres major version. pg_restore refuses an
-#     archive from a newer server, and the drill is exactly the moment that
-#     mismatch must not be discovered.
-backup_img=$(grep -o 'PG_IMAGE:-[^}]*' "$repo/scripts/backup-db.sh" | head -1 | cut -d- -f2-)
-drill_img=$(grep -o 'PG_IMAGE:-[^}]*' "$repo/scripts/restore-drill.sh" | head -1 | cut -d- -f2-)
-if [ "$backup_img" != "$drill_img" ]; then
-    fail "backup-db.sh pins PG_IMAGE=$backup_img but restore-drill.sh pins $drill_img.
-      pg_restore refuses an archive produced by a newer server, so a drill
-      against the real dumps would fail for a reason that has nothing to do
+# 9b. The drill restores apps-infra's weekly dumps, and pg_restore refuses an
+#     archive produced by a newer server, so restore-drill.sh's PG_IMAGE must
+#     stay equal to the image apps-infra's backup writes them with:
+#     postgres:<rds_engine_version>-alpine (backup-sync.tf). That file is in
+#     another repo, so CI cannot compare the two; what it can pin is that the
+#     drill's image is that shape at all, so a bump has to be a deliberate
+#     edit made with apps-infra's variables.tf open beside it.
+drill_img=$(grep -o 'PG_IMAGE:-[^}]*' "$repo/scripts/restore-drill.sh" | head -1 | cut -d- -f2- || true)
+if ! printf '%s' "$drill_img" | grep -Eq '^postgres:[0-9]+-alpine$'; then
+    fail "restore-drill.sh pins PG_IMAGE='$drill_img', want postgres:<major>-alpine.
+      It must equal apps-infra's postgres:<rds_engine_version>-alpine, or a
+      drill against the real dumps fails for a reason that has nothing to do
       with the backups."
 fi
-pass "backup-db.sh and restore-drill.sh pin the same Postgres image ($backup_img)"
+pass "restore-drill.sh pins a postgres:<major>-alpine image ($drill_img); keep it equal to apps-infra's rds_engine_version"
+
 
 # 9c. The drill's size guard is the one piece of logic in these scripts that is
 #     not a syntax check away from being right, and it has already been wrong
@@ -293,20 +227,9 @@ if "$repo/scripts/restore-drill.sh" --size-verdict 39851 >/dev/null 2>&1; then
 fi
 pass "restore-drill.sh rejects a schema-sized dump with no history"
 
-# 10. The compose file must pin the api image name, because prune-images.sh and
-#     the deploy's SHA tagging both address it by name. Without `image:`,
-#     compose derives it from the project directory, so a rename of
-#     /opt/concertfinder would silently orphan every rollback target.
-if ! awk '/^  api:/{f=1;next} /^  [a-z]/{f=0} f' "$rendered" | grep -q 'image: concertfinder-api'; then
-    fail "the api service does not pin 'image: concertfinder-api:latest' in docker-compose.prod.yml.
-      scripts/prune-images.sh and the deploy's SHA tagging address the image by
-      that name; without it compose derives the name from the directory."
-fi
-pass "api service pins its image name"
-
 # 10b. docker-compose.box.yml (CF-B21) is concertFinder's compose project on
-#      the shared apps box, live since the cutover. Like the prod file it
-#      never runs anywhere but the instance, so everything that matters about
+#      the shared apps box, live since the cutover. It never runs anywhere
+#      but the box, so everything that matters about
 #      it is asserted here against the rendered config:
 #
 #      - exactly one service, `api` — TLS belongs to the box's shared Caddy;
@@ -317,29 +240,29 @@ pass "api service pins its image name"
 #      - on the external `edge` network and nothing else, with nothing
 #        published to the host — 80/443 belong to the shared Caddy, and a
 #        published 8080 would be a way in with none of its headers;
-#      - healthcheck, stop_grace_period and log caps identical to the prod
-#        file's api, so a fix to one cannot silently miss the other.
+#      - the healthcheck runs the server binary as CMD (the image is
+#        distroless: no shell to run CMD-SHELL in), restart unless-stopped,
+#        a 45s stop_grace_period (main.go shuts down over 30s; Docker's 10s
+#        default kills in-flight river jobs) and capped json-file logs (the
+#        root volume is shared by every app on the box). These used to be
+#        pinned by equality with the old box's compose file; they are stated
+#        here instead now that file is gone.
 box_json="$work/box.json"
-prod_json="$work/prod.json"
 if ! (cd "$work" && docker compose -f docker-compose.box.yml config --format json) > "$box_json" 2>"$work/errbox"; then
     sed 's/^/    /' "$work/errbox" >&2
     fail "docker-compose.box.yml is not valid"
 fi
 pass "docker-compose.box.yml parses"
-(cd "$work" && docker compose -f docker-compose.prod.yml config --format json) > "$prod_json" 2>/dev/null ||
-    fail "docker-compose.prod.yml does not render as JSON"
 
-if ! out=$(python3 - "$box_json" "$prod_json" "$box_image" <<'PY' 2>&1
+if ! out=$(python3 - "$box_json" "$box_image" <<'PY' 2>&1
 import json, sys
 box = json.load(open(sys.argv[1]))
-prod = json.load(open(sys.argv[2]))
-want_image = sys.argv[3]
+want_image = sys.argv[2]
 errors = []
 services = sorted(box.get("services", {}))
 if services != ["api"]:
     errors.append(f"services are {services}, want exactly ['api'] (no caddy: the box's Caddy is shared)")
 api = box["services"].get("api", {})
-papi = prod["services"]["api"]
 if api.get("image") != want_image:
     errors.append(f"api image renders as {api.get('image')!r}, want CONCERTFINDER_IMAGE ({want_image!r})")
 if "build" in api:
@@ -352,9 +275,17 @@ if not box.get("networks", {}).get("edge", {}).get("external"):
     errors.append("network edge is not external; `down` here could remove it from under every other app")
 if api.get("ports"):
     errors.append(f"api publishes ports {api['ports']}; nothing may be published on the box")
-for key in ("healthcheck", "stop_grace_period", "logging", "restart"):
-    if api.get(key) != papi.get(key):
-        errors.append(f"{key} differs from docker-compose.prod.yml's api: {api.get(key)!r} vs {papi.get(key)!r}")
+hc = api.get("healthcheck") or {}
+if hc.get("test") != ["CMD", "/server", "-healthcheck"]:
+    errors.append(f"healthcheck test is {hc.get('test')!r}, want ['CMD', '/server', '-healthcheck']")
+if api.get("restart") != "unless-stopped":
+    errors.append(f"restart is {api.get('restart')!r}, want 'unless-stopped'")
+if api.get("stop_grace_period") != "45s":
+    errors.append(f"stop_grace_period is {api.get('stop_grace_period')!r}, want '45s'")
+log = api.get("logging") or {}
+opts = log.get("options") or {}
+if log.get("driver") != "json-file" or not opts.get("max-size") or not opts.get("max-file"):
+    errors.append(f"logging is {log!r}, want json-file with max-size and max-file set")
 if errors:
     print("\n".join(errors))
     sys.exit(1)
@@ -364,14 +295,14 @@ PY
     fail "docker-compose.box.yml does not match the shape the shared box needs"
 fi
 pass "box file: api only, image from CONCERTFINDER_IMAGE, concertfinder-api on external edge, nothing published"
-pass "box file: healthcheck, stop_grace_period, restart and log caps match the prod file"
+pass "box file: CMD healthcheck, unless-stopped, 45s grace period, capped logs"
 
 # 10c. Both `:?` guards must refuse to render, not fall back. Without
 #      CONCERTFINDER_IMAGE compose would otherwise resolve an empty image;
 #      without DATABASE_URL the container would start with no database (or,
 #      in the two-file form, the dev one — CF-B17). --env-file replaces the
 #      .env used for interpolation, so each run lacks exactly one variable.
-printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\n' "$neon_url" > "$work/noimage.env"
+printf 'SITE_DOMAIN=example.com\nDATABASE_URL=%s\n' "$db_url" > "$work/noimage.env"
 printf 'SITE_DOMAIN=example.com\nCONCERTFINDER_IMAGE=%s\n' "$box_image" > "$work/nodb.env"
 for case in "noimage.env:CONCERTFINDER_IMAGE" "nodb.env:DATABASE_URL"; do
     envf=${case%%:*}
@@ -442,12 +373,14 @@ pass "deploy-box.sh refuses an IMAGE that is not concertfinder-api at a SHA, bef
 
 # 11. The rendered .env has two consumers with two different parsers, and only
 #     one of them is exercised by a deploy. docker compose reads it as an
-#     env_file; scripts/backup-db.sh does `set -a; . "$ENV_FILE"`, handing it to
-#     bash. A value holding a space, a `$`, a backtick or a `;` is fine for the
-#     first and is a syntax error or a command substitution for the second — so
-#     the site stays healthy and the 03:00 backup nobody watches is the only
-#     thing that dies. This drives the real render-env.sh against a stub
-#     Parameter Store and then sources the result the way backup-db.sh does.
+#     env_file; anything that does `set -a; . "$ENV_FILE"` hands it to bash.
+#     The old box's nightly backup did exactly that, and nothing on the shared
+#     box does today, but an operator sourcing the file by hand or the next
+#     box-side script will. A value holding a space, a `$`, a backtick or a `;`
+#     is fine for compose and is a syntax error or a command substitution for
+#     bash — so the site stays healthy and whatever sources the file is the
+#     only thing that dies. This drives the real render-env.sh against a stub
+#     Parameter Store and then sources the result.
 envwork="$work/render"
 mkdir -p "$envwork/bin"
 
@@ -484,9 +417,9 @@ fi
 srcerr="$envwork/source.err"
 if ! got=$(set -a; . "$rendered_env" 2>"$srcerr"; set +a; printf '%s' "${NASTY-}"); then
     sed 's/^/    /' "$srcerr" >&2
-    fail "the .env render-env.sh writes cannot be sourced — scripts/backup-db.sh
-      does exactly this, so the nightly backup would die here while the app,
-      which uses compose's separate parser, stayed healthy."
+    fail "the .env render-env.sh writes cannot be sourced — anything that does
+      \`set -a; . .env\` would die here while the app, which uses compose's
+      separate parser, stayed healthy."
 fi
 if [ "$got" != "$nasty" ]; then
     printf '    stored:  %s\n    sourced: %s\n' "$nasty" "$got" >&2
@@ -542,135 +475,5 @@ if PATH="$envwork/bin:$PATH" AWS_REGION=us-east-1 \
       so it has to fail here, by name, not on the instance mid-deploy."
 fi
 pass "render-env.sh refuses a value it cannot encode for both parsers"
-
-# 14. The watchdog is in the same family as the scripts above — it only ever
-#     runs on the instance, from a systemd timer, where a syntax error would
-#     surface as a missing CloudWatch datapoint rather than as an error anyone
-#     reads.
-if ! out=$(bash -n "$repo/scripts/watchdog.sh" 2>&1); then
-    echo "$out" | sed 's/^/    /' >&2
-    fail "scripts/watchdog.sh has a syntax error"
-fi
-pass "watchdog.sh parses"
-
-if [ ! -x "$repo/scripts/watchdog.sh" ]; then
-    fail "scripts/watchdog.sh is not executable — run: chmod +x scripts/watchdog.sh"
-fi
-pass "watchdog.sh is executable"
-
-# 15. The watchdog publishes into a namespace and infra/cloudwatch.tf alarms on
-#     one. If they disagree the metric lands somewhere nothing watches, the
-#     alarm sees no data at all, and because it is configured
-#     treat_missing_data = "breaching" the result is an alert that fires
-#     forever for a reason that has nothing to do with the application. Neither
-#     terraform validate nor a deploy can see the mismatch — it is two string
-#     literals in two languages. Same reasoning as the PG_IMAGE pin above.
-#
-#     The `|| true` on each extraction is load-bearing, not defensive habit.
-#     Under `set -euo pipefail` a grep that matches nothing exits 1, pipefail
-#     carries that out of the pipeline, and set -e kills the script *at the
-#     assignment* -- so the emptiness guard below would never run, and a renamed
-#     variable would show a bare exit 1 with no FAIL line. That is precisely the
-#     "this check stopped comparing anything" outcome the message exists to
-#     explain, arriving with the message suppressed.
-wd_ns=$(grep -o 'WATCHDOG_NAMESPACE:-[^}]*' "$repo/scripts/watchdog.sh" | head -1 | cut -d- -f2- || true)
-tf_ns=$(grep -o 'app_metric_namespace[[:space:]]*=[[:space:]]*"[^"]*"' "$repo/infra/cloudwatch.tf" |
-    head -1 | sed 's/.*"\(.*\)"/\1/' || true)
-if [ -z "$wd_ns" ] || [ -z "$tf_ns" ]; then
-    fail "could not read the metric namespace out of scripts/watchdog.sh ($wd_ns) and
-      infra/cloudwatch.tf ($tf_ns) — one of them changed shape, so this check
-      stopped comparing anything."
-fi
-if [ "$wd_ns" != "$tf_ns" ]; then
-    fail "watchdog.sh publishes to '$wd_ns' but infra/cloudwatch.tf alarms on '$tf_ns'.
-      The alarm would never see a datapoint, and treat_missing_data =
-      \"breaching\" turns that into a permanent alert about nothing."
-fi
-pass "watchdog.sh and cloudwatch.tf agree on the metric namespace ($wd_ns)"
-
-# 16. And the detection itself, against real containers. This is the one
-#     assertion here that tests behaviour rather than config, and it earns the
-#     seconds it costs: the whole point of the watchdog is to notice a state
-#     that every other signal in this deployment reports as healthy, so
-#     "does it actually notice" cannot be taken on faith. A crash loop under
-#     `restart: unless-stopped` is a specific thing docker does, and the
-#     matching assertion is that a *healthy* project still scores zero —
-#     a watchdog that always alarms gets muted, and then reports nothing.
-cat > "$work/watchdog-test.yml" <<'YML'
-services:
-  api:
-    image: alpine:3
-    command: ["sh", "-c", "echo booting; exit 1"]
-    restart: unless-stopped
-  caddy:
-    image: alpine:3
-    command: ["sh", "-c", "sleep 300"]
-    restart: unless-stopped
-YML
-
-if ! docker compose -p "$wd_project" -f "$work/watchdog-test.yml" up -d >/dev/null 2>&1; then
-    fail "could not start the throwaway compose project for the watchdog check"
-fi
-# Long enough for docker to have restarted the crashing container at least once.
-sleep 4
-
-wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.yml" \
-    WATCHDOG_PUBLISH=0 WATCHDOG_STATE_FILE="$work/wd.state" \
-    "$repo/scripts/watchdog.sh" 2>&1) || {
-    echo "$wd_out" | sed 's/^/    /' >&2
-    fail "scripts/watchdog.sh exited non-zero against the test project"
-}
-wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
-if [ "${wd_count:-0}" -lt 1 ]; then
-    echo "$wd_out" | sed 's/^/    /' >&2
-    fail "watchdog.sh reported unhealthy=${wd_count:-<none>} for a crash-looping container.
-      That is the exact state it exists to catch — a container that exits on
-      every start while the host stays healthy — so the alarm in
-      infra/cloudwatch.tf would never fire for the failure it was built for."
-fi
-# A count alone is not enough: 2 would also pass, and 2 is what a watchdog that
-# found no containers at all reports. Naming the crashing service is what
-# distinguishes "noticed the crash loop" from "could not see the project".
-if ! echo "$wd_out" | grep -q 'api:'; then
-    echo "$wd_out" | sed 's/^/    /' >&2
-    fail "watchdog.sh reported unhealthy=$wd_count but never named the api service.
-      A run that cannot see the project at all also reports a non-zero count,
-      so the count on its own does not show that the crash loop was detected."
-fi
-pass "watchdog.sh detects a crash-looping container (unhealthy=$wd_count)"
-
-docker compose -p "$wd_project" -f "$work/watchdog-test.yml" down -t 1 >/dev/null 2>&1 || true
-
-cat > "$work/watchdog-test.yml" <<'YML'
-services:
-  api:
-    image: alpine:3
-    command: ["sh", "-c", "sleep 300"]
-    restart: unless-stopped
-  caddy:
-    image: alpine:3
-    command: ["sh", "-c", "sleep 300"]
-    restart: unless-stopped
-YML
-
-if ! docker compose -p "$wd_project" -f "$work/watchdog-test.yml" up -d >/dev/null 2>&1; then
-    fail "could not start the healthy compose project for the watchdog check"
-fi
-sleep 2
-
-wd_out=$(COMPOSE_PROJECT_NAME="$wd_project" COMPOSE_FILE="$work/watchdog-test.yml" \
-    WATCHDOG_PUBLISH=0 WATCHDOG_STATE_FILE="$work/wd-healthy.state" \
-    "$repo/scripts/watchdog.sh" 2>&1) || {
-    echo "$wd_out" | sed 's/^/    /' >&2
-    fail "scripts/watchdog.sh exited non-zero against the healthy test project"
-}
-wd_count=$(echo "$wd_out" | sed -n 's/^unhealthy=//p' | tail -1 || true)
-if [ "${wd_count:-1}" -ne 0 ]; then
-    echo "$wd_out" | sed 's/^/    /' >&2
-    fail "watchdog.sh reported unhealthy=$wd_count for a project where every container
-      is running. A watchdog that alarms on a healthy stack gets muted, and a
-      muted alarm reports nothing at all."
-fi
-pass "watchdog.sh scores a healthy project clean"
 
 printf '\n\033[32mDeployment config OK\033[0m\n'

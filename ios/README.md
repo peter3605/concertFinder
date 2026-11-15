@@ -49,9 +49,10 @@ ID was registered 2026-08-25 — `com.concertfinder.ph`, team `L3MY7DN27B` — s
 is now effectively permanent: it is also `APNS_BUNDLE_ID` and the second half
 of `IOS_APP_ID`, which iOS caches from the association file.
 
-**The server side is live.** The apply landed 2026-08-26 and the values are in
-SSM — `../infra/terraform.tfvars` holds them and `../infra/secrets.tf` derives
-the rest from `var.domain` and `var.ios_bundle_id`. Both of the values below
+**The server side is live.** The values are in SSM, under `/concertfinder/*`
+in the apps account, rendered into the box's `.env` at every deploy
+(`docs/shared-box.md`). (History: they first landed on 2026-08-26 through the
+old box's `infra/` Terraform, deleted in CF-B29.) Both of the values below
 answer for real today, and you can check that from anywhere:
 
 - `MOBILE_CALLBACK_URL` → `https://concertfinder.app/app/auth/callback`. Empty
