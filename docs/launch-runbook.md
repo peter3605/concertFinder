@@ -15,11 +15,19 @@ drift into disagreeing.
 
 Written 2026-09-01, against `production-hardening`.
 
+> **Hosting changed after this was written.** Since the 2026-11-09 cutover
+> production runs on the shared apps box in the apps account (426433020884),
+> with Postgres on RDS `shared-postgres`. The old box, its Terraform in
+> `infra/` and Neon were retired on 2026-11-13. So: §1, §2 and §7 are history
+> (they are about the old box and cannot be run); §3, §4 and §8 still apply,
+> against the apps account, and deploy through `image.yml`; §6 is current.
+> `docs/shared-box.md` and apps-infra's `CLAUDE.md` describe the setup today.
+
 Every command below assumes:
 
 ```bash
 cd ~/Repos/concertFinder
-export AWS_PROFILE=budgetr
+export AWS_PROFILE=apps-admin   # the apps account; was the management account before the cutover
 ```
 
 ---
@@ -27,6 +35,10 @@ export AWS_PROFILE=budgetr
 ## Today, ~30 minutes total
 
 ### 1. Find out whether the backup is alive
+
+> **History.** This was the old box's nightly backup (`scripts/backup-db.sh`),
+> retired 2026-11-13. Backups are now apps-infra's weekly `box/apps-backup.sh`
+> plus RDS's 14-day automated backups; §6 checks them.
 
 First, because everything else assumes there is a restore point and there may
 not be one. Two independent reasons it may never have run:
@@ -62,6 +74,9 @@ already on `production-hardening`, which makes merging that branch the most
 load-bearing thing in this document.
 
 ### 2. Apply the Terraform, then confirm the alarm emails
+
+> **History.** `infra/` described the old box and was destroyed on 2026-11-13.
+> Alarms for the shared box live in apps-infra.
 
 **These do not exist yet.** The SNS topics, the third alarm, the `ec2:recover`
 action and the backup systemd units are all in `production-hardening` and have
@@ -118,11 +133,11 @@ careful at:
   stored Spotify refresh token and forces every user to reconnect.
 - **`APNS_P8_KEY`** — press Enter unless you are also doing §8 in this sitting.
 
-Then re-render the instance's `.env`, which is the step that actually applies
+Then re-render the box's `.env`, which is the step that actually applies
 it:
 
 ```bash
-gh workflow run deploy.yml --ref main
+gh workflow run image.yml --ref main
 gh run watch
 ```
 
@@ -196,7 +211,7 @@ wants detail.
 §1 proved a file exists. This proves it restores, and produces the number
 nobody has: the RTO.
 
-Runs at cutover, against the shared RDS in the apps account. Docker running,
+Runs against the shared RDS in the apps account. Docker running,
 then:
 
 ```bash
@@ -204,8 +219,9 @@ AWS_PROFILE=apps-admin ../apps-infra/scripts/db-tunnel.sh   # terminal 1, leave 
 AWS_PROFILE=apps-admin ./scripts/restore-drill.sh           # terminal 2
 ```
 
-If the box has not written a weekly dump yet, drill the final Neon dump
-instead: `--key neon-final/concertfinder/<file>.dump`.
+Before the box's first weekly dump this drilled the final Neon dump instead
+(`--key neon-final/concertfinder/<file>.dump`); Neon itself was deleted on
+2026-11-13.
 
 **Done when** it prints `DRILL PASSED` and a restore time. Record that number in
 `docs/aws-deploy.md` under "Restore drills". The script drops its scratch
@@ -223,6 +239,9 @@ the result, and deploying. The real RTO is that plus what the script
 measures.
 
 ### 7. Move Terraform state to S3
+
+> **History.** Done for apps-infra, whose state is in S3 with `use_lockfile`.
+> `infra/`'s local state was deleted with the old box on 2026-11-13.
 
 Today it is a local file in a git checkout on one laptop, holding the SES SMTP
 password and the break-glass private key in cleartext, with no locking.
@@ -276,13 +295,13 @@ notification, it costs each tester every future one.
 5. `cd infra && terraform apply` — then, **in the same sitting**,
    `./scripts/set-secrets.sh` and answer `f` at the `APNS_P8_KEY` prompt with
    the path to the new `.p8`.
-6. `gh workflow run deploy.yml --ref main`
+6. `gh workflow run image.yml --ref main`
 7. Revoke the old key once push is confirmed working on a real device.
 
-**The ordering trap** (`docs/aws-deploy.md` §7a): `APNS_P8_KEY` is an operator
-secret, so an apply that touches it creates the parameter holding `REPLACE_ME`,
-and `render-env.sh` refuses to write `.env` while any parameter holds that
-sentinel. Applying without the key in hand breaks the next deploy.
+**The ordering trap:** `render-env.sh` refuses to write `.env` while any
+`/concertfinder/*` parameter holds the `REPLACE_ME` sentinel, so a placeholder
+`APNS_P8_KEY` breaks the next deploy. (On the old box an `infra/` apply created
+that placeholder; see `docs/aws-deploy.md` §7a for that history.)
 `set-secrets.sh` also escapes the PEM's newlines on the way in — never paste the
 key into the console by hand, or it truncates at `-----BEGIN PRIVATE KEY-----`,
 passes `config.Validate`, and fails later at send time.

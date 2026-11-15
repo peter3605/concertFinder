@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Deploy concertFinder on the shared apps box. DORMANT until the cutover: the
-# production deploy is still .github/workflows/deploy.yml against the old box,
-# which never runs this. See docs/shared-box.md.
+# Deploy concertFinder on the shared apps box. This is the production deploy
+# since the 2026-11-09 cutover, run by .github/workflows/image.yml. See
+# docs/shared-box.md.
 #
 # Invoked as /opt/concertfinder/deploy.sh (a symlink to this file at the repo
 # root) by apps-infra's `concertfinder-deploy` SSM document, which runs it as

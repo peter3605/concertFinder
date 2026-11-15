@@ -1,7 +1,7 @@
-# concertFinder on the shared apps box (apps account, apps-infra). DORMANT until
-# the cutover: nothing in .github/workflows/deploy.yml reads this file, and
-# docker-compose.prod.yml is still what serves concertfinder.app from the old
-# box. See docs/shared-box.md.
+# concertFinder on the shared apps box (apps account, apps-infra). This is what
+# serves concertfinder.app since the 2026-11-09 cutover, deployed by
+# scripts/deploy-box.sh; docker-compose.prod.yml is the retired old box's file.
+# See docs/shared-box.md.
 #
 # Its own compose project, holding only the api. TLS is the box's job, not
 # ours: one shared Caddy (apps-infra caddy/, project "shared") terminates every

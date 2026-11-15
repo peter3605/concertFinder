@@ -3,17 +3,16 @@ name: Image
 # Builds the api image for linux/arm64 on an arm64 runner and, on main, pushes
 # it to ECR in the apps account (426433020884) for the shared t4g.small box.
 #
-# DORMANT UNTIL CUTOVER. deploy.yml is still what ships production: it builds
-# on the old box in the management account on every merge, and nothing here
-# touches that box or that account. This workflow only does real work once
-# Peter sets repo variables:
+# This is what ships production, since the 2026-11-09 cutover: on every merge
+# to main it pushes the image and deploys it to the shared box. deploy.yml only
+# runs the checks. It is driven by repo variables:
 #
 #   AWS_DEPLOY_ROLE_ARN  apps-account role `concertfinder-deploy` (terraform
 #                        output deploy_role_arns in apps-infra). Unset: the
 #                        push job emits a notice and does nothing.
-#                        NOTE this is a repo VARIABLE. deploy.yml reads a
-#                        SECRET of the same name for the old box's role; they
-#                        are different roles in different accounts.
+#                        NOTE this is a repo VARIABLE. The retired old box's
+#                        deploy job read a SECRET of the same name for a
+#                        different role in another account.
 #   DEPLOY_TO_BOX        'true' to run the `concertfinder-deploy` SSM document
 #                        on the box after the push. Anything else: push only.
 #   BOX_INSTANCE_ID      the box (terraform output box_instance_id). Required

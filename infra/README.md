@@ -1,5 +1,12 @@
 # Infrastructure (Terraform)
 
+> **History: retired 2026-11-13.** This Terraform defined the old box in the
+> management account. Its resources were destroyed and its local state deleted
+> on 2026-11-13 (plan step 27); nothing here is applied and nothing should be.
+> Infrastructure now lives in apps-infra. The directory stays only because
+> `scripts/check-deploy-config.sh` still reads `cloudwatch.tf`; removing it
+> together with the other old-box files is a follow-up.
+
 Terraform config for the ConcertFinder Phase 3 AWS deployment. Produces the
 single-instance EC2 + Caddy + SES setup described in `docs/design.md` §11. This
 replaces the manual walkthrough in `docs/aws-deploy.md`, which is kept only as a
