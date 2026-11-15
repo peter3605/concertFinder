@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -159,6 +160,18 @@ type Config struct {
 	// them. Past it, /api/auth/email/start still answers 202 and sends
 	// nothing, and the refusal is logged. Zero or less disables the ceiling.
 	EmailLoginDailyCap int
+
+	// ReviewLoginEmail and ReviewLoginCode are App Review's way in (CF-38,
+	// docs/public-path.md §6.2): a reviewer cannot read a mailbox, so a login
+	// started for exactly this address is issued this code instead of a
+	// random one, and nothing is mailed. Everything after that is the
+	// ordinary code path -- single use, 15 minutes, five guesses, the
+	// per-address and daily limits. Both come from SSM
+	// (REVIEW_LOGIN_EMAIL, REVIEW_LOGIN_CODE) and the bypass exists only
+	// when both are set. The code is a credential: it lives in SSM and in
+	// the App Store Connect review notes, never in the repo.
+	ReviewLoginEmail string
+	ReviewLoginCode  string
 
 	// SpotifyMaxUsers caps how many accounts may hold a Spotify identity
 	// (SPOTIFY_MAX_USERS, default 5 -- the Development Mode allowlist).
@@ -316,6 +329,8 @@ func Load() (*Config, error) {
 	c.RateCapSongkickAccountDaily = intEnv("RATE_CAP_SONGKICK_ACCOUNT_DAILY", 5000)
 	c.InviteRequired = boolEnv("INVITE_REQUIRED", true)
 	c.EmailLoginDailyCap = intEnv("EMAIL_LOGIN_DAILY_CAP", 200)
+	c.ReviewLoginEmail = strings.ToLower(strings.TrimSpace(os.Getenv("REVIEW_LOGIN_EMAIL")))
+	c.ReviewLoginCode = strings.TrimSpace(os.Getenv("REVIEW_LOGIN_CODE"))
 	c.SpotifyMaxUsers = intEnv("SPOTIFY_MAX_USERS", 5)
 	c.ConcertCacheTTLHours = intEnv("CONCERT_CACHE_TTL_HOURS", 0)
 	c.DBMaxConns = intEnv("DB_MAX_CONNS", 0)
@@ -583,6 +598,22 @@ func (c Config) Validate() []error {
 			"CONTACT_EMAIL is required — it is the operator contact shown on /privacy and /terms and the address in the MusicBrainz/Nominatim User-Agent, and both fail silently when it is empty"))
 	}
 
+	// The review code is checked by the same rule as every mailed code, so
+	// one that is not six digits is refused by the code endpoint before it is
+	// ever compared -- the reviewer is told "invalid or expired" and nothing
+	// here would say why. A malformed address can never match a normalized
+	// one, with the same result.
+	if c.ReviewLoginCode != "" && !isSixDigits(c.ReviewLoginCode) {
+		errs = append(errs, errors.New(
+			"REVIEW_LOGIN_CODE must be exactly six digits — the sign-in code endpoint refuses anything else, so App Review would be locked out with no error on our side"))
+	}
+	if c.ReviewLoginEmail != "" {
+		if a, err := mail.ParseAddress(c.ReviewLoginEmail); err != nil || !strings.EqualFold(a.Address, c.ReviewLoginEmail) {
+			errs = append(errs, errors.New(
+				"REVIEW_LOGIN_EMAIL must be a bare email address — anything else never matches a sign-in request, so App Review would be locked out with no error on our side"))
+		}
+	}
+
 	if c.EmailDeliveryMode == "smtp" {
 		if c.SMTPHost == "" {
 			errs = append(errs, errors.New("SMTP_HOST is required when EMAIL_DELIVERY_MODE=smtp"))
@@ -765,4 +796,18 @@ const MinScanDigestGapHours = 2
 // gap rather than a negative one.
 func (c Config) ScanDigestGapHours() int {
 	return ((c.DailyDigestHourUTC - c.DailyScanHourUTC) + 24) % 24
+}
+
+// isSixDigits mirrors the code endpoint's own check (auth.isSixDigits), which
+// this package cannot import.
+func isSixDigits(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

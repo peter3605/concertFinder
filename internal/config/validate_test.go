@@ -379,3 +379,44 @@ func TestContactEmailHasNoDefaultAndIsRequired(t *testing.T) {
 		t.Errorf("a whitespace-only CONTACT_EMAIL must be rejected by name, got %v", c.Validate())
 	}
 }
+
+// App Review's sign-in (CF-38). A code the endpoint would never accept, or an
+// address that can never match a normalized one, locks the reviewer out with
+// nothing on our side saying why -- so a real boot refuses either. Half a pair
+// is allowed: the bypass simply does not exist, and main.go warns.
+func TestReviewLoginValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, addr, code, want string
+	}{
+		{"valid pair", "review@concerts.example.com", "246810", ""},
+		{"address only", "review@concerts.example.com", "", ""},
+		{"code only", "", "246810", ""},
+		{"short code", "review@concerts.example.com", "24681", "REVIEW_LOGIN_CODE"},
+		{"letters in code", "review@concerts.example.com", "24681a", "REVIEW_LOGIN_CODE"},
+		{"display name", "App Review <review@concerts.example.com>", "246810", "REVIEW_LOGIN_EMAIL"},
+		{"not an address", "review", "246810", "REVIEW_LOGIN_EMAIL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := prodConfig()
+			c.ReviewLoginEmail, c.ReviewLoginCode = tc.addr, tc.code
+			if tc.want == "" {
+				if errs := c.Validate(); len(errs) != 0 {
+					t.Fatalf("want no problems, got %v", errs)
+				}
+				return
+			}
+			if !problemsContaining(t, c, tc.want) {
+				t.Errorf("expected a problem mentioning %q, got %v", tc.want, c.Validate())
+			}
+		})
+	}
+}
+
+func TestReviewLoginEmailIsLowercased(t *testing.T) {
+	t.Setenv("REVIEW_LOGIN_EMAIL", "  Review@Example.COM ")
+	t.Setenv("REVIEW_LOGIN_CODE", " 246810 ")
+	c := loadDefaults(t)
+	if c.ReviewLoginEmail != "review@example.com" || c.ReviewLoginCode != "246810" {
+		t.Fatalf("got %q / %q", c.ReviewLoginEmail, c.ReviewLoginCode)
+	}
+}

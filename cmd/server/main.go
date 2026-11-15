@@ -68,9 +68,16 @@ func main() {
 	grantAdmin := flag.String("grant-admin", "", "grant the admin flag to a Spotify user ID and exit")
 	revokeAdmin := flag.String("revoke-admin", "", "remove the admin flag from a Spotify user ID and exit")
 	listAdmins := flag.Bool("list-admins", false, "list admin accounts, then exit")
+	// The App Review account (CF-38): REVIEW_LOGIN_EMAIL's account, with a
+	// location and genre picks so a reviewer's first sign-in reaches a feed.
+	//   docker compose exec api /server -seed-review-account
+	seedReview := flag.Bool("seed-review-account", false, "create or reset the App Review account for REVIEW_LOGIN_EMAIL, then exit")
 	flag.Parse()
 	if *healthcheck {
 		os.Exit(runHealthcheck())
+	}
+	if *seedReview {
+		os.Exit(runSeedReviewAccount())
 	}
 	if *mintInvite || *listInvites || *disableInvite != "" {
 		os.Exit(runInviteAdmin(inviteAdminArgs{
@@ -421,8 +428,7 @@ func main() {
 		unsubscribeH = &webhttp.UnsubscribeHandler{Pool: pool, Secret: signingKey}
 		emailPrefsH = &webhttp.EmailPrefsHandler{Pool: pool}
 		// Email sign-in links and address confirmation (CF-33). Same sender
-		// as the digests, so in SES sandbox it reaches only the verified
-		// recipient, like everything else.
+		// as the digests.
 		emailLoginH = &auth.EmailLogin{
 			Pool:           pool,
 			Sender:         emailSender,
@@ -431,6 +437,20 @@ func main() {
 			PostLoginURL:   "/",
 			InviteRequired: cfg.InviteRequired,
 			DailyCap:       cfg.EmailLoginDailyCap,
+			ReviewEmail:    cfg.ReviewLoginEmail,
+			ReviewCode:     cfg.ReviewLoginCode,
+		}
+		// App Review's sign-in (CF-38) exists only when both halves are set.
+		// Half a pair is not refused -- the bypass simply does not exist,
+		// which is safe -- but it is almost certainly one put-parameter short,
+		// and a reviewer locked out is a rejection that says nothing about
+		// why. Neither value is logged: one is a credential, the other an
+		// address.
+		switch {
+		case cfg.ReviewLoginEmail != "" && cfg.ReviewLoginCode != "":
+			logger.Info("App Review sign-in is configured; seed its account with server -seed-review-account")
+		case cfg.ReviewLoginEmail != "" || cfg.ReviewLoginCode != "":
+			logger.Warn("only one of REVIEW_LOGIN_EMAIL and REVIEW_LOGIN_CODE is set; App Review sign-in is OFF until both are")
 		}
 
 		// Background jobs live in the same process — no separate worker
