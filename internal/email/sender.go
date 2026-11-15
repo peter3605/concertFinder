@@ -1,5 +1,5 @@
 // Package email is a small transport for outbound notification emails
-// (currently just the daily digest). Speaks plain SMTP so it works against
+// (the weekly digest and instant alerts). Speaks plain SMTP so it works against
 // SES, Postmark, Resend, Mailgun, or a local MailHog with only env-var
 // changes — no provider SDK. Design §11 keeps AWS out of /internal.
 package email

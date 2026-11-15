@@ -41,3 +41,31 @@ func (s dailySchedule) Next(current time.Time) time.Time {
 	}
 	return next
 }
+
+// WeeklyAt returns a river.PeriodicSchedule firing once a week, on the given
+// weekday at the given UTC hour and minute. It exists for the same reason
+// DailyAt does and keeps the same guarantees: a real wall-clock occurrence,
+// never river.PeriodicInterval(7*24*time.Hour). An interval re-anchors to
+// process start, so with deploys restarting the server several times a week
+// a weekly interval job would fire almost never.
+func WeeklyAt(weekday time.Weekday, hour, minute int) river.PeriodicSchedule {
+	return weeklySchedule{weekday: weekday, hour: hour, minute: minute}
+}
+
+type weeklySchedule struct {
+	weekday      time.Weekday
+	hour, minute int
+}
+
+// Next returns the first occurrence strictly after current, in UTC: the same
+// "strictly" as dailySchedule, so a scheduler asking at the target instant
+// gets next week rather than the moment it just ran.
+func (s weeklySchedule) Next(current time.Time) time.Time {
+	c := current.UTC()
+	days := (int(s.weekday) - int(c.Weekday()) + 7) % 7
+	next := time.Date(c.Year(), c.Month(), c.Day()+days, s.hour, s.minute, 0, 0, time.UTC)
+	if !next.After(c) {
+		next = next.AddDate(0, 0, 7)
+	}
+	return next
+}

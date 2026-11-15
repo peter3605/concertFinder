@@ -997,7 +997,7 @@ What that actually costs, beyond "it is a large change":
   `TestGoldenFixtures` exists to police.
 - Background freshness degrades to whatever the app can do in the background.
   The nightly affinity refresh and the pre-warmed snapshot both depend on
-  using the grant while the app is closed, so the daily digest, instant
+  using the grant while the app is closed, so the weekly digest, instant
   notifications and push all become best-effort behind an app launch.
 - The web client is unaffected — it is not an App Store product — which means
   the two clients would stop sharing an affinity path. That is the real cost:

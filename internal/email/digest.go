@@ -24,12 +24,21 @@ import (
 // more describes what CapDigest held back: those shows are not listed, the
 // subject and greeting count them, and the body links to the feed for the
 // rest. The zero value means nothing was held back.
-func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, unsubURL string, more DigestMore) Message {
+//
+// chosen, when non-nil, splits the listing into the user's own artists
+// (subscribed, picked or in their Spotify profile; see
+// concerts.ViewerMatches.Chosen) and genre matches, rendered in that order
+// as two sections (CF-B26). Each section is grouped by month and sorted by
+// date. Without the split the renderer's date sort would interleave them
+// again and undo the ordering the caller capped by. A nil chosen, or a
+// listing that is all one kind, renders as one list as before.
+func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, unsubURL string, more DigestMore, chosen func(concerts.Concert) bool) Message {
 	events := concerts.GroupEvents(newConcerts)
 	total := len(events) + more.Events
 	subject := fmt.Sprintf("ConcertFinder digest — %d new show%s", total, plural(total))
-	text := renderDigestText(displayName, events, unsubURL, more)
-	htmlBody := renderDigestHTML(displayName, events, unsubURL, more)
+	sections := digestSections(newConcerts, events, chosen)
+	text := renderDigestText(displayName, sections, total, unsubURL, more)
+	htmlBody := renderDigestHTML(displayName, sections, total, unsubURL, more)
 	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
 }
 
@@ -108,6 +117,45 @@ func actsLine(acts []concerts.Act) string {
 	}
 }
 
+// digestSection is one titled run of month groups. A digest that is not
+// split has one section with no title.
+type digestSection struct {
+	title  string
+	months []monthGroup
+}
+
+const (
+	chosenSectionTitle = "Your artists"
+	genreSectionTitle  = "In genres you follow"
+)
+
+func digestSections(cs []concerts.Concert, events []concerts.Event, chosen func(concerts.Concert) bool) []digestSection {
+	if chosen == nil {
+		return []digestSection{{months: groupByMonth(events)}}
+	}
+	lead := make(map[string]bool)
+	for _, c := range cs {
+		if chosen(c) {
+			lead[concerts.EventKey(c.LocalDay(), c.Venue, c.City)] = true
+		}
+	}
+	var mine, genre []concerts.Event
+	for _, e := range events {
+		if lead[concerts.EventKey(e.LocalDay(), e.Venue, e.City)] {
+			mine = append(mine, e)
+		} else {
+			genre = append(genre, e)
+		}
+	}
+	if len(mine) == 0 || len(genre) == 0 {
+		return []digestSection{{months: groupByMonth(events)}}
+	}
+	return []digestSection{
+		{title: chosenSectionTitle, months: groupByMonth(mine)},
+		{title: genreSectionTitle, months: groupByMonth(genre)},
+	}
+}
+
 type monthGroup struct {
 	label string
 	items []concerts.Event
@@ -135,24 +183,28 @@ func groupByMonth(es []concerts.Event) []monthGroup {
 	return out
 }
 
-func renderDigestText(displayName string, es []concerts.Event, unsub string, more DigestMore) string {
+func renderDigestText(displayName string, sections []digestSection, total int, unsub string, more DigestMore) string {
 	var b strings.Builder
-	total := len(es) + more.Events
 	fmt.Fprintf(&b, "Hi %s,\n\n", displayName)
 	fmt.Fprintf(&b, "%d new show%s in your area since your last digest:\n\n", total, plural(total))
-	for _, g := range groupByMonth(es) {
-		fmt.Fprintf(&b, "== %s ==\n", g.label)
-		for _, e := range g.items {
-			fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
-				actsLine(e.Acts),
-				e.LocalDayTime().Format("Mon Jan 2"),
-				e.Venue, e.City, stateSuffix(e.State),
-			)
-			for _, l := range e.Links {
-				fmt.Fprintf(&b, "    %s: %s\n", l.Source, l.URL)
-			}
+	for _, sec := range sections {
+		if sec.title != "" {
+			fmt.Fprintf(&b, "### %s ###\n\n", sec.title)
 		}
-		b.WriteString("\n")
+		for _, g := range sec.months {
+			fmt.Fprintf(&b, "== %s ==\n", g.label)
+			for _, e := range g.items {
+				fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
+					actsLine(e.Acts),
+					e.LocalDayTime().Format("Mon Jan 2"),
+					e.Venue, e.City, stateSuffix(e.State),
+				)
+				for _, l := range e.Links {
+					fmt.Fprintf(&b, "    %s: %s\n", l.Source, l.URL)
+				}
+			}
+			b.WriteString("\n")
+		}
 	}
 	if more.Events > 0 {
 		fmt.Fprintf(&b, "...and %d more. See them all: %s\n", more.Events, more.URL)
@@ -161,40 +213,44 @@ func renderDigestText(displayName string, es []concerts.Event, unsub string, mor
 	return b.String()
 }
 
-func renderDigestHTML(displayName string, es []concerts.Event, unsub string, more DigestMore) string {
+func renderDigestHTML(displayName string, sections []digestSection, total int, unsub string, more DigestMore) string {
 	var b strings.Builder
-	total := len(es) + more.Events
 	b.WriteString(`<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;max-width:600px;margin:2rem auto;line-height:1.5;color:#222">`)
 	fmt.Fprintf(&b, `<h2 style="margin-bottom:0.2rem">ConcertFinder digest</h2>`)
 	fmt.Fprintf(&b, `<p style="color:#666;margin-top:0">Hi %s — %d new show%s in your area since your last digest.</p>`,
 		html.EscapeString(displayName), total, plural(total))
 
-	for _, g := range groupByMonth(es) {
-		fmt.Fprintf(&b, `<h3 style="border-bottom:1px solid #eee;padding-bottom:0.3rem;margin-top:1.5rem">%s</h3>`,
-			html.EscapeString(g.label))
-		b.WriteString(`<ul style="list-style:none;padding:0">`)
-		for _, e := range g.items {
-			fmt.Fprintf(&b,
-				`<li style="padding:0.5rem 0;border-bottom:1px solid #f4f4f4">`+
-					`<strong>%s</strong> · %s<br>`+
-					`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
-				html.EscapeString(actsLine(e.Acts)),
-				html.EscapeString(e.LocalDayTime().Format("Mon Jan 2")),
-				html.EscapeString(e.Venue),
-				html.EscapeString(e.City),
-				html.EscapeString(stateSuffix(e.State)),
-			)
-			if len(e.Links) > 0 {
-				b.WriteString(`<div style="margin-top:0.3rem">`)
-				for _, l := range e.Links {
-					fmt.Fprintf(&b, `<a href="%s" style="color:#1db954;margin-right:0.6rem;text-decoration:none">%s</a>`,
-						html.EscapeString(l.URL), html.EscapeString(string(l.Source)))
-				}
-				b.WriteString(`</div>`)
-			}
-			b.WriteString(`</li>`)
+	for _, sec := range sections {
+		if sec.title != "" {
+			fmt.Fprintf(&b, `<h2 style="font-size:1.15em;margin-top:1.8rem;margin-bottom:0">%s</h2>`, html.EscapeString(sec.title))
 		}
-		b.WriteString(`</ul>`)
+		for _, g := range sec.months {
+			fmt.Fprintf(&b, `<h3 style="border-bottom:1px solid #eee;padding-bottom:0.3rem;margin-top:1.5rem">%s</h3>`,
+				html.EscapeString(g.label))
+			b.WriteString(`<ul style="list-style:none;padding:0">`)
+			for _, e := range g.items {
+				fmt.Fprintf(&b,
+					`<li style="padding:0.5rem 0;border-bottom:1px solid #f4f4f4">`+
+						`<strong>%s</strong> · %s<br>`+
+						`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
+					html.EscapeString(actsLine(e.Acts)),
+					html.EscapeString(e.LocalDayTime().Format("Mon Jan 2")),
+					html.EscapeString(e.Venue),
+					html.EscapeString(e.City),
+					html.EscapeString(stateSuffix(e.State)),
+				)
+				if len(e.Links) > 0 {
+					b.WriteString(`<div style="margin-top:0.3rem">`)
+					for _, l := range e.Links {
+						fmt.Fprintf(&b, `<a href="%s" style="color:#1db954;margin-right:0.6rem;text-decoration:none">%s</a>`,
+							html.EscapeString(l.URL), html.EscapeString(string(l.Source)))
+					}
+					b.WriteString(`</div>`)
+				}
+				b.WriteString(`</li>`)
+			}
+			b.WriteString(`</ul>`)
+		}
 	}
 	if more.Events > 0 {
 		fmt.Fprintf(&b, `<p style="margin-top:1rem">…and %d more. <a href="%s" style="color:#1db954">See them all</a></p>`,
@@ -216,7 +272,7 @@ func stateSuffix(state string) string {
 
 // RenderInstantNotify composes an email for one or more newly-discovered
 // concerts by artists the user actively subscribed to. Distinct subject and
-// intro from the daily digest so recipients can tell them apart at a glance
+// intro from the weekly digest so recipients can tell them apart at a glance
 // (and set inbox rules accordingly).
 //
 // Grouping is safe here even though the email is per-subscription: the caller

@@ -547,13 +547,14 @@ func main() {
 		// the next real occurrence, so a restart resumes the schedule instead
 		// of resetting a countdown.
 		if gap := cfg.ScanDigestGapHours(); gap < config.MinScanDigestGapHours {
-			logger.Warn("daily digest runs too soon after the daily scan; it will report the previous day's results",
+			logger.Warn("the digest runs too soon after the daily scan; it will report the previous day's results",
 				"scan_hour_utc", cfg.DailyScanHourUTC,
 				"digest_hour_utc", cfg.DailyDigestHourUTC,
 				"gap_hours", gap,
 				"min_gap_hours", config.MinScanDigestGapHours,
 			)
 		}
+		logger.Info("digest schedule", "weekday", cfg.DigestWeekday.String(), "hour_utc", cfg.DailyDigestHourUTC)
 		periodic := []*river.PeriodicJob{
 			river.NewPeriodicJob(
 				jobs.DailyAt(cfg.DailyAffinityHourUTC, 0),
@@ -565,10 +566,14 @@ func main() {
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutScanConcertsArgs{}, nil },
 				&river.PeriodicJobOpts{ID: "daily_scan_concerts", RunOnStart: false},
 			),
+			// Weekly since CF-B26, on DIGEST_WEEKDAY (default Thursday) at
+			// the digest hour. Nothing in the worker depends on the cadence:
+			// what is new comes from the user_digest_sent ledger, not a time
+			// window, so the change neither drops nor repeats a show.
 			river.NewPeriodicJob(
-				jobs.DailyAt(cfg.DailyDigestHourUTC, 0),
+				jobs.WeeklyAt(cfg.DigestWeekday, cfg.DailyDigestHourUTC, 0),
 				func() (river.JobArgs, *river.InsertOpts) { return jobs.FanoutSendDigestArgs{}, nil },
-				&river.PeriodicJobOpts{ID: "daily_send_digest", RunOnStart: false},
+				&river.PeriodicJobOpts{ID: "weekly_send_digest", RunOnStart: false},
 			),
 			river.NewPeriodicJob(
 				jobs.DailyAt(cfg.DailyJanitorHourUTC, 0),

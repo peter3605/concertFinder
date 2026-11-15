@@ -291,18 +291,12 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if _, ok := saved[filtered[i].DedupKey]; ok {
 			filtered[i].Saved = true
 		}
-		if _, ok := subscribed[filtered[i].Artist.ID]; ok {
-			filtered[i].Subscribed = true
-		}
-		// Absent for an artist scored before signals were recorded, or one
-		// whose only contribution has no wording. A missing reason renders
-		// as nothing on both clients, never as a placeholder.
-		if reason, ok := reasons[filtered[i].Artist.ID]; ok {
-			filtered[i].Reason = reason
-		} else if _, ok := pickIDs[filtered[i].Artist.ID]; ok {
-			filtered[i].Reason = PickedReason
-		}
 	}
+	// Subscribed and the reason line come from the one helper the digest
+	// also uses (CF-B26), so the two cannot disagree about why an artist is
+	// in this user's list. A missing reason renders as nothing on both
+	// clients, never as a placeholder.
+	concerts.ViewerMatches{Subscribed: subscribed, Picked: pickIDs, Reasons: reasons}.Tag(filtered)
 
 	// Group last, after filtering and tagging: an act carries its own saved
 	// and subscribed flags onto the card, and an event survives a filter if
@@ -326,8 +320,8 @@ func (h *ConcertsHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // PickedReason is the feed's reason line for an artist the user picked by
-// hand (docs/public-path.md §5).
-const PickedReason = "You picked them"
+// hand (docs/public-path.md §5). Defined in concerts beside ViewerMatches.
+const PickedReason = concerts.PickedReason
 
 // pickState is whether a user has anything a scan could search for.
 type pickState int

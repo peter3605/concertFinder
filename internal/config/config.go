@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -78,6 +79,14 @@ type Config struct {
 	DailyDigestHourUTC   int
 	DailyJanitorHourUTC  int
 	DailySeedHourUTC     int
+
+	// DigestWeekday is the day the digest goes out (DIGEST_WEEKDAY, default
+	// Thursday, so it lands before the usual Friday general on-sales). The
+	// digest is weekly since CF-B26 and runs at DailyDigestHourUTC on this
+	// day; the env name keeps "DAILY" because renaming it is an SSM change,
+	// and render-env.sh rewrites .env from SSM on every deploy.
+	DigestWeekday    time.Weekday
+	digestWeekdayErr error
 
 	// DiscoverSeedCities are the places the daily seed fetches listings for,
 	// so the signed-out landing page has something to show in them.
@@ -310,6 +319,7 @@ func Load() (*Config, error) {
 	c.DailyAffinityHourUTC = hourEnv("DAILY_AFFINITY_HOUR_UTC", 6)
 	c.DailyScanHourUTC = hourEnv("DAILY_SCAN_HOUR_UTC", 7)
 	c.DailyDigestHourUTC = hourEnv("DAILY_DIGEST_HOUR_UTC", 9)
+	c.DigestWeekday, c.digestWeekdayErr = parseWeekday(os.Getenv("DIGEST_WEEKDAY"), time.Thursday)
 	c.DailyJanitorHourUTC = hourEnv("DAILY_JANITOR_HOUR_UTC", 10)
 	// Ahead of the affinity refresh and the nightly scan: the seed spends
 	// account quota those two also draw on, and it is the cheapest of the
@@ -526,6 +536,9 @@ func (c Config) Validate() []error {
 
 	if c.discoverSeedCitiesErr != nil {
 		errs = append(errs, c.discoverSeedCitiesErr)
+	}
+	if c.digestWeekdayErr != nil {
+		errs = append(errs, c.digestWeekdayErr)
 	}
 
 	if u := c.SpotifyRedirectURI; u != "" && !strings.HasSuffix(strings.TrimRight(u, "/"), SpotifyCallbackPath) {
@@ -774,6 +787,25 @@ func intEnv(key string, def int) int {
 // hourEnv is intEnv clamped to a valid hour. An out-of-range value falls back
 // to the default rather than being passed through: time.Date would happily
 // normalize hour 25 into the next day, silently moving a job.
+// parseWeekday reads a day name: the full English name or its first three
+// letters, any case ("thu", "Thursday"). Empty means def. Anything else is an
+// error rather than a silent default, unlike hourEnv: a typo'd weekday that
+// quietly fell back would send the digest on a day nobody chose, and nothing
+// would say why.
+func parseWeekday(raw string, def time.Weekday) (time.Weekday, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return def, nil
+	}
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		name := strings.ToLower(d.String())
+		if v == name || v == name[:3] {
+			return d, nil
+		}
+	}
+	return def, fmt.Errorf("DIGEST_WEEKDAY must be a day of the week such as thu or thursday, got %q", raw)
+}
+
 func hourEnv(key string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v >= 0 && v <= 23 {
 		return v
@@ -781,7 +813,8 @@ func hourEnv(key string, def int) int {
 	return def
 }
 
-// MinScanDigestGapHours is how far the daily digest must trail the daily scan.
+// MinScanDigestGapHours is how far the digest must trail the daily scan on the
+// day it runs.
 // The scan fanout smears its per-user jobs across jobs.SpreadWindow (60min),
 // each job may run for jobs.ScanBudget (5min), and a failed one retries at
 // attempt x 4min up to jobs.ScanMaxAttempts — roughly 90 minutes worst case.

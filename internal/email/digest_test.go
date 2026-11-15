@@ -18,10 +18,10 @@ func TestRenderDigestSubjectPluralization(t *testing.T) {
 		one[0],
 		{Artist: concerts.ArtistRef{Name: "Y"}, Date: when.AddDate(0, 0, 1), Venue: "V2", City: "C"},
 	}
-	if got := RenderDigest("peter", "p@ex", one, "https://ex/unsub", DigestMore{}).Subject; !strings.Contains(got, "1 new show") || strings.Contains(got, "shows") {
+	if got := RenderDigest("peter", "p@ex", one, "https://ex/unsub", DigestMore{}, nil).Subject; !strings.Contains(got, "1 new show") || strings.Contains(got, "shows") {
 		t.Errorf("singular subject wrong: %q", got)
 	}
-	if got := RenderDigest("peter", "p@ex", two, "https://ex/unsub", DigestMore{}).Subject; !strings.Contains(got, "2 new shows") {
+	if got := RenderDigest("peter", "p@ex", two, "https://ex/unsub", DigestMore{}, nil).Subject; !strings.Contains(got, "2 new shows") {
 		t.Errorf("plural subject wrong: %q", got)
 	}
 }
@@ -32,7 +32,7 @@ func TestRenderDigestIncludesArtistVenueUnsub(t *testing.T) {
 		{Artist: concerts.ArtistRef{Name: "Olivia Rodrigo"}, Date: when, Venue: "Capital One Arena", City: "Washington", State: "DC",
 			Links: []concerts.TicketLink{{Source: concerts.SourceTicketmaster, URL: "https://tm.example/1"}}},
 	}
-	m := RenderDigest("peter", "p@ex", cs, "https://site.example/api/unsubscribe?token=abc", DigestMore{})
+	m := RenderDigest("peter", "p@ex", cs, "https://site.example/api/unsubscribe?token=abc", DigestMore{}, nil)
 	for _, needle := range []string{"Olivia Rodrigo", "Capital One Arena", "Washington", "https://tm.example/1", "https://site.example/api/unsubscribe?token=abc"} {
 		if !strings.Contains(m.Text, needle) {
 			t.Errorf("text body missing %q\n%s", needle, m.Text)
@@ -49,7 +49,7 @@ func TestRenderDigestGroupsByMonth(t *testing.T) {
 		{Artist: concerts.ArtistRef{Name: "B"}, Date: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Venue: "V2", City: "C"},
 		{Artist: concerts.ArtistRef{Name: "C"}, Date: time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC), Venue: "V3", City: "C"},
 	}
-	m := RenderDigest("peter", "p@ex", cs, "https://ex/u", DigestMore{})
+	m := RenderDigest("peter", "p@ex", cs, "https://ex/u", DigestMore{}, nil)
 	// August entries appear before September header — check ordering by
 	// scanning positions.
 	aug := strings.Index(m.Text, "August 2026")
@@ -81,7 +81,7 @@ func festival(names ...string) []concerts.Concert {
 // The digest's net-new set is per (artist, show), so a festival arrives as one
 // Concert per matched artist and the renderer has to fold them.
 func TestRenderDigestCountsEventsNotConcerts(t *testing.T) {
-	m := RenderDigest("peter", "p@ex", festival("A", "B", "C", "D", "E", "F"), "https://ex/u", DigestMore{})
+	m := RenderDigest("peter", "p@ex", festival("A", "B", "C", "D", "E", "F"), "https://ex/u", DigestMore{}, nil)
 	if !strings.Contains(m.Subject, "1 new show") || strings.Contains(m.Subject, "shows") {
 		t.Errorf("six acts on one bill must count as one show; got %q", m.Subject)
 	}
@@ -203,7 +203,7 @@ func TestDigestOfA600ShowGenreFeedIsCapped(t *testing.T) {
 		t.Errorf("more = %d, want %d", more, 600-DigestMaxEvents)
 	}
 	const feed = "https://site.example/"
-	m := RenderDigest("peter", "p@ex", kept, "https://site.example/api/unsubscribe?token=abc", DigestMore{Events: more, URL: feed})
+	m := RenderDigest("peter", "p@ex", kept, "https://site.example/api/unsubscribe?token=abc", DigestMore{Events: more, URL: feed}, nil)
 
 	listed := 0
 	for i := 0; i < 600; i++ {
@@ -237,5 +237,31 @@ func TestCapDigestKeepsWholeEvents(t *testing.T) {
 	kept, more := CapDigest(cs, 1)
 	if len(kept) != 3 || more != 1 {
 		t.Errorf("kept %d rows, %d more events; want all three Fest acts and the Club held back", len(kept), more)
+	}
+}
+
+// A split digest lists the user's own artists in their own section ahead of
+// genre matches, even when every genre show is earlier. Without sections the
+// month grouping would sort them back into one date-ordered list.
+func TestRenderDigestSplitsChosenArtistsFirst(t *testing.T) {
+	when := time.Date(2026, 8, 1, 20, 0, 0, 0, time.UTC)
+	cs := []concerts.Concert{
+		{Artist: concerts.ArtistRef{ID: "spotify1", Name: "Mine"}, Date: when.AddDate(0, 1, 0), Venue: "Late Room", City: "C"},
+		{Artist: concerts.ArtistRef{ID: "tm:G", Name: "Genre Early"}, Date: when, Venue: "Early Room", City: "C"},
+	}
+	chosen := concerts.ViewerMatches{}.Chosen
+	m := RenderDigest("peter", "p@ex", cs, "https://ex/u", DigestMore{}, chosen)
+	for _, body := range []string{m.Text, m.HTML} {
+		mine, mineHead := strings.Index(body, "Mine"), strings.Index(body, "Your artists")
+		genre, genreHead := strings.Index(body, "Genre Early"), strings.Index(body, "In genres you follow")
+		if mineHead < 0 || genreHead < 0 || !(mineHead < mine && mine < genreHead && genreHead < genre) {
+			t.Fatalf("want 'Your artists' > Mine > 'In genres you follow' > Genre Early:\n%s", body)
+		}
+	}
+
+	// All one kind: no section headings, same as before the split.
+	only := RenderDigest("peter", "p@ex", cs[1:], "https://ex/u", DigestMore{}, chosen)
+	if strings.Contains(only.Text, "Your artists") || strings.Contains(only.Text, "In genres you follow") {
+		t.Errorf("an unsplit digest grew section headings:\n%s", only.Text)
 	}
 }

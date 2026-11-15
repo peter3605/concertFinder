@@ -105,7 +105,7 @@ type FanoutScanConcertsArgs struct{}
 
 func (FanoutScanConcertsArgs) Kind() string { return "fanout_scan_concerts" }
 
-// SendDigestArgs sends the daily digest email to one opted-in user.
+// SendDigestArgs sends the weekly digest email to one opted-in user.
 type SendDigestArgs struct {
 	UserID uuid.UUID `json:"user_id"`
 }

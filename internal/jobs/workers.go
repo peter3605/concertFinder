@@ -667,7 +667,7 @@ WHERE s.last_seen_at > now() - interval '14 days'
 	return nil
 }
 
-// SendDigestWorker composes and sends one user's daily digest. Diffs the
+// SendDigestWorker composes and sends one user's weekly digest. Diffs the
 // current snapshot's dedup_keys against a small "seen" table (represented
 // here by digest_last_sent_at as a time cutoff) and emails whatever is net-new.
 type SendDigestWorker struct {
@@ -778,9 +778,15 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		slog.Info("digest: nothing new", "user", user.ID)
 		return nil
 	}
+	// Artists the user chose lead the listing (CF-B26). The snapshot is in
+	// date order only, so without this a dense city's genre feed fills all
+	// 25 places with earlier shows and a followed artist's show is held back
+	// week after week, in exactly the email that is now sent once a week.
+	matches := w.viewerMatches(ctx, user.ID)
+	fresh = concerts.ChosenFirst(fresh, matches.Chosen)
 	// Cap the listing (CF-31): a genre pick in a dense city is hundreds of
 	// shows. Only what is listed goes into sendKeys, so the held-back shows
-	// are still unsent tomorrow and lead that digest; the email links to the
+	// are still unsent next week and lead that digest; the email links to the
 	// feed for them meanwhile.
 	fresh, moreEvents := email.CapDigest(fresh, email.DigestMaxEvents)
 	sendKeys = sendKeys[:0]
@@ -789,7 +795,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
 	more := email.DigestMore{Events: moreEvents, URL: w.UnsubscribeBase + "/"}
-	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub, more)
+	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub, more, matches.Chosen)
 	// Send first, record only what landed. See sendAndRecord for why this
 	// order, and why the earlier one turned a rejected recipient into shows
 	// the user is never told about.
@@ -880,7 +886,7 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
 	msg := email.RenderInstantNotify(user.DisplayName, user.Email, fresh, unsub)
-	// Same ordering as the daily digest, through the same helper. These two
+	// Same ordering as the weekly digest, through the same helper. These two
 	// are one channel with two triggers and must not drift: a fix applied to
 	// one of them and not the other is the same bug still shipping.
 	if err := sendAndRecord(ctx, w.Sender, msg, sendKeys, func(ctx context.Context, keys []string) error {
@@ -1126,4 +1132,27 @@ func profileTargets(artists []spotify.ScoredArtist) []concerts.Target {
 		out[i] = concerts.Target{ID: a.ID, Name: a.Name, Score: a.Score, Genres: a.Genres}
 	}
 	return out
+}
+
+// viewerMatches loads what the digest needs to tell a chosen artist from a
+// genre match: the user's subscriptions and artist picks. Profile artists
+// need no lookup (see concerts.ViewerMatches.Chosen). Either lookup failing
+// costs only the ordering, never the digest, so it is logged and skipped.
+func (w *SendDigestWorker) viewerMatches(ctx context.Context, userID uuid.UUID) concerts.ViewerMatches {
+	var v concerts.ViewerMatches
+	if s, err := db.GetSubscribedArtistIDs(ctx, w.Pool, userID); err != nil {
+		slog.Warn("digest: subscribed lookup failed; ordering without it", "err", err, "user", userID)
+	} else {
+		v.Subscribed = s
+	}
+	picks, err := db.ListArtistPicks(ctx, w.Pool, userID)
+	if err != nil {
+		slog.Warn("digest: picks lookup failed; ordering without them", "err", err, "user", userID)
+		return v
+	}
+	v.Picked = make(map[string]struct{}, len(picks))
+	for _, p := range picks {
+		v.Picked[PickArtistID(p.AttractionID)] = struct{}{}
+	}
+	return v
 }

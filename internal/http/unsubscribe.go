@@ -72,7 +72,7 @@ func (h *UnsubscribeHandler) Get(w http.ResponseWriter, r *http.Request) {
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribe</title></head>
 <body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:4rem auto;line-height:1.5;color:#222">
 <h2>Unsubscribe from ConcertFinder email?</h2>
-<p>This turns off both the daily digest and instant new-show alerts. Your account and saved shows are not affected.</p>
+<p>This turns off both the weekly digest and instant new-show alerts. Your account and saved shows are not affected.</p>
 <form method="POST" action="/api/unsubscribe">
 <input type="hidden" name="token" value="%s">
 <button type="submit" style="font:inherit;padding:0.6rem 1.1rem;border:0;border-radius:6px;background:#1db954;color:#fff;cursor:pointer">Unsubscribe me</button>
@@ -110,7 +110,7 @@ func (h *UnsubscribeHandler) Post(w http.ResponseWriter, r *http.Request) {
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribed</title></head>
 <body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:4rem auto;line-height:1.5;color:#222">
 <h2>Unsubscribed</h2>
-<p>You&rsquo;ll no longer receive daily digests or instant new-show alerts from ConcertFinder.</p>
+<p>You&rsquo;ll no longer receive weekly digests or instant new-show alerts from ConcertFinder.</p>
 <p>You can turn either back on any time by logging in and changing your email settings.</p>
 </body></html>`))
 }

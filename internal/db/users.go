@@ -136,7 +136,7 @@ WHERE id = $1`
 //     FanoutSendDigestWorker selects users on digest_opt_in being true and the
 //     email column being non-empty, with no session or connection check at
 //     all, so a disconnected user whose snapshot survived would keep receiving
-//     a nightly digest built
+//     a weekly digest built
 //     from the Spotify profile they just disconnected. Deleting the snapshot
 //     makes SendDigestWorker's `GetConcertSnapshot` miss and return nil, which
 //     is the existing quiet no-op. Nothing logs or errors in the version where
