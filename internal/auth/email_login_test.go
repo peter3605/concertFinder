@@ -592,3 +592,130 @@ func TestSignInMailCarriesNoUnsubscribeAndNamesExpiry(t *testing.T) {
 		t.Errorf("mail missing code, expiry or link: %q", m.Text)
 	}
 }
+
+// App Review's sign-in (CF-38). The configured pair is the only thing that
+// skips the mail, and only the mail: the code is consumed by the ordinary
+// path, so every limit on it is the ordinary one.
+
+const (
+	reviewAddr = "review@example.com"
+	reviewCode = "246810"
+)
+
+func (f *emailFixture) postCode(t *testing.T, addr, code string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.do(t, http.MethodPost, "/api/auth/email/code", "application/json",
+		`{"email":"`+addr+`","code":"`+code+`"}`, "")
+}
+
+func newReviewFixture(t *testing.T, addr, code string) *emailFixture {
+	t.Helper()
+	f := newEmailFixture(t, true)
+	f.e.ReviewEmail, f.e.ReviewCode = addr, code
+	return f
+}
+
+func TestReviewLoginSignsInWithConfiguredCodeAndSendsNothing(t *testing.T) {
+	f := newReviewFixture(t, reviewAddr, reviewCode)
+	uid := f.emailUser(t, reviewAddr)
+
+	// Typed with different case, as a reviewer might.
+	if rec := f.start(t, "Review@Example.com", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("start = %d, want 202", rec.Code)
+	}
+	if n := f.mail.count(); n != 0 {
+		t.Fatalf("mails = %d, want 0: the review address has no mailbox to read", n)
+	}
+	rec := f.postCode(t, reviewAddr, reviewCode)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("configured code = %d %q, want 204", rec.Code, rec.Body.String())
+	}
+	su, err := db.GetSessionUserByTokenHash(context.Background(), f.pool, HashSessionToken(sessionCookie(rec)))
+	if err != nil || su.User.ID != uid {
+		t.Fatalf("review sign-in reached %v (%v), want %v", su.User.ID, err, uid)
+	}
+	// Single use, like every code: the next sign-in starts again.
+	if rec := f.postCode(t, reviewAddr, reviewCode); rec.Code != http.StatusBadRequest {
+		t.Fatalf("reused code = %d, want 400", rec.Code)
+	}
+}
+
+func TestReviewLoginAttemptLimitsApply(t *testing.T) {
+	f := newReviewFixture(t, reviewAddr, reviewCode)
+	f.emailUser(t, reviewAddr)
+
+	// Five wrong guesses retire the token, and then the right code fails too.
+	f.start(t, reviewAddr, "")
+	for i := 0; i < db.EmailCodeMaxAttempts; i++ {
+		if rec := f.postCode(t, reviewAddr, "135791"); rec.Code != http.StatusBadRequest {
+			t.Fatalf("wrong guess #%d = %d, want 400", i+1, rec.Code)
+		}
+	}
+	if rec := f.postCode(t, reviewAddr, reviewCode); rec.Code != http.StatusBadRequest {
+		t.Fatalf("configured code after %d misses = %d, want 400", db.EmailCodeMaxAttempts, rec.Code)
+	}
+
+	// The per-address hourly limit counts review tokens like any other, so
+	// the configured code cannot be tried more than that many tokens' worth.
+	for i := 0; i < db.EmailLoginPerAddressHourly+2; i++ {
+		f.start(t, reviewAddr, "")
+	}
+	if n := f.scalar(t, `SELECT count(*) FROM email_login_tokens WHERE email = $1`, reviewAddr); n != db.EmailLoginPerAddressHourly {
+		t.Fatalf("tokens issued = %d, want the hourly limit %d", n, db.EmailLoginPerAddressHourly)
+	}
+}
+
+// With either value unset there is no bypass: the address is mailed a random
+// code like anyone else, and the would-be review code does not sign in.
+func TestReviewLoginNeedsBothValues(t *testing.T) {
+	for name, pair := range map[string][2]string{
+		"no code":    {reviewAddr, ""},
+		"no address": {"", reviewCode},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newReviewFixture(t, pair[0], pair[1])
+			f.emailUser(t, reviewAddr)
+			f.start(t, reviewAddr, "")
+			if n := f.mail.count(); n != 1 {
+				t.Fatalf("mails = %d, want 1: without both values the address is ordinary", n)
+			}
+			if _, mailed := f.mail.last(t); mailed == reviewCode {
+				t.Skip("random code collided with the review code")
+			}
+			if rec := f.postCode(t, reviewAddr, reviewCode); rec.Code != http.StatusBadRequest {
+				t.Fatalf("review code with half a pair = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+// Only that pair: another address gets a mailed random code, and confirming
+// the review address from a signed-in account still proves the mailbox.
+func TestReviewCodeIsOnlyForTheReviewLogin(t *testing.T) {
+	f := newReviewFixture(t, reviewAddr, reviewCode)
+	f.emailUser(t, "someone@example.com")
+
+	f.start(t, "someone@example.com", "")
+	if n := f.mail.count(); n != 1 {
+		t.Fatalf("mails = %d, want 1", n)
+	}
+	if _, mailed := f.mail.last(t); mailed != reviewCode {
+		if rec := f.postCode(t, "someone@example.com", reviewCode); rec.Code != http.StatusBadRequest {
+			t.Fatalf("review code on another address = %d, want 400", rec.Code)
+		}
+	}
+
+	_, sess := f.spotifyUserWithSession(t)
+	if rec := f.do(t, http.MethodPost, "/api/me/email", "application/json", `{"email":"`+reviewAddr+`"}`, sess); rec.Code != http.StatusAccepted {
+		t.Fatalf("set address = %d %q", rec.Code, rec.Body.String())
+	}
+	if n := f.mail.count(); n != 2 {
+		t.Fatalf("mails = %d, want 2: confirming the review address must still mail it", n)
+	}
+	if _, mailed := f.mail.last(t); mailed != reviewCode {
+		if rec := f.do(t, http.MethodPost, "/api/me/email/verify", "application/json",
+			`{"email":"`+reviewAddr+`","code":"`+reviewCode+`"}`, sess); rec.Code != http.StatusBadRequest {
+			t.Fatalf("review code confirming an address = %d, want 400", rec.Code)
+		}
+	}
+}

@@ -74,6 +74,17 @@ type EmailLogin struct {
 	OnLoginSuccess func(ctx context.Context, userID uuid.UUID)
 	// Now is for tests; nil is time.Now.
 	Now func() time.Time
+
+	// ReviewEmail and ReviewCode are App Review's sign-in (CF-38). A login
+	// started for exactly ReviewEmail is issued ReviewCode instead of a
+	// random code and nothing is mailed, because a reviewer cannot read a
+	// mailbox. It is the only thing that differs: the token row, its expiry,
+	// the five-guess limit and the per-address and daily limits are the
+	// ordinary ones, because the code is consumed by the ordinary path.
+	// Either empty means there is no bypass at all. ReviewEmail is compared
+	// after normalizeEmail, so it must be lowercase (config.Load does that).
+	ReviewEmail string
+	ReviewCode  string
 }
 
 // NewEmailStartLimiter is the per-IP bucket on /email/start: a burst of 5,
@@ -266,9 +277,12 @@ func (e *EmailLogin) issue(ctx context.Context, addr, purpose string, userID uui
 	if err != nil {
 		return err
 	}
-	code, err := sixDigitCode()
-	if err != nil {
-		return err
+	review := e.isReviewLogin(addr, purpose)
+	code := e.ReviewCode
+	if !review {
+		if code, err = sixDigitCode(); err != nil {
+			return err
+		}
 	}
 	th := HashEmailLoginToken(token)
 	if err := db.InsertEmailLoginToken(ctx, e.Pool, db.EmailLoginToken{
@@ -283,8 +297,23 @@ func (e *EmailLogin) issue(ctx context.Context, addr, purpose string, userID uui
 	}); err != nil {
 		return err
 	}
+	if review {
+		// No mail: the reviewer already holds the code, from the App Store
+		// Connect notes. The row above is what makes it usable, once.
+		slog.Info("email sign-in: review address; configured code issued, nothing sent")
+		return nil
+	}
 	link := strings.TrimRight(e.SiteBaseURL, "/") + EmailLinkPath + "?token=" + url.QueryEscape(token)
 	return e.Sender.Send(ctx, email.RenderSignIn(addr, link, code, email.SignInPurpose(purpose)))
+}
+
+// isReviewLogin reports whether this issue is App Review's sign-in: both
+// values configured, a login, and exactly the configured address. Never an
+// address confirmation: that exists to prove the user holds the mailbox, and
+// a known code would prove nothing.
+func (e *EmailLogin) isReviewLogin(addr, purpose string) bool {
+	return e.ReviewEmail != "" && e.ReviewCode != "" &&
+		purpose == db.EmailPurposeLogin && addr == e.ReviewEmail
 }
 
 // HandleConfirmPage is GET /app/auth/email. It renders a button and consumes
