@@ -1,0 +1,74 @@
+# release.conf - what the release kit needs to know about this app.
+#
+# Sourced by bash. Paths are relative to the repo root, except where a comment
+# says relative to PROJECT_DIR. Every scripts/release/*.sh reads this file, so
+# nothing app-specific lives in the scripts themselves.
+#
+# This file names your bundle IDs and, through ExportOptions.plist, your team.
+# Neither is a secret, and a private app repo is the place for them. Keep them
+# out of anything public.
+
+# The product name: the export contains Payload/<APP_NAME>.app.
+APP_NAME="REPLACE_ME"
+
+# Where the Xcode project lives, relative to the repo root.
+PROJECT_DIR="."
+# The .xcodeproj or .xcworkspace inside PROJECT_DIR.
+PROJECT="REPLACE_ME.xcodeproj"
+SCHEME="REPLACE_ME"
+
+# Run in PROJECT_DIR after the build number changes, when the project is
+# generated from a spec rather than committed. Empty when it is committed.
+#   GENERATE_CMD="xcodegen generate"
+GENERATE_CMD=""
+
+# Holds CURRENT_PROJECT_VERSION (the build number, bumped by archive.sh) and
+# MARKETING_VERSION (set by hand). Relative to PROJECT_DIR. Either an XcodeGen
+# project.yml (KEY: value) or an .xcconfig (KEY = value). Every copy of each
+# key in the file must agree.
+VERSION_FILE="project.yml"
+
+# Relative to PROJECT_DIR.
+INFO_PLIST="REPLACE_ME/Info.plist"
+PRIVACY_MANIFEST="REPLACE_ME/PrivacyInfo.xcprivacy"
+
+# Every bundle whose build number and entitlements are checked, as
+# "PATH_IN_APP|ENTITLEMENTS_FILE". "." is the app itself. ENTITLEMENTS_FILE is
+# relative to PROJECT_DIR, and may be left off for a bundle with none.
+BUNDLES=(
+  ".|REPLACE_ME/REPLACE_ME.entitlements"
+  # "PlugIns/MyWidget.appex|MyWidget/MyWidget.entitlements"
+)
+
+# What each bundle's signature must carry, as "PATH_IN_APP|KEY" or
+# "PATH_IN_APP|KEY=VALUE". VALUE must equal a string or boolean, or be one
+# member of an array. In an App Store export aps-environment is "production",
+# whatever the source file says.
+REQUIRED_ENTITLEMENTS=(
+  # ".|aps-environment=production"
+  # ".|com.apple.developer.associated-domains=applinks:example.com"
+  # ".|com.apple.security.application-groups=group.com.example.app"
+  # "PlugIns/MyWidget.appex|com.apple.security.application-groups=group.com.example.app"
+)
+
+# Swift source scanned for `privacy: .public`, relative to the repo root.
+LOG_SOURCE_DIRS=(
+  "REPLACE_ME"
+)
+# "FILE:SUBSTRING" entries allowed to stay public. Give each a comment saying
+# why the value provably carries no user content.
+LOG_PRIVACY_ALLOWED=(
+)
+
+# The listing copy, one marked block per App Store Connect field.
+STORE_COPY="docs/store-copy.md"
+# Fields that must be present. Add whats_new from the second release on;
+# a 1.0 has no What's New field.
+STORE_COPY_FIELDS=(name subtitle keywords promotional_text description)
+
+# Where archive.sh builds. Deleted at the start of every archive. Keep it
+# gitignored. Defaults to PROJECT_DIR/build/release.
+# BUILD_DIR="build/release"
+
+# Defaults to ExportOptions.plist beside this file.
+# EXPORT_OPTIONS="scripts/release/ExportOptions.plist"
