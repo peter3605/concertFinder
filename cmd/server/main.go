@@ -471,6 +471,7 @@ func main() {
 			Sender:           emailSender,
 			UnsubscribeBase:  cfg.SiteBaseURL,
 			UnsubscribeToken: unsubscribeH.Token,
+			Affinity:         affinitySvc,
 			// Same fallback the scan fanout uses. Without it, an opted-in
 			// user who never saved a location is scanned nightly and never
 			// emailed.
@@ -485,6 +486,7 @@ func main() {
 			Sender:           emailSender,
 			UnsubscribeBase:  cfg.SiteBaseURL,
 			UnsubscribeToken: unsubscribeH.Token,
+			Affinity:         affinitySvc,
 		})
 		// APNs client. Absent configuration is not an error — a deployment
 		// without an Apple developer account still runs everything else —

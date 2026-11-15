@@ -129,6 +129,11 @@ VALUES ($1, $2, 'Digest Test', 'ct'::bytea, 'n'::bytea, 'digest@example.com', tr
 	if !(mineHead >= 0 && mineHead < profile && profile < picked && picked < genreHead && genreHead < firstGenre) {
 		t.Errorf("order: heading@%d profile@%d picked@%d genre-heading@%d genre@%d, want both chosen first, soonest first, then genre", mineHead, profile, picked, genreHead, firstGenre)
 	}
+	// The worker tags each card's reason line (CF-B27) through the same
+	// ViewerMatches the ordering uses.
+	if !strings.Contains(text, "Picked Band") || !strings.Contains(text, concerts.PickedReason) {
+		t.Errorf("the picked artist's card should carry %q:\n%s", concerts.PickedReason, text)
+	}
 	// 2 chosen + 23 genre fill the 25 places; Genre Act 22 is the last listed.
 	if !strings.Contains(text, "Genre Act 22") || strings.Contains(text, "Genre Act 23") {
 		t.Errorf("want genre shows 00-22 listed and 23 onward held back:\n%s", text)

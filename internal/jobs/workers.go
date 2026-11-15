@@ -676,6 +676,9 @@ type SendDigestWorker struct {
 	Sender           MailSender
 	UnsubscribeBase  string // e.g. https://your-domain.com — the /api/me/unsubscribe path is appended
 	UnsubscribeToken func(userID uuid.UUID) string
+	// Affinity supplies the Spotify reason line on each card. Optional: nil,
+	// or a missing profile, costs the line and nothing else.
+	Affinity ReasonSource
 	// Fallback is the server-wide default location, used when the user never
 	// saved one. Must match what FanoutScanConcertsWorker uses or the digest
 	// looks up a location_key no scan ever wrote.
@@ -782,8 +785,11 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 	// date order only, so without this a dense city's genre feed fills all
 	// 25 places with earlier shows and a followed artist's show is held back
 	// week after week, in exactly the email that is now sent once a week.
-	matches := w.viewerMatches(ctx, user.ID)
+	matches := viewerMatches(ctx, w.Pool, w.Affinity, user.ID)
 	fresh = concerts.ChosenFirst(fresh, matches.Chosen)
+	// The card's reason line ("You picked them", "#7 in your top artists"),
+	// from the same helper as the feed's, so the two cannot disagree.
+	matches.Tag(fresh)
 	// Cap the listing (CF-31): a genre pick in a dense city is hundreds of
 	// shows. Only what is listed goes into sendKeys, so the held-back shows
 	// are still unsent next week and lead that digest; the email links to the
@@ -794,8 +800,7 @@ func (w *SendDigestWorker) Work(ctx context.Context, job *river.Job[SendDigestAr
 		sendKeys = append(sendKeys, c.DedupKey)
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
-	more := email.DigestMore{Events: moreEvents, URL: w.UnsubscribeBase + "/"}
-	msg := email.RenderDigest(user.DisplayName, user.Email, fresh, unsub, more, matches.Chosen)
+	msg := email.RenderDigest(audienceFor(user, w.UnsubscribeBase, unsub), fresh, moreEvents, matches.Chosen)
 	// Send first, record only what landed. See sendAndRecord for why this
 	// order, and why the earlier one turned a rejected recipient into shows
 	// the user is never told about.
@@ -824,6 +829,8 @@ type SendInstantNotifyWorker struct {
 	Sender           MailSender
 	UnsubscribeBase  string
 	UnsubscribeToken func(userID uuid.UUID) string
+	// Affinity: see SendDigestWorker.Affinity.
+	Affinity ReasonSource
 }
 
 func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendInstantNotifyArgs]) error {
@@ -885,7 +892,8 @@ func (w *SendInstantNotifyWorker) Work(ctx context.Context, job *river.Job[SendI
 		sendKeys = append(sendKeys, c.DedupKey)
 	}
 	unsub := w.UnsubscribeBase + "/api/unsubscribe?token=" + w.UnsubscribeToken(user.ID)
-	msg := email.RenderInstantNotify(user.DisplayName, user.Email, fresh, unsub)
+	viewerMatches(ctx, w.Pool, w.Affinity, user.ID).Tag(fresh)
+	msg := email.RenderInstantNotify(audienceFor(user, w.UnsubscribeBase, unsub), fresh)
 	// Same ordering as the weekly digest, through the same helper. These two
 	// are one channel with two triggers and must not drift: a fix applied to
 	// one of them and not the other is the same bug still shipping.
@@ -1134,20 +1142,34 @@ func profileTargets(artists []spotify.ScoredArtist) []concerts.Target {
 	return out
 }
 
-// viewerMatches loads what the digest needs to tell a chosen artist from a
-// genre match: the user's subscriptions and artist picks. Profile artists
-// need no lookup (see concerts.ViewerMatches.Chosen). Either lookup failing
-// costs only the ordering, never the digest, so it is logged and skipped.
-func (w *SendDigestWorker) viewerMatches(ctx context.Context, userID uuid.UUID) concerts.ViewerMatches {
+// ReasonSource is the slice of affinity.Service the mail workers use for the
+// reason line. ReasonsFor reads the cached profile only; it never computes
+// one, so a mail job never becomes a Spotify fan-out.
+type ReasonSource interface {
+	ReasonsFor(ctx context.Context, userID uuid.UUID) (map[string]string, error)
+}
+
+// viewerMatches loads what the user chose -- subscriptions, picks and the
+// affinity reason lines -- for ordering the digest and writing each card's
+// reason line. Every lookup is best effort: a failure costs an ordering hint
+// or a line of copy, never the email.
+func viewerMatches(ctx context.Context, pool *pgxpool.Pool, reasons ReasonSource, userID uuid.UUID) concerts.ViewerMatches {
 	var v concerts.ViewerMatches
-	if s, err := db.GetSubscribedArtistIDs(ctx, w.Pool, userID); err != nil {
-		slog.Warn("digest: subscribed lookup failed; ordering without it", "err", err, "user", userID)
+	if s, err := db.GetSubscribedArtistIDs(ctx, pool, userID); err != nil {
+		slog.Warn("mail: subscribed lookup failed; continuing without it", "err", err, "user", userID)
 	} else {
 		v.Subscribed = s
 	}
-	picks, err := db.ListArtistPicks(ctx, w.Pool, userID)
+	if reasons != nil {
+		if rs, err := reasons.ReasonsFor(ctx, userID); err != nil {
+			slog.Warn("mail: affinity reasons unavailable; cards go without them", "err", err, "user", userID)
+		} else {
+			v.Reasons = rs
+		}
+	}
+	picks, err := db.ListArtistPicks(ctx, pool, userID)
 	if err != nil {
-		slog.Warn("digest: picks lookup failed; ordering without them", "err", err, "user", userID)
+		slog.Warn("mail: picks lookup failed; continuing without them", "err", err, "user", userID)
 		return v
 	}
 	v.Picked = make(map[string]struct{}, len(picks))
@@ -1155,4 +1177,16 @@ func (w *SendDigestWorker) viewerMatches(ctx context.Context, userID uuid.UUID) 
 		v.Picked[PickArtistID(p.AttractionID)] = struct{}{}
 	}
 	return v
+}
+
+// audienceFor addresses a notification email. Spotify attribution follows the
+// Spotify identity, not the connection: a disconnected account has no
+// snapshot left to mail from (db.DisconnectSpotify deletes it).
+func audienceFor(u db.User, siteURL, unsubURL string) email.Audience {
+	return email.Audience{
+		Email:          u.Email,
+		Spotify:        u.SpotifyUserID != "",
+		SiteURL:        siteURL,
+		UnsubscribeURL: unsubURL,
+	}
 }
