@@ -1,23 +1,28 @@
 # ConcertFinder
 
-Builds a personalized concert feed from your Spotify listening history: it
-scores the artists you actually engage with, fans out across ticketing APIs for
-their upcoming US shows, and merges the results into one deduplicated list you
-can filter, save from, and subscribe to.
+Builds a personalized feed of upcoming US concerts from the artists and genres
+you pick, or from your Spotify listening history: it fans out across ticketing
+APIs for their shows and merges the results into one deduplicated list you can
+filter, save from, and subscribe to.
 
-Go API + React SPA + PostgreSQL, deployed as two containers on a single EC2
-instance behind Caddy.
+Go API + React SPA + PostgreSQL, deployed as one container on a shared EC2 box
+behind a shared Caddy (see [apps-infra](https://github.com/peter3605/apps-infra)).
 
 ## Status
 
 Phases 1–3 are implemented and deployed, running at
-<https://concertfinder.app> — EC2 `t4g.small` behind an Elastic IP, Neon
-Postgres, Caddy terminating TLS, secrets rendered from SSM Parameter Store at
-deploy time. `docs/aws-deploy.md` is the operator runbook.
+<https://concertfinder.app>. Since the 2026-11-09 cutover it runs on the shared
+apps box: an EC2 `t4g.small` in the apps AWS account, with Postgres on the
+shared RDS instance, one Caddy terminating TLS for every app on the box, and
+secrets rendered from SSM Parameter Store at deploy time. apps-infra owns the
+box; [`docs/shared-box.md`](docs/shared-box.md) is concertFinder's runbook for
+it. The previous single-app instance and its Neon database were retired on
+2026-11-13.
 
-Sign-in is limited to accounts on the Spotify allowlist: the app is in
-Development Mode, which Spotify does not lift for an app this size. Anyone else
-gets a 403 explaining why rather than a generic failure.
+Anyone with an invite can sign in by email and build a feed from artist and
+genre picks (`docs/public-path.md`). Spotify sign-in stays at five accounts: the
+app is in Spotify's Development Mode, which Spotify does not lift for an app
+this size.
 
 A native iOS client lives in `ios/`. Its server-side half — bearer auth, the
 mobile code exchange, APNs — is implemented and deployed, and the Apple
@@ -29,9 +34,9 @@ production host reads as a dead token) and the App Store submission itself.
 is left** — start there rather than at the top of that document,
 whose body is the original plan and reads as aspirational.
 
-One ordering trap worth knowing before touching infrastructure: do not
-`terraform apply` until you have the APNs key, or `APNS_P8_KEY`'s placeholder
-will fail the next deploy. `docs/aws-deploy.md` §7a explains it.
+One trap worth knowing before touching secrets: `scripts/render-env.sh`
+refuses to render while any `/concertfinder/*` SSM parameter still holds the
+`REPLACE_ME` placeholder, so a placeholder fails the next deploy.
 
 ## Quickstart
 
@@ -74,8 +79,8 @@ internal/db         queries and migrations runner
 migrations          SQL migrations
 web                 React + TS + Vite SPA
 ios                 native SwiftUI client; XcodeGen spec, no committed .pbxproj
-infra               Terraform for the AWS deployment
-scripts             deploy, backup, and restore-drill scripts that run on the instance
+infra               Terraform for the retired old box (history; nothing here is applied)
+scripts             deploy and restore-drill scripts, plus the retired old box's backup and watchdog
 ```
 
 `docs/design.md` §2.3 is the complete package list and why each one exists.
@@ -84,15 +89,14 @@ Each external API gets its own package with its own types — there is
 deliberately no shared `models` package, because external schemas drift
 independently.
 
-## CI image build (dormant until the shared-box cutover)
+## Deploys
 
-`.github/workflows/image.yml` builds the api image for `linux/arm64` on an
-arm64 runner. On pull requests it only builds, with no credentials. On `main`
-it pushes `concertfinder-api:<sha>` and `:latest` to ECR in the apps account
-and can deploy that image to the shared box. `deploy.yml` still ships
-production to the current instance, and `image.yml` deploys nowhere until these
-**repository variables** (Settings → Secrets and variables → Actions →
-*Variables*) are set:
+Merging to `main` deploys. `.github/workflows/image.yml` builds the api image
+for `linux/arm64` on an arm64 runner (pull requests only build, with no
+credentials), pushes `concertfinder-api:<sha>` and `:latest` to ECR in the apps
+account, and runs the `concertfinder-deploy` SSM document on the shared box.
+`deploy.yml` runs the checks only. Three **repository variables** (Settings →
+Secrets and variables → Actions → *Variables*) drive it:
 
 | Variable | Value | Unset |
 |---|---|---|
@@ -100,20 +104,16 @@ production to the current instance, and `image.yml` deploys nowhere until these
 | `DEPLOY_TO_BOX` | `true` to run the `concertfinder-deploy` SSM document after the push | Push only, no deploy |
 | `BOX_INSTANCE_ID` | The shared box (`terraform output box_instance_id`) | Required when `DEPLOY_TO_BOX` is `true`; the job fails without it |
 
-`AWS_DEPLOY_ROLE_ARN` here is a *variable* naming the apps-account role.
-`deploy.yml` reads a *secret* of the same name for the old instance's role in
-the management account. They are different roles. At cutover, turn off
-`deploy.yml`'s deploy job when `DEPLOY_TO_BOX` goes on, or both boxes deploy.
-
 ## Documentation
 
 | Doc | What it covers |
 |---|---|
 | [`docs/design.md`](docs/design.md) | **Authoritative** on architecture, schema, API choices, and phased scope. Read before implementing anything non-trivial. |
 | [`docs/local-dev.md`](docs/local-dev.md) | First-time local setup, running, resetting the database. |
-| [`docs/aws-deploy.md`](docs/aws-deploy.md) | Provisioning and deploying to AWS; the manual fallback to Terraform. |
+| [`docs/shared-box.md`](docs/shared-box.md) | How concertFinder runs and deploys on the shared apps box. |
+| [`docs/aws-deploy.md`](docs/aws-deploy.md) | History: the retired old box (EC2 + Neon). Kept for its incident notes; describes nothing that runs. |
 | [`docs/launch-runbook.md`](docs/launch-runbook.md) | The human tasks left before launch, in order, with the commands. Backups, key rotation, the Spotify quota application, APNs, App Store. |
-| [`infra/README.md`](infra/README.md) | Terraform config — the authoritative path for standing up infrastructure. |
+| [`infra/README.md`](infra/README.md) | History: Terraform for the retired old box. Infrastructure now lives in apps-infra. |
 | [`CLAUDE.md`](CLAUDE.md) | Constraints that are easy to violate, and why. Worth reading before changing serving, jobs, or quota code. |
 
 Where `CLAUDE.md` and `docs/design.md` disagree about what the code does

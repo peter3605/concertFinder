@@ -4,13 +4,14 @@
 the shared box in the apps account (`426433020884`), deployed by
 `.github/workflows/image.yml` on every merge to `main`. `deploy.yml` only runs
 the checks now; its old-box deploy job was removed at the cutover. The old box
-in the management account stays up, api stopped, as the rollback until step 27
-(apps-infra `cutover/cutover.sh rollback`). Built by
+in the management account, which stayed up as the rollback, was destroyed with
+Neon on 2026-11-13 (step 27), so there is no rollback to it any more: roll back
+by redeploying an earlier image (below). Built by
 [apps-infra](https://github.com/peter3605/apps-infra).
 
 ## What runs where
 
-| | Old box (today) | Shared box (after cutover) |
+| | Old box (retired 2026-11-13) | Shared box (live since 2026-11-09) |
 |---|---|---|
 | Compose file | `docker-compose.prod.yml` | `docker-compose.box.yml` (project `concertfinder-box`) |
 | Image | built on the instance | pulled from ECR `concertfinder-api:<sha>` (CF-B20 builds it) |
@@ -78,7 +79,7 @@ as `concertfinder` with `IMAGE` set. That script:
 
 One deploy at a time: `flock` on `/opt/concertfinder/.deploy.lock`.
 
-**Before the cutover** the A record still points at the old box, so the shared
+**Before the cutover** (history) the A record still pointed at the old box, so the shared
 Caddy cannot get a certificate for concertfinder.app and no TLS probe can
 pass. Step 6 therefore skips **only** the HTTPS probe, loudly, while the name
 does not resolve to this box's public IP; step 5 and the database check still
@@ -97,11 +98,11 @@ contain `deploy.sh`, which is every commit from this one on.
 |---|---|---|
 | `render-env.sh` | per app, called by `deploy-box.sh` | Reads this app's SSM path into this app's `.env`. |
 | `verify-deploy.sh` | per app, called by `deploy-box.sh` | Knows this app's health route and its `DATABASE_URL`. |
-| `restore-drill.sh` | per app, operator tool | Restores this app's schema and asserts its tables. It targets Neon and the old bucket layout, and needs retargeting to RDS and `weekly/concertfinder/` before it means anything on the box. |
-| `backup-db.sh` | **apps-infra, box-level** | The database is now one RDS instance for every app, and the bucket's `weekly/<app>/` layout (apps-infra `backups.tf`) was drawn for a single box job that dumps each app's database. Per-app copies would each need their own `PG_IMAGE` pin, timer and S3 key scheme for what is one operation. This script stays for the old box until cutover. |
-| `prune-images.sh` | **apps-infra, box-level** | Disk and the image store are shared by every app; one app's prune cannot reason about the others'. No build happens on the box, so the buildkit half is moot. Rollback targets live in ECR, not in the local cache. Stays for the old box until cutover. |
-| `watchdog.sh` | **apps-infra, box-level** | The failure it was built for, a Caddy crash loop beside a healthy api, now happens in the `shared` project, which no app owns. A per-app watchdog would see only `concertfinder-api` and miss exactly that. The logic is already generic (`COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `WATCHDOG_NAMESPACE`); the box job iterates every project. Stays for the old box until cutover. |
+| `restore-drill.sh` | per app, operator tool | Restores this app's schema and asserts its tables. Retargeted to the shared RDS and `weekly/concertfinder/` in CF-10. |
+| `backup-db.sh` | **apps-infra, box-level** | The database is now one RDS instance for every app, and the bucket's `weekly/<app>/` layout (apps-infra `backups.tf`) was drawn for a single box job that dumps each app's database. Per-app copies would each need their own `PG_IMAGE` pin, timer and S3 key scheme for what is one operation. Retired with the old box on 2026-11-13; still in the tree because `check-deploy-config.sh` compares its `PG_IMAGE` pin with `restore-drill.sh`'s. |
+| `prune-images.sh` | **apps-infra, box-level** | Disk and the image store are shared by every app; one app's prune cannot reason about the others'. No build happens on the box, so the buildkit half is moot. Rollback targets live in ECR, not in the local cache. Now apps-infra `box/apps-prune-images.sh`; this copy retired with the old box. |
+| `watchdog.sh` | **apps-infra, box-level** | The failure it was built for, a Caddy crash loop beside a healthy api, now happens in the `shared` project, which no app owns. A per-app watchdog would see only `concertfinder-api` and miss exactly that. The logic is already generic (`COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `WATCHDOG_NAMESPACE`); the box job iterates every project. Now apps-infra `box/apps-watchdog.sh`; this copy retired with the old box. |
 
-Until those box-level jobs exist in apps-infra, the shared box has no
-container watchdog and no image prune. RDS's own 14-day automated backups
-cover the database.
+All three box-level jobs now exist in apps-infra (`box/apps-backup.sh`,
+`box/apps-prune-images.sh`, `box/apps-watchdog.sh`), alongside RDS's own
+14-day automated backups.

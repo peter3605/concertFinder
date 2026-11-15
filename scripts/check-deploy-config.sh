@@ -305,7 +305,7 @@ fi
 pass "api service pins its image name"
 
 # 10b. docker-compose.box.yml (CF-B21) is concertFinder's compose project on
-#      the shared apps box, dormant until the cutover. Like the prod file it
+#      the shared apps box, live since the cutover. Like the prod file it
 #      never runs anywhere but the instance, so everything that matters about
 #      it is asserted here against the rendered config:
 #

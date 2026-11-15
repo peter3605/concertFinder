@@ -1,5 +1,13 @@
 # AWS deploy (EC2 + Neon Postgres)
 
+> **History: this describes the retired old box.** Production moved to the
+> shared apps box at the 2026-11-09 cutover, and this instance, its
+> management-account resources and its Neon database were destroyed on
+> 2026-11-13 (plan step 27). Nothing below runs any more. For how
+> concertFinder runs today read [`shared-box.md`](shared-box.md), and for the
+> box itself apps-infra's `CLAUDE.md` and `README.md`. This document is kept
+> for its incident notes and measurements, which other docs cite by section.
+
 One-time setup for pushing to `main` → automatic deploy on an EC2 t4g.small in
 us-east-1, with Postgres hosted on [Neon](https://neon.tech) rather than RDS.
 

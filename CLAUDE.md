@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-Phases 1–3 are implemented **and deployed**, serving at `https://concertfinder.app`: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, Terraform in `/infra` (applied), native iOS client under `/ios`.
+Phases 1–3 are implemented **and deployed**, serving at `https://concertfinder.app`: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, native iOS client under `/ios`. Production runs on apps-infra's shared box (see Deployment); `/infra` is the retired old box's Terraform, kept as history.
 
 ```
 go build ./...      # backend
@@ -23,7 +23,7 @@ xcodebuild test -project ConcertFinder.xcodeproj -scheme ConcertFinder \
 
 Two consequences of having two clients, both of which are cheap now and expensive later: `/api/me/*` responses are **additive-only** — a field rename is a breaking change for builds already on someone's phone — and `/api/site-info` carries `min_ios_build` as the escape hatch when that rule has to be broken.
 
-**`docs/ios-app-plan.md` §0 is the current status of the iOS work and what is left.** Read it before acting on anything else in that document: the body below §0 is the plan as originally written, its tense is aspirational, and most of it is already built. What remains is gated on Spotify and Apple accounts, not on code. One trap it records: do not `terraform apply` until the APNs key is in hand, or `APNS_P8_KEY`'s `REPLACE_ME` placeholder fails the next deploy (`docs/aws-deploy.md` §7a).
+**`docs/ios-app-plan.md` §0 is the current status of the iOS work and what is left.** Read it before acting on anything else in that document: the body below §0 is the plan as originally written, its tense is aspirational, and most of it is already built. What remains is gated on Spotify and Apple accounts, not on code. One trap it records, still true on the shared box: `scripts/render-env.sh` refuses to render while any `/concertfinder/*` parameter holds the `REPLACE_ME` sentinel, so a placeholder `APNS_P8_KEY` fails the next deploy.
 
 `docs/design.md` remains the authoritative source of truth for architecture decisions, API choices, schema, and phased scope — read it before implementing anything non-trivial. Where this file and the design doc disagree about what the code does *today*, this file wins; the design doc describes intent.
 
@@ -47,7 +47,7 @@ Planned Go layout (see design §2.3):
 /internal/http          handlers, middleware
 /migrations             SQL migrations
 /web                    React+TS frontend
-/infra                  Terraform (Phase 3)
+/infra                  Terraform for the retired old box (history, 2026-11-13)
 ```
 
 Each external API has its own package with its own types — **do not introduce a shared "models" package**. External schemas drift independently.
@@ -76,7 +76,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   `auth.ErrSpotifyDisconnected`. Deleting our copy does not revoke the grant at
   Spotify's end; both clients link to spotify.com/account/apps rather than
   implying otherwise.
-- **Refresh tokens are AES-256-GCM encrypted at rest** with a per-token nonce. Key comes from `ENCRYPTION_KEY` env var (Phase 1) or AWS Secrets Manager (Phase 3). Never log or return tokens.
+- **Refresh tokens are AES-256-GCM encrypted at rest** with a per-token nonce. Key comes from the `ENCRYPTION_KEY` env var, which production renders from SSM `/concertfinder/ENCRYPTION_KEY`. Never log or return tokens.
 - **Spotify redirect URI is `https://127.0.0.1:3000/api/auth/callback`** for local dev (`https://<domain>/api/auth/callback` in prod) — `http://localhost` is rejected by Spotify as of Nov 2025. The path is not `/callback`: the handler is mounted under `/api/auth`, and a dashboard entry pointing at `/callback` hits the SPA catch-all instead, so login silently completes into a logged-out app.
 - **PKCE flow only.** Implicit Grant is deprecated. Authorization Code without PKCE is not used.
 - **Ticketmaster artist resolution is two-stage:** resolve name → `attractionId` via `/discovery/v2/attractions.json`, then query events filtered by that attraction ID. Naive keyword search produces false positives (cover bands, tribute acts). Positive resolutions are cached in `artist_resolutions` indefinitely; **negative** ones expire after `concerts.NegativeResolutionTTL` (30d), because resolution needs an exact name match and an artist can sign to TM later — a permanent negative cache silently excludes them forever.
@@ -514,8 +514,8 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   `ticketmaster.IsSeatPackage` drops attractions such as "Club Level Seating"
   at decode time, because a genre listing's acts come from Ticketmaster's
   lineup, not from anything the user chose.
-- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (Phase 3 loads from `.env` on the EC2 box; Secrets Manager would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made the move off RDS to **Neon** a Terraform-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
-- **Postgres is Neon, not RDS, and not managed by Terraform.** Two things about the connection string are load-bearing. It must be the **direct** endpoint: River picks jobs up via LISTEN/NOTIFY, and Neon's pooled endpoint is PgBouncer in transaction mode, which does not support it and does not report that — job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. And it must keep `?sslmode=require`, which is what replaces the `rds.force_ssl=1` parameter group now that database traffic crosses the public internet instead of sitting in a security group. **The app never scales to zero** — River polls every second forever — so Neon's free plan is a compute-hour budget (~183 of ~192 CU-hours at a pinned 0.25 CU), not a storage question. Pin min *and* max compute; one autoscale spike during the nightly fanout exhausts the month, and exhaustion means a suspended compute and 500s, not a warning.
+- **AWS portability:** no AWS SDK imports in `/internal`. Secrets come from process env regardless of source (production renders `.env` from SSM at deploy; anything else would be a swap without code changes). Postgres usage avoids provider-specific features — which is what made each database move a config-and-docs change with zero code touched. Email delivery uses SMTP against SES so the app is not coupled to AWS.
+- **Postgres is RDS `shared-postgres`, owned by apps-infra** (database and login `concertfinder`; URL in SSM `/concertfinder/DATABASE_URL`). Keep `?sslmode=require` on the URL: `config.Validate` refuses a non-TLS `sslmode` in production. River picks jobs up via LISTEN/NOTIFY, so the URL must be a direct connection, never a transaction-mode pooler such as PgBouncer, which does not support it and does not say so: job pickup silently degrades to the 1s `FetchPollInterval` fallback and leader resignations take ~5s. The app never scales to zero (River polls every second forever), which is why the Neon free plan's compute-hour budget was the binding constraint when this was Neon (history: Neon served production until the 2026-11-09 cutover and was deleted on 2026-11-13).
 
 ## Affinity Scoring (design §4.3)
 
@@ -867,93 +867,91 @@ addresses come from Spotify, and a CRLF in one would let it inject headers.
 
 ## Deployment
 
-**Two deployments exist until the cutover, and only one of them is live.**
-Everything below describes the old box (`docker-compose.prod.yml`, this repo's
-`Caddyfile`, `deploy.yml`), which serves production. `docker-compose.box.yml`
-and `deploy.sh` → `scripts/deploy-box.sh` are concertFinder's half of the
-shared apps box and are **dormant**: nothing on `main` runs them. Read
-`docs/shared-box.md` before touching either, and never change the old box's
-three files to make the new one work. The two halves are pinned by
-`check-deploy-config.sh` exactly as the old ones are.
+**Production runs on the shared apps box, and has since the 2026-11-09
+cutover.** apps-infra owns the box and everything around it: read its
+`CLAUDE.md` (the rules, and "Adding an app") before deploying or changing
+infrastructure, and its `README.md` for the full reference. This section
+covers only concertFinder's half; `docs/shared-box.md` is the runbook for it.
 
-**Run `./scripts/check-deploy-config.sh` after touching `Caddyfile` or either
-compose file.** CI runs it too (the `deploy-config` job, which `deploy` depends
-on). These are the only files in the repo that never execute locally —
-`docker-compose.yml` has no Caddy service and `go run` reads neither — and
-three defects have shipped in them, each presenting identically: Caddy exits,
-`restart: unless-stopped` makes it a crash loop, and the api container beside
-it looks healthy throughout.
+- **The box:** `shared-box`, one EC2 t4g.small in the **apps** account
+  (`426433020884`, us-east-1). The api runs as `concertfinder-api` from
+  `docker-compose.box.yml` (compose project `concertfinder-box`) on the
+  external `edge` network, behind **one shared Caddy** whose Caddyfile lives in
+  apps-infra (`caddy/Caddyfile`). `container_name: concertfinder-api` here and
+  `reverse_proxy concertfinder-api:8080` there are one contract split across two
+  repos; `check-deploy-config.sh` pins this half, so change neither alone.
+- **Database:** RDS `shared-postgres`, database and login `concertfinder`. The
+  URL is SSM `/concertfinder/DATABASE_URL` in the apps account and keeps
+  `?sslmode=require`.
+- **Secrets:** SSM Parameter Store, `/concertfinder/<NAME>` in the apps
+  account, rendered into `/opt/concertfinder/.env` at every deploy by
+  `scripts/render-env.sh`. It refuses to render while any parameter still holds
+  the `REPLACE_ME` sentinel, so a placeholder fails the next deploy rather than
+  booting a container on a literal `REPLACE_ME`. It also rewrites the whole
+  file, so a line added to `.env` by hand is gone at the next deploy: change
+  SSM, never the file.
+- **Deploys:** merge to `main`, then `image.yml` builds an arm64 image on an
+  arm64 runner, pushes `concertfinder-api:<sha>` to ECR and, while the repo
+  variable `DEPLOY_TO_BOX` is `true`, runs the `concertfinder-deploy` SSM
+  document over GitHub OIDC (no stored AWS keys). That runs
+  `/opt/concertfinder/deploy.sh` → `scripts/deploy-box.sh`, which checks out
+  the image's commit and re-runs itself from it, renders `.env`, pulls, runs
+  `up -d --wait`, has the shared Caddy fetch `/api/healthz` over `edge`, and
+  finishes with `scripts/verify-deploy.sh`. A rollback is the same document with
+  the previous SHA; ECR keeps the last three images. `deploy.yml` now only runs
+  the checks.
+- **Email:** SES in the apps account, production access granted, over SMTP.
+- **Backups, watchdog, image prune:** box-level jobs in apps-infra
+  (`box/apps-backup.sh` writing weekly dumps to
+  `s3://apps-backups-426433020884/weekly/concertfinder/`, `box/apps-watchdog.sh`),
+  plus RDS's own 14-day automated backups. Nothing in this repo runs them any
+  more; `scripts/restore-drill.sh` is the read side and is still ours (below).
+- **AWS access from a session is view-only** (`AWS_PROFILE=apps-view`). Never
+  run `terraform apply`, `terraform destroy` or any AWS command that changes
+  something; write the change and the exact commands, and Peter runs them as
+  `apps-admin`.
 
-Two of those are worth naming, because both are invisible to the obvious check:
-
-- `header_up` is a **`reverse_proxy` subdirective**, never a site-level one.
-  At site level it is a config-adapt error.
-- The caddy service needs `env_file`. Without it `SITE_DOMAIN` is empty inside
-  the container, `{$SITE_DOMAIN} {` collapses into a *global options block*,
-  and Caddy dies with `unrecognized global option: encode`. Running
-  `caddy validate` with the variable exported in your shell passes happily —
-  the script asserts against the compose-resolved environment instead, which
-  is what actually reaches the container.
-
-**The dev and prod compose files must never disagree about the database
-without the prod file winning.** `docker-compose.yml` sets the api's
-`DATABASE_URL` to the dev `db` container in `environment:`, which outranks
-`env_file:` — so `-f docker-compose.yml -f docker-compose.prod.yml up` used to
-swap Neon for an empty dev Postgres. That form is harmless for `ps`/`logs`,
-which is how it came to be used for an `up`, and production then served an
-empty database for eight days with every health check green (CF-B17).
-`docker-compose.prod.yml` now restates `DATABASE_URL` from `.env` in its own
-`environment:`, the preflight asserts that both the prod-only and the two-file
-forms render `.env`'s value (CF-B18), and `config.Validate` refuses a `db`/loopback/unix-socket host or a non-TLS
-`sslmode` whenever `SESSION_COOKIE_DOMAIN` is non-loopback — the last because
-it catches every *other* route to a dev database. Still: deploy commands use
-`-f docker-compose.prod.yml` alone.
-
-**Every ad-hoc `aws ssm send-command` against the instance carries `--comment`
+**Every ad-hoc `aws ssm send-command` against the box carries `--comment`
 naming the story** (e.g. `--comment "CF-B7 verify IAM and IMDS"`). SSM keeps
 about 30 days of send-commands *including their full text*, so the audit trail
-of who touched production and why already exists — but only a labelled row is
+of who touched production and why already exists, but only a labelled row is
 usable. Deploys label themselves ("Deploy from GitHub Actions run NNN"); on
 2026-09-14 seven hand-run commands went out in 25 minutes with a blank Comment,
 and the one that caused CF-B17's eight-day outage was among the unattributable
 rows, which turned "what changed?" into a four-round-trip investigation. The
 comment is capped at 100 characters, so it is the story ID and a few words, not
-a description.
+a description. The box is shared, so an unlabelled command is now also
+unattributable *between apps*.
 
-`scripts/verify-deploy.sh` is in the same category — it only ever executes on
-the instance, mid-deploy — so the preflight `bash -n`s it and asserts its
-executable bit. It is the step that decides whether a deploy succeeded, so a
-typo in it would fail an otherwise fine deploy right after the new containers
-were already up.
+**Run `./scripts/check-deploy-config.sh` after touching a compose file,
+`deploy.sh`, or anything under `scripts/` that runs on the box.** CI runs it as
+the `deploy-config` job. These files never execute locally, and every deploy
+defect this repo has shipped was in one of them. `scripts/verify-deploy.sh`
+only ever runs on the box, mid-deploy, so the preflight `bash -n`s it and
+asserts its executable bit: it decides whether a deploy succeeded, so a typo in
+it fails an otherwise fine deploy after the new container is already up.
 
 **The preflight cannot check the deployment's own `.env`.** It writes a
-synthetic one (`SITE_DOMAIN=example.com`) precisely so it never reads a
-developer's real secrets, which means it proves the *wiring* and can say
-nothing about whether the production file sets anything. `SITE_DOMAIN` was
-missing from `.env.example` entirely for that reason — documented in
-`infra/README.md` and `docs/aws-deploy.md`, absent from the template an
-operator actually copies. Two places now cover it: it is in `.env.example`, and
-`config.Validate` rejects a missing `SITE_DOMAIN`, or one whose host disagrees
-with `SITE_BASE_URL`, whenever `SESSION_COOKIE_DOMAIN` is non-loopback. The Go
-binary never *uses* `SITE_DOMAIN` — it validates it because the api container
-is handed the same `.env` and is therefore the only thing in the system that
-can see the real file. A mismatch is equally silent: Caddy provisions a
-certificate for one name while every emailed link and the
-MusicBrainz/Nominatim User-Agent point at another.
+synthetic one precisely so it never reads a developer's real secrets, which
+means it proves the *wiring* and says nothing about whether the production
+values are set. The api container is the only thing that sees the real file,
+so `config.Validate` does what it can there: whenever `SESSION_COOKIE_DOMAIN` is
+non-loopback it rejects a missing `SITE_DOMAIN` or one whose host disagrees with
+`SITE_BASE_URL`, and refuses a `db`/loopback/unix-socket database host or a
+non-TLS `sslmode` — the last because a production process pointed at a dev
+database once served an empty site for eight days with every health check green
+(CF-B17).
 
-The proxy **overwrites** `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For`
-rather than passing them through. `chi/middleware.RealIP` reads them in that
-order and Caddy only appends to XFF, so without this a client could set
-`True-Client-IP` freely and land in whichever bucket it liked in the
-`/api/auth` rate limiter.
-
-Caddy sets HSTS, `X-Content-Type-Options`, `Referrer-Policy`,
-`Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options` at
-**site level**, so they cover Caddy's own error responses (a 502 when the api
-is down) and not just what the api returns. `header` is a site-level directive;
-only `header_up` is reverse_proxy-only. The CSP is deliberately *only*
-`frame-ancestors` — restricting script/style sources needs testing against the
-Vite bundle, and a wrong one breaks the SPA on first load.
+**The proxy overwrites `True-Client-IP`, `X-Real-IP` and `X-Forwarded-For`**
+rather than passing them through, and sets HSTS, `X-Content-Type-Options`,
+`Referrer-Policy`, `Content-Security-Policy: frame-ancestors 'none'` and
+`X-Frame-Options` at site level. Both now live in apps-infra's Caddyfile, copied
+from this repo's retired one, and both still matter to this code:
+`chi/middleware.RealIP` reads those headers in that order, so without the
+overwrite a client picks its own bucket in the `/api/auth` rate limiter. The
+CSP is deliberately *only* `frame-ancestors`; restricting script/style sources
+needs testing against the Vite bundle, and a wrong one breaks the SPA on first
+load.
 
 **PR checks and deploys must not share a concurrency group.** GitHub keeps at
 most *one* pending run per group and cancels the older pending one, and it
@@ -963,24 +961,19 @@ PRs opened a minute apart cancelled each other's checks and then merged
 reporting "no checks reported", having been verified by nothing; and four
 merges landing within a minute queued three deploys behind the first, after
 which an unrelated PR run entered the same group and evicted the pending
-deploy for the tip of `main` — every workflow green, no job failed, `main`
-three commits ahead of what was serving. A cancelled run is not a red run, so
-nothing downstream notices either half. The group is now an expression:
-`pull_request` gets `deploy-pr-<ref>` with `cancel-in-progress: true`
-(superseding a check for a branch that moved on is correct, and those runs
-never deploy), while pushes and `workflow_dispatch` keep the serialized
-`deploy-prod` with `cancel-in-progress: false` for the reasons above.
+deploy for the tip of `main`. A cancelled run is not a red run, so nothing
+downstream notices either half. Both `deploy.yml` and `image.yml` therefore use
+an expression: `pull_request` runs get a per-ref group with
+`cancel-in-progress: true`, while pushes keep one serialized group
+(`deploy-prod`, `image-main`) with `cancel-in-progress: false`.
 
-**A deploy must prove the site serves, not that containers started.**
+**A deploy must prove the site serves, not that a container started.**
 `/api/healthz` pings Postgres — every route needs the database, so a check that
-skips it reports green while everything 500s — but for a while nothing ever
-called it. That matters because `docker compose up -d` exits 0 the moment a
-container is *started*: with `config.Validate`'s hard exit on a bad `.env` and
-`restart: unless-stopped`, one wrong variable produced a crash-looping api
-container, an SSM `Success`, and a green workflow, with the site down
-throughout. Fail-fast validation made this *more* likely, not less — it turned
-silent misconfiguration into a hard exit without giving the exit anywhere to
-surface. Two mechanisms now close it, and they cover different halves:
+skips it reports green while everything 500s. `docker compose up -d` exits 0
+the moment a container is *started*: with `config.Validate`'s hard exit on a bad
+`.env` and `restart: unless-stopped`, one wrong variable once produced a
+crash-looping api, an SSM `Success` and a green workflow, with the site down
+throughout. Two mechanisms close it, and they cover different halves:
 
 - `up -d --wait` blocks on the api container's `healthcheck`, which runs
   **the server binary in `-healthcheck` mode** (`runHealthcheck` in
@@ -989,57 +982,55 @@ surface. Two mechanisms now close it, and they cover different halves:
   `CMD-SHELL`. It reads `LISTEN_ADDR` straight from the env rather than through
   `config.Load`, so the probe can't fail for reasons unrelated to whether the
   server answers. Reporting unhealthy does **not** restart the container
-  (Docker restart policies act on exit, not health), so a database blip shows up
-  in `docker compose ps` instead of becoming a restart loop. That matters more
-  with Neon than it did with RDS: the database is now across the public internet
-  rather than inside the VPC, so transient connection failures are likelier.
-- `scripts/verify-deploy.sh` then fetches `/api/healthz` **through Caddy** over
-  443. This is the half `--wait` cannot see: the healthcheck runs inside the api
-  container and proves only that the Go process answers itself, while every
-  deploy defect this repo has shipped was a Caddy crash loop next to a healthy
-  api container. It dumps `ps` and container logs on failure, so it is also the
-  step that explains a bad deploy. A `--wait` failure is swallowed in the
-  workflow on purpose so this still runs and produces that output.
+  (Docker restart policies act on exit, not health), so a database blip shows
+  up in `docker compose ps` instead of becoming a restart loop.
+- `deploy-box.sh` then has the shared Caddy fetch `/api/healthz` from
+  `concertfinder-api:8080` over `edge`, and `scripts/verify-deploy.sh` fetches
+  it **through Caddy over TLS**. This is the half `--wait` cannot see: the
+  healthcheck proves only that the Go process answers itself, while the deploy
+  defects this repo has shipped were all a broken proxy beside a healthy api.
 
-**Both of those run once per deploy; `scripts/watchdog.sh` is what watches the
-rest of the time.** Every alarm in `infra/cloudwatch.tf` except the one it
-feeds watches the *instance*, and `restart: unless-stopped` means a container
-that exits on every start is a crash loop the host cannot see: both EC2 status
-checks pass, the box is up and busy, and the site is down. A systemd timer
-samples the compose services every minute and publishes the number that are
-missing, stopped, unhealthy or restarting to `ConcertFinder/App
-ServicesUnhealthy`. Three things hold it together. The alarm's
-`treat_missing_data` is **`"breaching"`**, because the watchdog runs on the
-machine it watches — a wedged daemon, a disabled timer, a rebuilt instance, a
-revoked `PutMetricData` all stop the datapoints, and an alerting path whose own
-failure reads as "healthy" is the bug it exists to close, one level up. A
-container inside its healthcheck `start_period` is **not** counted, or every
-successful deploy would alarm and the address would get muted. And the
-namespace is a string literal in both a shell script and HCL, which nothing at
-apply time can compare — `check-deploy-config.sh` pins them equal, the same way
-it pins `PG_IMAGE` across the backup and drill scripts. Note `user_data` carries
-`ignore_changes`, so the units it installs never reach the running instance;
-`docs/aws-deploy.md` §7b has the by-hand install, as it does for the backup timer.
+CI runs gofmt, vet, `go build`, `go test`, `govulncheck ./...`, and
+`npm run build` — `go test` alone compiles only packages that have tests, and
+several here have none. `govulncheck` reports against the **toolchain in
+PATH**, so the standard-library half of any failure is fixed by bumping
+`go-version` in the workflow, not by changing code; that is why the version
+there floats on the minor, which is where the Go team's security backports
+land.
 
-Deploys build the image **on the instance**, but `build` and `up -d` are
-separate SSM steps: `up -d --build` tears down running containers as part of
-the same command, so a failed or OOM-killed build took the site with it. Keep
-them separate in the runbook's manual and rollback commands too — a rollback is
-by definition a moment when the site is already unhappy. CI runs gofmt, vet,
-`go build`, `go test`, `govulncheck ./...`, and `npm run build` — `go test`
-alone compiles only packages that have tests, and several here have none.
-`govulncheck` reports against the **toolchain in PATH**, so the standard-library
-half of any failure is fixed by bumping `go-version` in the workflow, not by
-changing code; that is why the version there floats on the minor (`'1.25'`),
-which is where the Go team's security backports land. Building in Actions and
-pushing to ECR would remove the on-instance build entirely; that needs an ECR
-repo plus instance-profile pull permissions in `/infra`.
+### History: the old box (retired 2026-11-13)
+
+Until the 2026-11-09 cutover, production was a single EC2 instance in the
+**management** account, defined by this repo's `infra/` Terraform, running
+`docker-compose.prod.yml` with its own Caddy (this repo's `Caddyfile`),
+building the image on the instance, deployed by a job in `deploy.yml`, with a
+nightly `scripts/backup-db.sh` plus `scripts/watchdog.sh` installed by
+`user_data`, and (history) Postgres on Neon, deleted 2026-11-13 with the rest.
+The instance and the management-account resources were destroyed then too
+(plan step 27), and
+`infra/`'s state was deleted. Those files are still in the tree only because
+`check-deploy-config.sh` reads some of them; none of them describe anything
+that runs, and none should be changed to make the shared box work. Three
+lessons from that box are worth keeping, because the shared box could repeat
+them:
+
+- **Compose precedence:** `environment:` outranks `env_file:`, so
+  `-f docker-compose.yml -f docker-compose.prod.yml up` swapped the production
+  database for an empty dev Postgres (CF-B17). `docker-compose.box.yml` restates
+  `DATABASE_URL` in its own `environment:` for the same reason; use it alone.
+- **`build` and `up` stayed separate steps** because `up -d --build` tore down
+  the running containers first, so a failed or OOM-killed build took the site
+  with it. The shared box builds nothing — the image comes from ECR — which is
+  what removed the problem rather than the habit.
+- **A watchdog on the machine it watches** needs its alarm's
+  `treat_missing_data` set to `"breaching"`, or a wedged daemon reads as
+  healthy. apps-infra's box watchdog carries that rule forward.
 
 **The backup and its drill must pin the same Postgres image.**
 `scripts/restore-drill.sh` is the read half of the backup. Since CF-10 it
 reads the shared box's **weekly** dumps (`apps-backups-426433020884`,
 `weekly/concertfinder/`, written by apps-infra's `box/apps-backup.sh`, which
-replaces `scripts/backup-db.sh` at cutover). With `AWS_PROFILE=apps-admin` and
+replaced `scripts/backup-db.sh` at the cutover). With `AWS_PROFILE=apps-admin` and
 apps-infra's `scripts/db-tunnel.sh` open on `localhost:15432`, it restores the
 newest dump into a **scratch database on the shared RDS** (default
 `concertfinder_drill`), times it, checks the four tables that do not rebuild
@@ -1049,8 +1040,9 @@ is real: the 2026-09-14 dumps hold 0 rows in `user_subscribed_artists`.
 `pg_restore` refuses an archive produced by a *newer* server, so a `PG_IMAGE`
 that drifts from the image that wrote the dump fails the drill for a reason
 that has nothing to do with the backups. Keep it equal to apps-infra's
-`postgres:<rds_engine_version>-alpine` and to `backup-db.sh`'s pin;
-`check-deploy-config.sh` compares the latter pair. The restore is `--clean
+`postgres:<rds_engine_version>-alpine`. `check-deploy-config.sh` still
+compares it with the retired `backup-db.sh`'s pin, which is the only reason
+that script is still in the tree. The restore is `--clean
 --if-exists`, so the drill refuses any target whose name lacks `drill` or
 `scratch`, any database not owned by the RDS master user (every app's database
 is owned by its own login), any target that already holds users, and any
@@ -1098,15 +1090,16 @@ service's operator contact), `SITE_DOMAIN`.
 
 iOS (all optional; unset means the web app behaves exactly as before): `MOBILE_CALLBACK_URL`, `IOS_APP_ID`, `MIN_IOS_BUILD`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8_KEY`, `APNS_ENVIRONMENT`. Two things `config.Validate` refuses to start on, because both are silent otherwise: a **partial** APNs set — it wires up successfully and then drops every notification, indistinguishable from nobody having opted in — and a `MOBILE_CALLBACK_URL` whose host disagrees with `SITE_BASE_URL`, since iOS fetches `apple-app-site-association` from the link's own domain and a mismatch ends the login in Safari with the app still waiting. Empty `IOS_APP_ID` makes that route 404 **on purpose**: serving an association naming an empty app is worse, because iOS caches it.
 
-`SITE_DOMAIN` is the odd one out: it is consumed by **Caddy**, not by the Go
-binary, via `docker-compose.prod.yml` handing the caddy container the same
-`.env`. `config.Load` reads it and `config.Validate` checks it anyway — see the
-Deployment section for why that is the only place it can be caught.
+`SITE_DOMAIN` is the odd one out: the Go binary never uses it. It was the
+old box's Caddy site name; the shared Caddy names `concertfinder.app` in
+apps-infra's Caddyfile instead. `config.Load` still reads it and
+`config.Validate` still checks it against `SITE_BASE_URL`, which keeps the two
+from drifting apart in SSM.
 
 All of these are read from the **process environment** — the binary has no
 dotenv dependency and never opens `.env` itself. `docker compose` is what loads
 the file, locally from `.env` and in prod from `/opt/concertfinder/.env` on the
-EC2 instance. Running `go run ./cmd/server` directly therefore needs the file
+shared box, rendered from SSM at each deploy. Running `go run ./cmd/server` directly therefore needs the file
 sourced first (`set -a && . ./.env && set +a`), or the server comes up with an
 empty config and fails on `DATABASE_URL`.
 
@@ -1116,7 +1109,7 @@ When proposing or implementing work, check which phase it belongs to before expa
 
 - **Phase 1 (MVP):** PKCE auth, full affinity from all 6 signals, TM only (BIT was in scope at the time and has since been removed), semaphore fan-out, dedup, month-grouped list view, **hardcoded location**, Docker Compose. No multi-user, no fallbacks, no filters, no background sync.
 - **Phase 2:** Small-artist fallback (Songkick + JSON-LD extraction via Brave Search), location picker, filters, river background jobs, late-result polling. (The Extended Quota Mode application once planned here is closed to us — Spotify requires 250k MAU — so Spotify sign-in stays at five accounts; see `docs/public-path.md` §7.)
-- **Phase 3:** AWS single-instance deployment (EC2 t4g.small + Neon Postgres, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. The database was RDS db.t4g.micro until it became the largest line on the bill (~$14/mo); Neon's free plan replaced it, with nightly `pg_dump` to S3 (`scripts/backup-db.sh`) standing in for the 7-day RDS retention that was given up. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
+- **Phase 3 (history; production has since moved to the shared box, see Deployment):** AWS single-instance deployment (EC2 t4g.small + Neon Postgres, Caddy TLS, SPA embedded in Go binary, `.env` on the instance, GitHub Actions → SSM `docker compose up -d`), per-user rate accounting, email notifications (re-auth for `user-read-email`) via SES SMTP, privacy policy + ToS pages, Terraform in `/infra`. The database was RDS db.t4g.micro until it became the largest line on the bill (~$14/mo); Neon's free plan replaced it, with nightly `pg_dump` to S3 (`scripts/backup-db.sh`) standing in for the 7-day RDS retention that was given up. Full ECS Fargate + CloudFront/S3 + Secrets Manager is deferred (see design §11.3 for triggers).
 
 If a request would pull Phase 2/3 work into Phase 1, flag it rather than silently expanding.
 
