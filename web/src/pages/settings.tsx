@@ -98,8 +98,8 @@ export default function SettingsPage() {
         <CardContent className="grid gap-6">
           <PrefRow
             id="digest"
-            title="Daily digest"
-            description="One email a day summarizing upcoming shows in your area."
+            title="Weekly digest"
+            description="One email a week with new shows in your area, artists you chose first."
             checked={!!me.digest_opt_in}
             disabled={!me.email || saving}
             onChange={(v) => update({ digest_opt_in: v })}

@@ -68,7 +68,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   together. It **must** delete `user_concert_snapshots`: `FanoutSendDigestWorker`
   selects on `digest_opt_in` and a non-empty email with no session or connection
   check, so a surviving snapshot means a disconnected user keeps getting a
-  nightly digest built from the profile they just revoked, silently. And the
+  weekly digest built from the profile they just revoked, silently. And the
   credential is *zeroed*, not NULLed (the column is NOT NULL), which makes
   `AccessTokenFor`'s empty-value check mandatory rather than cosmetic —
   `gcm.Open` **panics** on a wrong-length nonce, so without it the next job for
@@ -249,7 +249,7 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   the previous one named a GitHub repo that does not exist, which satisfied
   the letter of both policies and none of their purpose.
 - **Retiring a source does not retire its stored links.** `concerts.data` blobs keep `"source":"bandsintown"` links until the janitor prunes the events, so `Source` constants and `SOURCE_LABELS` entries outlive their clients. `concerts.priorityOf` sorts a source missing from `sourcePriority` *last* — a bare map lookup returns 0, which is a higher priority than Ticketmaster's 2, so deleting the entry would promote dead links to the top of every card.
-- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the daily digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly. **Every channel now records after the send, never before, and that ordering is the whole of it.** Push went first: `SendPushWorker` used to write the ledger up front — matching what the digest then did — but it merely logged transient APNs errors and returned nil, so the keys were burned and river's retry found them already recorded and sent nothing. `sendRound` now reports which keys actually landed (delivered, or refused for a dead token — that one will never succeed), records only those, and returns an error if anything failed transiently. **Email followed, and the reason it had to is worth keeping.** Both mail workers wrote the ledger before hitting SMTP as a deliberate at-most-once trade, which is defensible while failures are transient and rare. SES in sandbox made them neither: only one verified recipient can receive anything, so for every other user the send was rejected *every night*, the keys were spent, and leaving the sandbox would have recovered nothing because those shows were already marked delivered. The retry is what hid it — the send fails, river retries, `FilterUnsentDedupKeys` excludes the keys just written, the candidate set is empty, and the job logs "nothing new" and **succeeds**. `jobs.sendAndRecord` is now the single ordering both `SendDigestWorker` and `SendInstantNotifyWorker` go through, so the two triggers for the one email channel cannot drift; `EmailMaxAttempts` (3) exists because that change turns retries into real SMTP attempts rather than the silent no-ops they used to be. The reversed trade, in both channels, is that a crash between send and record costs a duplicate rather than a lost message — the milder direction, absorbed by `CollapseID` for push and simply worn for email, because a repeated digest can be noticed and complained about while a missing one cannot. Do **not** try to restore the old ordering for "transient" failures by classifying SMTP errors: SES answers `554 MessageRejected` for an unverified recipient, and telling that apart reliably optimises for the rarer failure. `docs/launch-runbook.md` §12 carries the cleanup for the rows already burned.
+- **The already-sent ledger is keyed by channel, and every read and write must say which.** `user_digest_sent` is `(user_id, dedup_key, channel)` since migration 0016. Before that it had no channel, and the digest and instant-notify shared it *deliberately* — one email per show, whichever path found it first. Push could not join that unchanged: writing those rows suppresses the email, reading them means a user opted into both channels gets exactly one, decided by which worker ran first. **Neither failure raises an error or logs anything.** `db.FilterUnsentDedupKeys` / `RecordDigestSent` / `CountDigestSent` therefore all take a `db.Channel`, and the argument is mandatory precisely so each call site states its intent. Email digest and instant-notify both pass `ChannelEmail` — they are two triggers for one channel and must keep suppressing each other. `ScanConcertsWorker` computes its candidate set **once** and filters per channel; filtering once and fanning out reintroduces the bug exactly. **Every channel now records after the send, never before, and that ordering is the whole of it.** Push went first: `SendPushWorker` used to write the ledger up front — matching what the digest then did — but it merely logged transient APNs errors and returned nil, so the keys were burned and river's retry found them already recorded and sent nothing. `sendRound` now reports which keys actually landed (delivered, or refused for a dead token — that one will never succeed), records only those, and returns an error if anything failed transiently. **Email followed, and the reason it had to is worth keeping.** Both mail workers wrote the ledger before hitting SMTP as a deliberate at-most-once trade, which is defensible while failures are transient and rare. SES in sandbox made them neither: only one verified recipient can receive anything, so for every other user the send was rejected *every night*, the keys were spent, and leaving the sandbox would have recovered nothing because those shows were already marked delivered. The retry is what hid it — the send fails, river retries, `FilterUnsentDedupKeys` excludes the keys just written, the candidate set is empty, and the job logs "nothing new" and **succeeds**. `jobs.sendAndRecord` is now the single ordering both `SendDigestWorker` and `SendInstantNotifyWorker` go through, so the two triggers for the one email channel cannot drift; `EmailMaxAttempts` (3) exists because that change turns retries into real SMTP attempts rather than the silent no-ops they used to be. The reversed trade, in both channels, is that a crash between send and record costs a duplicate rather than a lost message — the milder direction, absorbed by `CollapseID` for push and simply worn for email, because a repeated digest can be noticed and complained about while a missing one cannot. Do **not** try to restore the old ordering for "transient" failures by classifying SMTP errors: SES answers `554 MessageRejected` for an unverified recipient, and telling that apart reliably optimises for the rarer failure. `docs/launch-runbook.md` §12 carries the cleanup for the rows already burned.
 - **APNs routing is per device, and a notification carries its address in two
   halves.** A device token belongs to exactly one APNs environment and the
   other host answers `BadDeviceToken` — which `push.Error.IsUnregistered`
@@ -710,7 +710,7 @@ args-level uniqueness collapses to one in flight per (user, location):
    session in the last 14 days, spread across 60min to avoid a thundering herd.
 4. **`POST /me/concerts/refresh`** — an explicit user request.
 
-**Daily jobs use wall-clock schedules, never `river.PeriodicInterval`.**
+**Scheduled jobs use wall-clock schedules, never `river.PeriodicInterval`.**
 River's periodic scheduler keeps in-memory state only and re-anchors every job
 to process start, so a 24h interval means "24h after this process booted": the
 time of day drifts with each deploy, and — with `RunOnStart: false` — a process
@@ -719,6 +719,25 @@ restart the server on every push to `main`, a two-deploy day was a day with no
 scan, no digest, and no janitor run. `jobs.DailyAt(hour, min)` computes the
 next real UTC occurrence instead, which makes restarts harmless and keeps
 `RunOnStart: false` correct. Hours come from `DAILY_*_HOUR_UTC`.
+`jobs.WeeklyAt(weekday, hour, min)` is the same thing for the one weekly job.
+
+**The digest is weekly (CF-B26): `DIGEST_WEEKDAY` (default `thu`, validated at
+startup) at `DAILY_DIGEST_HOUR_UTC`.** The env name keeps "DAILY" because
+renaming it is an SSM change, and `render-env.sh` rewrites `.env` from SSM at
+every deploy, so a hand-added line would vanish. The worker does not depend
+on the cadence: what counts as new comes from the `user_digest_sent` ledger,
+not a time window, so moving from daily to weekly neither dropped nor
+repeated a show. **Within the 25-event cap, artists the user chose lead.**
+The snapshot is ordered by date alone, so `CapDigest` kept the soonest 25
+whatever matched them, and in a dense city a genre feed buried every
+followed artist's show, week after week. `concerts.ChosenFirst` moves
+events with a subscribed, picked or Spotify-profile act ahead of genre-only
+ones before the cap. `RenderDigest` then lists them as two sections ("Your
+artists", then "In genres you follow"), because its month grouping would
+otherwise sort them back into date order. "Chosen" is
+`concerts.ViewerMatches`, the same helper that writes the feed's reason line,
+so the two cannot disagree. Time-sensitive shows are not delayed by this:
+instant alerts for subscribed artists are sent at scan time.
 
 **The digest must trail the scan by `config.MinScanDigestGapHours` (2h).** It
 emails whatever snapshot exists, so scheduling it alongside the scan makes
@@ -1082,7 +1101,7 @@ Phase 2 fallback: `PHASE2_FALLBACKS_ENABLED`, `PHASE2_MIN_SCORE`, `PHASE2_FALLBA
 
 Phase 3: `SNAPSHOT_STALE_AFTER_HOURS`, `CONCERT_CACHE_TTL_HOURS`, `RATE_CAP_TM_PER_USER_DAILY`, `RATE_CAP_SONGKICK_PER_USER_DAILY`, `RATE_CAP_TM_ACCOUNT_DAILY`, `RATE_CAP_SONGKICK_ACCOUNT_DAILY`,
 `DISCOVER_SEED_CITIES` (`Name:lat,lng;...`; unset uses the built-in list,
-`none` disables the seed), `DAILY_SEED_HOUR_UTC`, `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `SPOTIFY_MAX_USERS` (default 5, the Development Mode allowlist; refuses new Spotify signups only), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
+`none` disables the seed), `DAILY_SEED_HOUR_UTC`, `DIGEST_WEEKDAY` (default `thu`; the digest is weekly), `INVITE_REQUIRED` (**defaults to true** — the one flag here whose default is on; see the admission constraint above), `SPOTIFY_MAX_USERS` (default 5, the Development Mode allowlist; refuses new Spotify signups only), `EMAIL_DELIVERY_MODE` (`log`/`smtp`), `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM`, `SITE_BASE_URL`, `CONTACT_EMAIL` (**required, no default** — it is the
 operator contact on `/privacy` and `/terms` and the address in the
 MusicBrainz/Nominatim User-Agent; it used to fall back to a maintainer's
 personal address, which an unset variable then published as a public

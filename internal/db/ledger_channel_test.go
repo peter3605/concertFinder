@@ -90,7 +90,7 @@ func TestOneChannelSuppressesItsOwnRepeat(t *testing.T) {
 	}
 }
 
-// The daily digest and instant-notify are two triggers for ONE channel, and
+// The weekly digest and instant-notify are two triggers for ONE channel, and
 // they must keep suppressing each other — that behaviour predates push and is
 // intended. Both pass ChannelEmail, so this is really a guard against someone
 // later "fixing" them into separate channels and doubling every user's mail.
@@ -104,7 +104,7 @@ func TestDigestAndInstantNotifyShareTheEmailChannel(t *testing.T) {
 	if err := RecordDigestSent(ctx, pool, user, ChannelEmail, []string{dedup}); err != nil {
 		t.Fatal(err)
 	}
-	// The daily digest must not send it again.
+	// The weekly digest must not send it again.
 	unsent, err := FilterUnsentDedupKeys(ctx, pool, user, ChannelEmail, []string{dedup})
 	if err != nil {
 		t.Fatal(err)

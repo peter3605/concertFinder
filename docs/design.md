@@ -944,7 +944,7 @@ The database was RDS db.t4g.micro through the first Terraform drafts. At ~$14/mo
 
 - AWS deployment: EC2 t4g.small + Neon PostgreSQL, Caddy TLS, Elastic IP. DNS lives at the registrar (Cloudflare), not Route 53. **Done** — applied and serving at `https://concertfinder.app`; `GET /api/healthz` returns ok. Config and secrets are rendered from SSM Parameter Store at deploy time rather than being pushed through the SSM command, whose parameters are retained for ~30 days and readable by anyone with SSM access.
 - Per-user rate-limit accounting against shared API quotas (§8.3).
-- Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a daily digest and instant notifications for subscribed artists.
+- Email notifications for newly detected shows (introduces `user-read-email` scope, a re-auth flow, and SES via SMTP). Two channels: a digest (daily at first, weekly on Thursdays since CF-B26) and instant notifications for subscribed artists.
 - Privacy policy and terms of service pages.
 - SWR snapshot read path with background scans (§6.0), replacing the synchronous fan-out.
 - Manual refresh endpoint, throttled independently of river's job uniqueness.
@@ -1049,7 +1049,7 @@ API; and every ToS constraint in §9 is enforced in exactly one place.
 
 **The schema change worth knowing about.** Migration `0016` widened
 `user_digest_sent`'s primary key to `(user_id, dedup_key, channel)`. The
-ledger previously had no channel, and the daily digest and instant-notify
+ledger previously had no channel, and the digest and instant-notify
 shared it deliberately — one email per show, whichever found it first. Push
 could not join that unchanged: writing those rows suppresses the email;
 reading them means a user opted into both channels receives exactly one,
@@ -1168,8 +1168,9 @@ The single-instance architecture is a deliberate free-tier / low-ops choice, not
 - *How should multi-artist shows (festivals, opening acts) be presented?*
   Grouped by `event_key` at assembly time, one card per event with a per-act
   star and bell. Storage stays one row per artist. See §6.2.
-- *Email notification cadence: daily digest vs. immediate?* Both, independently
-  opted into. The daily digest covers everything new in the feed; instant
+- *Email notification cadence: digest vs. immediate?* Both, independently
+  opted into. The digest (weekly since CF-B26, chosen artists listed before
+  genre matches) covers everything new in the feed; instant
   notification fires only for explicitly subscribed artists.
 - *Top-N cutoff.* 200 held up, but it is not a free parameter — it sets the
   floor for the per-user rate caps (§8.3) and dominates fallback cost (§5.4.4).
@@ -1241,7 +1242,8 @@ environments.
 | `DB_MAX_CONNS` | `20` | pgx pool size. Its own default is `max(4, NumCPU)` — 4 on a t4g.small, for a pool shared with river's notifier, elector, producer, completer and five workers. Exhaustion blocks inside `Acquire` rather than erroring, so it presents as slow queries |
 | `DAILY_AFFINITY_HOUR_UTC` | `6` | Wall-clock schedule, not an interval (§10.3.1) |
 | `DAILY_SCAN_HOUR_UTC` | `7` | |
-| `DAILY_DIGEST_HOUR_UTC` | `9` | Must trail the scan by ≥ 2h |
+| `DAILY_DIGEST_HOUR_UTC` | `9` | Must trail the scan by ≥ 2h. The digest is weekly; the name is kept to avoid an SSM rename |
+| `DIGEST_WEEKDAY` | `thu` | Day the weekly digest goes out; validated at startup |
 | `DAILY_JANITOR_HOUR_UTC` | `10` | |
 | `EMAIL_DELIVERY_MODE` | `log` | `log` writes to slog; `smtp` sends |
 | `SMTP_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `FROM` | — | SES SMTP credentials |

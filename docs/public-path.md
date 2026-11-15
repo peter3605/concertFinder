@@ -475,7 +475,7 @@ neither of which knows where an artist came from:
 
 | Feature | Change needed |
 |---|---|
-| Daily digest | None for artist picks. Genre feeds need a length cap: `RenderDigest` has no limit today and a New York rock pick could mail hundreds of rows |
+| Digest (weekly since CF-B26) | None for artist picks. Genre feeds need a length cap: `RenderDigest` has no limit today and a New York rock pick could mail hundreds of rows |
 | Instant alerts | None. `user_subscribed_artists` holds the `tm:` ID, and the bell works the same. The column's `spotify_artist_id` name is now a misnomer, which is left alone and commented |
 | Push | None |
 | One-click unsubscribe | None. It is keyed on the user |

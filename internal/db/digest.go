@@ -12,7 +12,7 @@ import (
 // a shared channel-less ledger silently suppressed one of two notifications
 // for anyone opted into both.
 //
-// The daily digest and instant-notify both use ChannelEmail on purpose. They
+// The weekly digest and instant-notify both use ChannelEmail on purpose. They
 // are two triggers for one channel, and a show emailed by either must not be
 // emailed again by the other — that shared suppression is the existing,
 // intended behaviour and predates this type.

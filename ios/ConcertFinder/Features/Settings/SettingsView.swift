@@ -104,7 +104,7 @@ struct SettingsView: View {
                     guard isUserEdit(newValue, matching: me?.pushOptIn) else { return }
                     Task { await setPush(newValue) }
                 }
-            Toggle("Daily email digest", isOn: $digestOptIn)
+            Toggle("Weekly email digest", isOn: $digestOptIn)
                 .onChange(of: digestOptIn) { _, newValue in
                     guard isUserEdit(newValue, matching: me?.digestOptIn) else { return }
                     Task { await save(digest: newValue) }
