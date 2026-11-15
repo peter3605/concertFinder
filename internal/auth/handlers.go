@@ -119,16 +119,13 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
-			// text/plain, matching the Development Mode refusal in the
-			// callback below rather than the JSON writeAuthError used by the
-			// mobile exchange. Both /login and /callback are landed on by a
-			// browser -- the app reaches them through a web view, not
-			// URLSession -- so what belongs here is a sentence, not an
-			// object.
-			http.Error(w,
+			// A sentence rather than JSON for the app: it reaches /login
+			// through a web view, not URLSession. The web flow goes back to
+			// the sign-in page instead, which can say the same thing beside
+			// the field the code was typed into.
+			d.refuse(w, r, appChallenge != "", LoginErrorInviteInvalid, "",
 				"That invite code is not valid. It may have already been used, or it may have expired. "+
-					"Check it for typos, or ask whoever sent it for another.",
-				http.StatusForbidden)
+					"Check it for typos, or ask whoever sent it for another.")
 			return
 		}
 	}
@@ -223,10 +220,11 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, spotify.ErrUserNotRegistered) {
 			slog.Warn("login refused: account not on the Spotify app allowlist (Development Mode)",
 				"remedy", "add the account under User Management at https://developer.spotify.com/dashboard")
-			http.Error(w,
+			// Nothing was admitted, so an invite this person brought is
+			// unspent and goes back to the page with them.
+			d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyNotRegistered, hs.InviteCode,
 				"This app is still in Spotify's development mode, so only accounts the operator "+
-					"has added can sign in. Ask them to add your Spotify account email, then try again.",
-				http.StatusForbidden)
+					"has added can sign in. Ask them to add your Spotify account email, then try again.")
 			return
 		}
 		slog.Error("spotify /me failed", "err", err)
@@ -261,12 +259,11 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// unspent. Like the other refusals it names nobody: no user row was
 		// written, so there is nothing of theirs to log.
 		slog.Info("signup refused: spotify user cap reached")
-		http.Error(w,
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyFull, hs.InviteCode,
 			"ConcertFinder can't take any more Spotify accounts right now. "+
 				"If you have an invite code it has not been used, so you can still sign up another way. "+
 				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
-				"existing accounts are never affected.",
-			http.StatusForbidden)
+				"existing accounts are never affected.")
 		return
 	case errors.Is(err, db.ErrInviteRequired):
 		// A refusal, not a fault, and the same shape as the Development Mode
@@ -278,12 +275,11 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// hold Spotify-derived data for a non-user. The event is the useful
 		// part: it tells the operator people are arriving without codes.
 		slog.Info("signup refused: no invite code")
-		http.Error(w,
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteRequired, "",
 			"ConcertFinder is invite-only at the moment, so creating a new account needs an invite code. "+
 				"If you have one, start again from the sign-in page and enter it there. "+
 				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
-				"existing accounts never need a code.",
-			http.StatusForbidden)
+				"existing accounts never need a code.")
 		return
 	case errors.Is(err, db.ErrInviteInvalid):
 		// Distinct from the above on purpose. "Your code did not work" and
@@ -297,10 +293,9 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// "why didn't my invite work", and unlike the Spotify ID it names
 		// something they issued rather than somebody who was turned away.
 		slog.Info("signup refused: invite not redeemable", "code", hs.InviteCode)
-		http.Error(w,
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteInvalid, "",
 			"That invite code is no longer valid — it may have just been used up, or expired. "+
-				"Ask whoever sent it for another.",
-			http.StatusForbidden)
+				"Ask whoever sent it for another.")
 		return
 	case err != nil:
 		slog.Error("upsert user failed", "err", err)
@@ -391,4 +386,51 @@ func (d *Deps) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(userPayload(full))
+}
+
+// Refusal codes the web sign-in page understands, carried as
+// /login?error=<code>. web/src/pages/login.tsx maps each to a message and to
+// the tab it belongs on, so renaming one here strands it there as a generic
+// error. Like the refusals themselves they describe the attempt, never the
+// person: no Spotify ID or name ever rides in the URL.
+const (
+	LoginErrorInviteRequired       = "invite_required"
+	LoginErrorInviteInvalid        = "invite_invalid"
+	LoginErrorSpotifyFull          = "spotify_full"
+	LoginErrorSpotifyNotRegistered = "spotify_not_registered"
+)
+
+// loginPagePath is the SPA route of the sign-in page. Relative, like
+// PostLoginURL, so the redirect stays on whichever origin served the callback.
+const loginPagePath = "/login"
+
+// refuse ends a sign-in that was understood and turned down.
+//
+// The web flow goes back to the sign-in page, which shows the reason beside
+// the control that caused it. Before CF-41 it ended on a text/plain 403 with
+// no way back, reached after Spotify's consent screen, which is the moment a
+// new person is least likely to try again.
+//
+// An app-initiated login keeps the sentence. It runs inside
+// ASWebAuthenticationSession, which ends only on the universal link; a
+// redirect to a web page would strand the app on a page it never returns
+// from.
+//
+// invite is passed back only when the refusal spent nothing, so a person
+// holding a valid code does not have to find and retype it.
+func (d *Deps) refuse(w http.ResponseWriter, r *http.Request, appFlow bool, code, invite, message string) {
+	if appFlow {
+		http.Error(w, message, http.StatusForbidden)
+		return
+	}
+	http.Redirect(w, r, loginRefusalURL(code, invite), http.StatusFound)
+}
+
+func loginRefusalURL(code, invite string) string {
+	q := url.Values{}
+	q.Set("error", code)
+	if invite != "" {
+		q.Set("invite", invite)
+	}
+	return loginPagePath + "?" + q.Encode()
 }

@@ -1,8 +1,15 @@
 package http
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/peterho/concertfinder/internal/db"
 )
 
 // SiteInfoHandler serves GET /api/site-info: small public bootstrap payload
@@ -25,9 +32,39 @@ type SiteInfoHandler struct {
 	// -- the gate is in the auth callback, which is the only place that can
 	// tell a signup from a returning user.
 	InviteRequired bool
+	// Pool and MaxSpotifyUsers answer spotify_signups_open: whether a new
+	// Spotify account could be created right now (SPOTIFY_MAX_USERS, with
+	// db.NoSpotifyCap meaning no cap). Like InviteRequired it only decides
+	// whether the sign-up screen offers Spotify. The gate itself stays in
+	// db.UpsertUserWithAdmission, which recounts under a lock, so a stale
+	// answer here costs a refusal message, never an extra account. A nil
+	// Pool reports false.
+	Pool            *pgxpool.Pool
+	MaxSpotifyUsers int
 }
 
-func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
+// spotifySignupsOpen fails closed: an unreadable count hides the Spotify
+// button on the sign-up tab rather than sending a new person through
+// Spotify's consent screen to be refused on the way back. Returning users
+// are unaffected, because the sign-in tab offers Spotify unconditionally.
+func spotifySignupsOpen(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, maxUsers int) bool {
+	if maxUsers == db.NoSpotifyCap {
+		return true
+	}
+	if maxUsers <= 0 {
+		return false
+	}
+	n, err := db.CountSpotifyUsers(ctx, q)
+	if err != nil {
+		slog.Warn("site-info: spotify user count failed", "err", err)
+		return false
+	}
+	return n < maxUsers
+}
+
+func (h *SiteInfoHandler) Get(w http.ResponseWriter, r *http.Request) {
 	effective := h.EffectiveDate
 	if effective == "" {
 		effective = time.Now().UTC().Format("2006-01-02")
@@ -37,5 +74,14 @@ func (h *SiteInfoHandler) Get(w http.ResponseWriter, _ *http.Request) {
 		"effective_date":  effective,
 		"min_ios_build":   h.MinIOSBuild,
 		"invite_required": h.InviteRequired,
+		// Additive, like invite_required: iOS builds decode this payload.
+		"spotify_signups_open": h.spotifySignupsOpen(r.Context()),
 	})
+}
+
+func (h *SiteInfoHandler) spotifySignupsOpen(ctx context.Context) bool {
+	if h.Pool == nil {
+		return h.MaxSpotifyUsers == db.NoSpotifyCap
+	}
+	return spotifySignupsOpen(ctx, h.Pool, h.MaxSpotifyUsers)
 }

@@ -754,6 +754,10 @@ func main() {
 			// box on the sign-in screen. Additive because /api/me/* and this
 			// payload are consumed by builds already on people's phones.
 			InviteRequired: cfg.InviteRequired,
+			// Same cap the callback enforces, so the sign-up tab offers
+			// Spotify only while a new Spotify account could be admitted.
+			Pool:            pool,
+			MaxSpotifyUsers: cfg.SpotifyMaxUsers,
 		}).Get)
 		// No nil guard on authDeps here any more. There used to be one, and it
 		// was the mechanism by which a bad ENCRYPTION_KEY produced a site with

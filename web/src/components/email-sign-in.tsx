@@ -10,7 +10,22 @@ import { apiFetch, mutatingFetch, NETWORK_ERROR_MESSAGE, statusMessage } from '@
 // The start request always answers 202, whether or not the address has an
 // account, so the message after it has to be true in every case — it cannot
 // say "we sent you a link", only that one is on its way if it can be.
-export function EmailSignIn({ invite }: { invite: string }) {
+//
+// `label` and `submitLabel` differ between the sign-in and create-account
+// tabs; `disabled` holds the form shut until the create tab has an invite
+// code, since an unknown address with no code is never mailed and the
+// page would otherwise promise a link that cannot arrive.
+export function EmailSignIn({
+  invite,
+  label = 'Email',
+  submitLabel = 'Email me a sign-in link',
+  disabled = false,
+}: {
+  invite: string;
+  label?: string;
+  submitLabel?: string;
+  disabled?: boolean;
+}) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
@@ -83,9 +98,10 @@ export function EmailSignIn({ invite }: { invite: string }) {
   if (!sent) {
     return (
       <form onSubmit={start} className="w-full space-y-2">
-        <Label htmlFor="signin-email">Or sign in with email</Label>
+        <Label htmlFor="signin-email">{label}</Label>
         <Input
           id="signin-email"
+          disabled={disabled}
           type="email"
           autoComplete="email"
           value={email}
@@ -94,8 +110,8 @@ export function EmailSignIn({ invite }: { invite: string }) {
           required
         />
         {err && <p className="text-sm text-destructive">{err}</p>}
-        <Button type="submit" variant="outline" className="w-full" disabled={busy || !email.trim()}>
-          {busy ? 'Sending…' : 'Email me a sign-in link'}
+        <Button type="submit" className="w-full" disabled={disabled || busy || !email.trim()}>
+          {busy ? 'Sending…' : submitLabel}
         </Button>
       </form>
     );
