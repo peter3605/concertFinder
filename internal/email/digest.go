@@ -2,45 +2,11 @@ package email
 
 import (
 	"fmt"
-	"html"
 	"sort"
 	"strings"
 
 	"github.com/peterho/concertfinder/internal/concerts"
 )
-
-// RenderDigest turns a set of net-new concerts into a Message. The list is
-// grouped by month for readability; artist name + venue + date are the only
-// fields surfaced. unsubURL is embedded in both HTML and text bodies.
-//
-// Concerts are folded into events first, exactly as the web list does: a
-// festival that matched six of the user's artists is six Concert rows sharing
-// a date, venue, and city, and mailing it as six rows under a subject reading
-// "6 new shows" over-counts one night out by six. Grouping is presentational
-// only — the caller's net-new bookkeeping stays keyed on dedup_key, one per
-// (artist, show), so an act added to a bill the user has already been emailed
-// about still mails on its own.
-//
-// more describes what CapDigest held back: those shows are not listed, the
-// subject and greeting count them, and the body links to the feed for the
-// rest. The zero value means nothing was held back.
-//
-// chosen, when non-nil, splits the listing into the user's own artists
-// (subscribed, picked or in their Spotify profile; see
-// concerts.ViewerMatches.Chosen) and genre matches, rendered in that order
-// as two sections (CF-B26). Each section is grouped by month and sorted by
-// date. Without the split the renderer's date sort would interleave them
-// again and undo the ordering the caller capped by. A nil chosen, or a
-// listing that is all one kind, renders as one list as before.
-func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, unsubURL string, more DigestMore, chosen func(concerts.Concert) bool) Message {
-	events := concerts.GroupEvents(newConcerts)
-	total := len(events) + more.Events
-	subject := fmt.Sprintf("ConcertFinder digest — %d new show%s", total, plural(total))
-	sections := digestSections(newConcerts, events, chosen)
-	text := renderDigestText(displayName, sections, total, unsubURL, more)
-	htmlBody := renderDigestHTML(displayName, sections, total, unsubURL, more)
-	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
-}
 
 // DigestMaxEvents is the most events one digest lists (CF-31). There was no
 // limit while every row came from an artist the user follows; a genre pick
@@ -48,21 +14,13 @@ func RenderDigest(displayName, toEmail string, newConcerts []concerts.Concert, u
 // an email listing them all is one nobody reads and most clients clip.
 const DigestMaxEvents = 25
 
-// DigestMore is what a capped digest held back, and where to see it.
-type DigestMore struct {
-	// Events is how many events were not listed.
-	Events int
-	// URL is the feed, where the rest are. Required whenever Events > 0.
-	URL string
-}
-
 // CapDigest keeps the concerts belonging to the first max events, in the
 // order given, and reports how many further events were dropped. It cuts on
 // events rather than concerts so a festival is never mailed with half its
 // matched acts.
 //
 // The caller records only kept as sent. The rest stay unsent and lead the
-// next digest, so a large genre feed is mailed a page a day instead of being
+// next digest, so a large genre feed is mailed a page a week instead of being
 // marked delivered by an email that never listed it.
 func CapDigest(cs []concerts.Concert, max int) (kept []concerts.Concert, moreEvents int) {
 	seen := make(map[string]struct{}, max)
@@ -181,187 +139,4 @@ func groupByMonth(es []concerts.Event) []monthGroup {
 		out = append(out, monthGroup{label: labels[k], items: g})
 	}
 	return out
-}
-
-func renderDigestText(displayName string, sections []digestSection, total int, unsub string, more DigestMore) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Hi %s,\n\n", displayName)
-	fmt.Fprintf(&b, "%d new show%s in your area since your last digest:\n\n", total, plural(total))
-	for _, sec := range sections {
-		if sec.title != "" {
-			fmt.Fprintf(&b, "### %s ###\n\n", sec.title)
-		}
-		for _, g := range sec.months {
-			fmt.Fprintf(&b, "== %s ==\n", g.label)
-			for _, e := range g.items {
-				fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
-					actsLine(e.Acts),
-					e.LocalDayTime().Format("Mon Jan 2"),
-					e.Venue, e.City, stateSuffix(e.State),
-				)
-				for _, l := range e.Links {
-					fmt.Fprintf(&b, "    %s: %s\n", l.Source, l.URL)
-				}
-			}
-			b.WriteString("\n")
-		}
-	}
-	if more.Events > 0 {
-		fmt.Fprintf(&b, "...and %d more. See them all: %s\n", more.Events, more.URL)
-	}
-	fmt.Fprintf(&b, "\n---\nManage or unsubscribe: %s\n", unsub)
-	return b.String()
-}
-
-func renderDigestHTML(displayName string, sections []digestSection, total int, unsub string, more DigestMore) string {
-	var b strings.Builder
-	b.WriteString(`<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;max-width:600px;margin:2rem auto;line-height:1.5;color:#222">`)
-	fmt.Fprintf(&b, `<h2 style="margin-bottom:0.2rem">ConcertFinder digest</h2>`)
-	fmt.Fprintf(&b, `<p style="color:#666;margin-top:0">Hi %s — %d new show%s in your area since your last digest.</p>`,
-		html.EscapeString(displayName), total, plural(total))
-
-	for _, sec := range sections {
-		if sec.title != "" {
-			fmt.Fprintf(&b, `<h2 style="font-size:1.15em;margin-top:1.8rem;margin-bottom:0">%s</h2>`, html.EscapeString(sec.title))
-		}
-		for _, g := range sec.months {
-			fmt.Fprintf(&b, `<h3 style="border-bottom:1px solid #eee;padding-bottom:0.3rem;margin-top:1.5rem">%s</h3>`,
-				html.EscapeString(g.label))
-			b.WriteString(`<ul style="list-style:none;padding:0">`)
-			for _, e := range g.items {
-				fmt.Fprintf(&b,
-					`<li style="padding:0.5rem 0;border-bottom:1px solid #f4f4f4">`+
-						`<strong>%s</strong> · %s<br>`+
-						`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
-					html.EscapeString(actsLine(e.Acts)),
-					html.EscapeString(e.LocalDayTime().Format("Mon Jan 2")),
-					html.EscapeString(e.Venue),
-					html.EscapeString(e.City),
-					html.EscapeString(stateSuffix(e.State)),
-				)
-				if len(e.Links) > 0 {
-					b.WriteString(`<div style="margin-top:0.3rem">`)
-					for _, l := range e.Links {
-						fmt.Fprintf(&b, `<a href="%s" style="color:#1db954;margin-right:0.6rem;text-decoration:none">%s</a>`,
-							html.EscapeString(l.URL), html.EscapeString(string(l.Source)))
-					}
-					b.WriteString(`</div>`)
-				}
-				b.WriteString(`</li>`)
-			}
-			b.WriteString(`</ul>`)
-		}
-	}
-	if more.Events > 0 {
-		fmt.Fprintf(&b, `<p style="margin-top:1rem">…and %d more. <a href="%s" style="color:#1db954">See them all</a></p>`,
-			more.Events, html.EscapeString(more.URL))
-	}
-
-	fmt.Fprintf(&b, `<p style="margin-top:2rem;font-size:0.8em;color:#888">Powered by Spotify · <a href="%s" style="color:#888">Manage or unsubscribe</a></p>`,
-		html.EscapeString(unsub))
-	b.WriteString(`</body></html>`)
-	return b.String()
-}
-
-func stateSuffix(state string) string {
-	if state == "" {
-		return ""
-	}
-	return ", " + state
-}
-
-// RenderInstantNotify composes an email for one or more newly-discovered
-// concerts by artists the user actively subscribed to. Distinct subject and
-// intro from the weekly digest so recipients can tell them apart at a glance
-// (and set inbox rules accordingly).
-//
-// Grouping is safe here even though the email is per-subscription: the caller
-// has already narrowed `fresh` to subscribed artists only, so a merged entry
-// can only ever name artists the user asked about — it never reveals the rest
-// of the bill. Without the fold, subscribing to three artists who all turn up
-// at one festival announcement mails "3 new shows" for one night.
-//
-// fresh must be non-empty; the caller (SendInstantNotifyWorker) returns early
-// when there is nothing to send.
-func RenderInstantNotify(displayName, toEmail string, fresh []concerts.Concert, unsubURL string) Message {
-	events := concerts.GroupEvents(fresh)
-	subject := fmt.Sprintf("New show: %s", actsLine(events[0].Acts))
-	if len(events) > 1 {
-		subject = fmt.Sprintf("%d new shows for artists you follow", len(events))
-	}
-	text := renderInstantText(displayName, events, unsubURL)
-	htmlBody := renderInstantHTML(displayName, events, unsubURL)
-	return Message{To: toEmail, Subject: subject, Text: text, HTML: htmlBody, UnsubscribeURL: unsubURL}
-}
-
-func renderInstantText(displayName string, es []concerts.Event, unsub string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Hi %s,\n\n", displayName)
-	if len(es) == 1 {
-		fmt.Fprintf(&b, "A new show just landed for %s — %s you're following.\n\n",
-			actsLine(es[0].Acts), followingNoun(len(es[0].Acts)))
-	} else {
-		fmt.Fprintf(&b, "%d new shows just landed for artists you follow:\n\n", len(es))
-	}
-	for _, e := range es {
-		fmt.Fprintf(&b, "  %s — %s\n    %s, %s%s\n",
-			actsLine(e.Acts),
-			e.LocalDayTime().Format("Mon Jan 2, 2006"),
-			e.Venue, e.City, stateSuffix(e.State),
-		)
-		for _, l := range e.Links {
-			fmt.Fprintf(&b, "    %s: %s\n", l.Source, l.URL)
-		}
-		b.WriteString("\n")
-	}
-	fmt.Fprintf(&b, "---\nStop these notifications: %s\n", unsub)
-	return b.String()
-}
-
-// followingNoun keeps the single-event intro grammatical when one show turns
-// out to carry several of the user's subscriptions.
-func followingNoun(acts int) string {
-	if acts == 1 {
-		return "an artist"
-	}
-	return "artists"
-}
-
-func renderInstantHTML(displayName string, es []concerts.Event, unsub string) string {
-	var b strings.Builder
-	b.WriteString(`<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;max-width:600px;margin:2rem auto;line-height:1.5;color:#222">`)
-	b.WriteString(`<h2 style="margin-bottom:0.2rem">New show alert</h2>`)
-	if len(es) == 1 {
-		fmt.Fprintf(&b, `<p style="color:#666;margin-top:0">Hi %s — a new show just landed for <strong>%s</strong>, %s you're following.</p>`,
-			html.EscapeString(displayName), html.EscapeString(actsLine(es[0].Acts)), followingNoun(len(es[0].Acts)))
-	} else {
-		fmt.Fprintf(&b, `<p style="color:#666;margin-top:0">Hi %s — %d new shows just landed for artists you follow.</p>`,
-			html.EscapeString(displayName), len(es))
-	}
-	b.WriteString(`<ul style="list-style:none;padding:0">`)
-	for _, e := range es {
-		fmt.Fprintf(&b,
-			`<li style="padding:0.6rem 0;border-bottom:1px solid #f4f4f4">`+
-				`<strong>%s</strong> · %s<br>`+
-				`<span style="color:#555;font-size:0.95em">%s, %s%s</span>`,
-			html.EscapeString(actsLine(e.Acts)),
-			html.EscapeString(e.LocalDayTime().Format("Mon Jan 2, 2006")),
-			html.EscapeString(e.Venue),
-			html.EscapeString(e.City),
-			html.EscapeString(stateSuffix(e.State)),
-		)
-		if len(e.Links) > 0 {
-			b.WriteString(`<div style="margin-top:0.3rem">`)
-			for _, l := range e.Links {
-				fmt.Fprintf(&b, `<a href="%s" style="color:#1db954;margin-right:0.6rem;text-decoration:none">%s</a>`,
-					html.EscapeString(l.URL), html.EscapeString(string(l.Source)))
-			}
-			b.WriteString(`</div>`)
-		}
-		b.WriteString(`</li>`)
-	}
-	b.WriteString(`</ul>`)
-	fmt.Fprintf(&b, `<p style="margin-top:2rem;font-size:0.8em;color:#888">Powered by Spotify · <a href="%s" style="color:#888">Stop these notifications</a></p>`, html.EscapeString(unsub))
-	b.WriteString(`</body></html>`)
-	return b.String()
 }

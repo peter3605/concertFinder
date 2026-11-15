@@ -223,11 +223,12 @@ func TestGenreOnlyUsersShareOneCappedListing(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("%d digests, want 1", len(msgs))
 	}
-	listed := strings.Count(msgs[0].Text, "    ticketmaster: ")
+	// One "Get tickets" line per listed event (CF-B27 layout).
+	listed := strings.Count(msgs[0].Text, "  Get tickets: ")
 	if listed == 0 || listed > email.DigestMaxEvents {
 		t.Errorf("digest lists %d shows, want 1..%d", listed, email.DigestMaxEvents)
 	}
-	if !strings.Contains(msgs[0].Text, "more. See them all: https://example.test/") {
+	if !strings.Contains(msgs[0].Text, "more.\nSee all in ConcertFinder: https://example.test/") {
 		t.Errorf("digest does not link to the rest:\n%s", msgs[0].Text)
 	}
 	sent, err := db.CountDigestSent(ctx, pool, userA, db.ChannelEmail)

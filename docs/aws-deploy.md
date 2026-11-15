@@ -269,7 +269,11 @@ SMTP_PASSWORD=<terraform output ses_smtp_password>
 # (notifications@ by default). The SES IAM policy conditions on
 # ses:FromAddress, so a different local part is denied at send time — SMTP
 # accepts the session and the message bounces, which nothing here validates.
-SMTP_FROM=ConcertFinder <notifications@your-domain.com>
+# A bare address. Outgoing mail shows it as "ConcertFinder" (the
+# email.DefaultFromName default); to use another name, write it as
+# `Name <notifications@your-domain.com>`. Either way only the address is used
+# as the SMTP envelope sender -- SES rejects a named MAIL FROM.
+SMTP_FROM=notifications@your-domain.com
 ```
 
 The server validates all of this at startup and refuses to boot on anything

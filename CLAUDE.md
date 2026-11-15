@@ -350,7 +350,9 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   foreground or a `template` render is a modification of the logo. The email
   digests deliberately keep **text-only** attribution: remote images are
   blocked by default in most mail clients, so an `<img>` there would attribute
-  nothing most of the time while the words always land.
+  nothing most of the time while the words always land. They show it **only
+  to a recipient with a Spotify identity** (`email.Audience.Spotify`, CF-B27):
+  a picks- or genre-only account's email carries no Spotify-derived data.
 - **An optimistic control must read and write the same list, and on iOS that
   list is not always the feed.** `EventDetailView` is pushed from two of them
   — `FeedModel` and `SavedModel` — each holding its own copy of the events,

@@ -35,12 +35,45 @@ type Config struct {
 	Port     int
 	Username string
 	Password string
-	From     string // e.g. "notifications@yourdomain.com"
+	// From is SMTP_FROM: a bare address ("notifications@example.com") or a
+	// named one ("ConcertFinder <notifications@example.com>"). Either way the
+	// header carries a display name -- DefaultFromName when none is given --
+	// and the envelope carries only the address. See sender().
+	From string
 }
+
+// DefaultFromName is the display name on outgoing mail when SMTP_FROM is a
+// bare address, which it is in SSM. A default in code means the name needs
+// no SSM change, and the address -- the thing SES's ses:FromAddress IAM
+// condition matches -- is untouched either way.
+const DefaultFromName = "ConcertFinder"
+
+// sender splits From into the two places it goes. They are not the same
+// string: the header wants `"ConcertFinder" <notifications@...>`, while the
+// SMTP envelope wants the bare address. Passing a named From to
+// smtp.SendMail produces `MAIL FROM:<ConcertFinder <notifications@...>>`,
+// which SES rejects, so a named SMTP_FROM used to be a working-looking value
+// that sent nothing.
+func (c Config) sender() (header, envelope string, err error) {
+	addr, err := mail.ParseAddress(strings.TrimSpace(c.From))
+	if err != nil {
+		return "", "", fmt.Errorf("email: SMTP_FROM %q is not an address: %w", c.From, err)
+	}
+	if addr.Name == "" {
+		addr.Name = DefaultFromName
+	}
+	return addr.String(), addr.Address, nil
+}
+
+// sendMailFunc is smtp.SendMail's signature, so a test can stand in for the
+// relay and see the envelope that would have been sent.
+type sendMailFunc func(addr string, a smtp.Auth, from string, to []string, msg []byte) error
 
 // Sender ships messages via SMTP (or logs them, per Mode).
 type Sender struct {
 	Cfg Config
+	// sendMail is smtp.SendMail unless a test replaces it.
+	sendMail sendMailFunc
 }
 
 // Message is one email to one recipient. Both plaintext and HTML bodies are
@@ -70,7 +103,11 @@ func (s *Sender) Send(ctx context.Context, m Message) error {
 		return fmt.Errorf("email: SMTP_FROM not configured")
 	}
 
-	raw := buildMIME(s.Cfg.From, m)
+	fromHeader, envelope, err := s.Cfg.sender()
+	if err != nil {
+		return err
+	}
+	raw := buildMIME(fromHeader, m)
 
 	if s.Cfg.Mode == ModeLog || s.Cfg.Mode == "" {
 		slog.Info("email (log mode)", "to", m.To, "subject", m.Subject, "bytes", len(raw))
@@ -89,8 +126,12 @@ func (s *Sender) Send(ctx context.Context, m Message) error {
 	// STARTTLS-only path (port 587 style). Plain smtp.SendMail handles the
 	// STARTTLS upgrade internally when the server offers it.
 	done := make(chan error, 1)
+	send := s.sendMail
+	if send == nil {
+		send = smtp.SendMail
+	}
 	go func() {
-		done <- smtp.SendMail(addr, auth, s.Cfg.From, []string{m.To}, raw)
+		done <- send(addr, auth, envelope, []string{m.To}, raw)
 	}()
 	select {
 	case err := <-done:
