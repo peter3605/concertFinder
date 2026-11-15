@@ -63,8 +63,9 @@ that makes the app usable by anyone who downloads it.
 **2. Apple Developer account — done 2026-08-25.** The App ID is registered as
 an explicit `com.concertfinder.ph` under team `L3MY7DN27B`, with Push
 Notifications and Associated Domains enabled, and an APNs auth key
-(`42KZTQHRRH`). `ios/project.yml`, `Keychain.swift`, and
-`infra/terraform.tfvars` carry the real values; the bundle identifier is now
+(`42KZTQHRRH`). `ios/project.yml`, `Keychain.swift`, and SSM
+`/concertfinder/*` carry the real values (history: the old box's
+`infra/terraform.tfvars` did too, until CF-B29 deleted `infra/`); the bundle identifier is now
 effectively permanent, since iOS caches `IOS_APP_ID` from the association file.
 
 | Placeholder | Where | Note |

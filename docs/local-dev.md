@@ -104,19 +104,18 @@ locally usually means your Go is behind, not that the tree is:
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-If you touched `Caddyfile`, either compose file, or any of the scripts that
-only ever run on the instance — `verify-deploy.sh`, `render-env.sh`,
-`backup-db.sh`, `prune-images.sh`, `restore-drill.sh` — also run:
+If you touched either compose file, or any of the scripts that only ever run
+on the shared box or by an operator — `deploy-box.sh`, `verify-deploy.sh`,
+`render-env.sh`, `restore-drill.sh` — also run:
 
 ```
 ./scripts/check-deploy-config.sh          # requires docker
 ```
 
 Those files are the only ones in the repo that never execute during local
-development — `docker-compose.yml` has no Caddy service and `go run` reads none
+development — `docker-compose.yml` is a different stack and `go run` reads none
 of them — so nothing else catches a defect in them until it is already in
-production, where the symptom is a Caddy crash loop with a healthy-looking api
-container beside it. The script parses each one and asserts its executable bit.
+production, where the symptom is a failed or silently wrong deploy. The script parses each one and asserts its executable bit.
 `restore-drill.sh` is the extreme case: nothing runs it on a schedule, so its
 only automated attention is this check and the day it is needed is the worst
 day to find a typo. CI runs the same script in the `deploy-config` job.

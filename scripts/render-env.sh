@@ -71,13 +71,14 @@ while IFS=$'\t' read -r name value; do
         continue
     fi
     # Single-quote the value. This file has two consumers with two different
-    # parsers: docker compose reads it as an env_file, and scripts/backup-db.sh
-    # does `set -a; . "$ENV_FILE"` -- i.e. it hands it to bash. Written bare, a
-    # value holding a space, a `$`, a backtick or a `;` is fine for compose and
-    # is a syntax error or a command substitution for bash, so the failure is
-    # invisible in the worst way: the app stays perfectly healthy and only the
-    # nightly backup, which nobody watches, dies. Compose strips surrounding
-    # single quotes, so quoting satisfies both.
+    # parsers: docker compose reads it as an env_file, and anything that does
+    # `set -a; . "$ENV_FILE"` hands it to bash (the old box's nightly backup
+    # did; an operator on the box still might). Written bare, a value holding
+    # a space, a `$`, a backtick or a `;` is fine for compose and is a syntax
+    # error or a command substitution for bash, so the failure is invisible in
+    # the worst way: the app stays perfectly healthy and only the thing that
+    # sourced the file dies. Compose strips surrounding single quotes, so
+    # quoting satisfies both.
     #
     # A value containing a single quote itself is REFUSED rather than escaped,
     # because no single encoding satisfies both parsers -- verified against

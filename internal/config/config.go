@@ -555,22 +555,21 @@ func (c Config) Validate() []error {
 			c.SiteBaseURL, c.SessionCookieDomain))
 	}
 
-	// SITE_DOMAIN is Caddy's variable, not this binary's, and it is the one
-	// piece of the deployment config that nothing else can check. The CI
-	// preflight (scripts/check-deploy-config.sh) validates the Caddyfile
-	// against a *synthetic* .env it writes itself, so it proves the wiring and
-	// can never see whether the deployment's own .env actually sets this. The
-	// api container reads the same file, so it can — and an error here is a
-	// legible message in `docker compose logs api` instead of Caddy's
-	// "unrecognized global option: encode" from a variable that isn't
-	// mentioned anywhere in the message.
+	// SITE_DOMAIN is not this binary's variable. It was the old box's Caddy
+	// site name, where an empty one collapsed `{$SITE_DOMAIN} {` into a global
+	// options block and crash-looped Caddy; the shared box's Caddy names the
+	// domain in apps-infra instead, and the old Caddyfile was deleted in
+	// CF-B29. It is still required and checked against SITE_BASE_URL because
+	// that keeps the two from drifting apart in SSM, and the api container is
+	// the only thing that ever sees the real .env: the CI preflight
+	// (scripts/check-deploy-config.sh) writes a *synthetic* one.
 	//
-	// Gated on a real cookie domain: local dev runs no Caddy at all.
+	// Gated on a real cookie domain: local dev leaves it blank.
 	if !isLoopbackHost(c.SessionCookieDomain) {
 		switch base := hostOf(c.SiteBaseURL); {
 		case c.SiteDomain == "":
 			errs = append(errs, errors.New(
-				"SITE_DOMAIN is required in production — the Caddyfile's site block is {$SITE_DOMAIN}, and an empty one collapses into a global options block that refuses to start"))
+				"SITE_DOMAIN is required in production — set it to the host in SITE_BASE_URL"))
 		case base != "" && !strings.EqualFold(base, c.SiteDomain):
 			errs = append(errs, fmt.Errorf(
 				"SITE_DOMAIN (%q) and the host in SITE_BASE_URL (%q) disagree — Caddy would serve a certificate for one name while every emailed link and the MusicBrainz/Nominatim User-Agent point at the other",
@@ -584,8 +583,8 @@ func (c Config) Validate() []error {
 	// docker-compose.yml's `environment:` block had quietly substituted for
 	// Neon — and admitted nobody, while /api/healthz, verify-deploy.sh and
 	// the watchdog all reported green: each asks whether *a* database answers,
-	// never which one. The compose override is fixed in
-	// docker-compose.prod.yml; this catches every other route to the same
+	// never which one. The compose override is fixed in the compose file
+	// (docker-compose.box.yml today); this catches every other route to the same
 	// place (a hand-edited .env, a future compose file, a stray -e flag) by
 	// refusing to boot, which `up -d --wait` and verify-deploy.sh do notice.
 	//

@@ -45,7 +45,7 @@ func main() {
 	// The api image is distroless — no shell, no curl, no wget — so a compose
 	// healthcheck has nothing to run except this binary. `-healthcheck` probes
 	// the already-running server in the same container and exits 0/1, which is
-	// what `healthcheck:` in docker-compose.prod.yml invokes.
+	// what `healthcheck:` in docker-compose.box.yml invokes.
 	healthcheck := flag.Bool("healthcheck", false,
 		"probe the running server's /api/healthz and exit 0 (healthy) or 1 (not); for the container healthcheck")
 	// Invite administration, for the same reason: the operator's only way

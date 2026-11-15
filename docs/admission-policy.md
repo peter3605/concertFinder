@@ -101,11 +101,13 @@ path stays at five accounts and CF-09 was re-scoped accordingly.
   second thing to keep true.
 - **A waitlist is explicitly out of scope for now.** It was considered and
   rejected for launch, for a reason that is worth recording: the "you're in"
-  email cannot be delivered. `infra/ses.tf` verifies exactly one recipient and
-  SES is still in sandbox (CF-08), so every email to anybody but the operator
-  is rejected. A waitlist that cannot tell people they have been admitted is
-  worse than no waitlist — it collects addresses and then goes quiet. Revisit
-  once CF-08 lands and demand actually exceeds hand-issued codes.
+  email could not be delivered. The old box's Terraform (`infra/ses.tf`,
+  history: deleted in CF-B29) verified exactly one recipient and SES was in
+  sandbox (CF-08), so every email to anybody but the operator was rejected. A
+  waitlist that cannot tell people they have been admitted is worse than no
+  waitlist — it collects addresses and then goes quiet. SES in the apps account
+  has had production access since 2026-11-14, so that half no longer holds;
+  revisit when demand actually exceeds hand-issued codes.
 
 ### When to open up
 

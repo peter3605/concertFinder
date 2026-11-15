@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Post-deploy smoke test. Run on the instance by .github/workflows/deploy.yml
+# Post-deploy smoke test. Run on the shared box by scripts/deploy-box.sh
 # immediately after `docker compose up -d --wait`.
 #
 # Why this exists, given that `--wait` already blocks on the api container's
 # healthcheck: the healthcheck probes the api from *inside its own container*
 # and proves only that the Go process answers itself. It says nothing about
 # Caddy — which is the container with the history. Every deploy defect this
-# repo has shipped lived in the Caddyfile or the compose file and presented as
-# a Caddy crash loop with a perfectly healthy api container beside it. This
+# repo shipped on the old box lived in its Caddyfile or compose file and
+# presented as a Caddy crash loop with a perfectly healthy api container
+# beside it. Caddy is shared now (apps-infra), which moves the risk, not away. This
 # probes the whole serving chain the way a user does: TLS on 443, the
 # reverse_proxy hop, the api, and (because /api/healthz pings Postgres) the
 # database.
@@ -35,12 +36,11 @@
 # (default .env). It exists so the mismatch path can be exercised on the
 # instance against a scratch copy, without editing the live .env.
 #
-# Two more overrides exist for the shared apps box (scripts/deploy-box.sh) and
-# are unset in .github/workflows/deploy.yml, so the old box's deploy behaves
-# exactly as before:
+# Two more overrides, both set by scripts/deploy-box.sh:
 #
 #   VERIFY_COMPOSE_FILE    compose file for `ps`, `logs` and the api container
-#                          lookup (default docker-compose.prod.yml).
+#                          lookup (default docker-compose.box.yml; the old
+#                          box's docker-compose.prod.yml was deleted in CF-B29).
 #   VERIFY_SKIP_TLS_PROBE  non-empty skips only the HTTPS probe through Caddy.
 #                          Before the cutover the shared Caddy cannot hold a
 #                          certificate for the domain, so that probe cannot
@@ -94,7 +94,7 @@ fi
 
 cd "$(dirname "$0")/.."
 
-COMPOSE=(docker compose -f "${VERIFY_COMPOSE_FILE:-docker-compose.prod.yml}")
+COMPOSE=(docker compose -f "${VERIFY_COMPOSE_FILE:-docker-compose.box.yml}")
 ENV_FILE=${VERIFY_ENV_FILE:-.env}
 ATTEMPTS=12
 SLEEP=5

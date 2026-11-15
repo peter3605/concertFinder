@@ -49,8 +49,9 @@ set -euo pipefail
 # archive, and psql/pg_restore at least the server's major. The weekly dumps
 # are written by postgres:<rds major>-alpine on the box (apps-infra
 # backup-sync.tf), and pinning here means an RDS major bump fails loudly
-# rather than producing an unusable drill. Keep this in step with that image
-# and with backup-db.sh's PG_IMAGE (check-deploy-config.sh asserts the latter).
+# rather than producing an unusable drill. Keep this equal to that image,
+# postgres:<rds_engine_version>-alpine. It is in another repo, so CI cannot
+# compare them; check-deploy-config.sh only asserts this is that shape.
 PG_IMAGE=${PG_IMAGE:-postgres:18-alpine}
 
 # How old the newest dump may be before this is a failure rather than a drill.

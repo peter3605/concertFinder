@@ -1,6 +1,7 @@
 # concertFinder on the shared apps box (apps account, apps-infra). This is what
 # serves concertfinder.app since the 2026-11-09 cutover, deployed by
-# scripts/deploy-box.sh; docker-compose.prod.yml is the retired old box's file.
+# scripts/deploy-box.sh. (The retired old box's docker-compose.prod.yml was
+# deleted in CF-B29.)
 # See docs/shared-box.md.
 #
 # Its own compose project, holding only the api. TLS is the box's job, not
@@ -38,10 +39,9 @@ services:
     env_file:
       - path: .env
         required: true
-    # Same guard as docker-compose.prod.yml, for the same reason (CF-B17): read
-    # the comment there before touching it. env_file alone loses to
-    # docker-compose.yml's `environment: DATABASE_URL` (the dev `db`
-    # container), so `-f docker-compose.yml -f docker-compose.box.yml up` would
+    # The guard from the old box's compose file, for the same reason (CF-B17).
+    # env_file alone loses to docker-compose.yml's `environment: DATABASE_URL`
+    # (the dev `db` container), so `-f docker-compose.yml -f docker-compose.box.yml up` would
     # otherwise start production against an empty dev Postgres with every
     # health check green. Restating it here wins that merge, and `:?` refuses
     # to render at all when .env lacks it. config.Validate is the other half.
@@ -55,8 +55,7 @@ services:
     networks:
       - edge
     restart: unless-stopped
-    # Identical to docker-compose.prod.yml, and check-deploy-config.sh asserts
-    # that the two render the same. 45s leaves main.go's 30s graceful shutdown
+    # check-deploy-config.sh asserts this value. 45s leaves main.go's 30s graceful shutdown
     # room to finish; Docker's 10s default kills in-flight river jobs, which
     # then sit unrescued for an hour and block that user's next scan.
     stop_grace_period: 45s
@@ -66,11 +65,10 @@ services:
     # budget"). ~3x the ~100 MiB this Go api is expected to use, because nothing
     # has measured it yet. No memswap_limit on purpose: docker then lets the
     # container swap as much again, so outgrowing the cap is slow before it is
-    # an OOM kill. Box only: docker-compose.prod.yml's old box has the RAM to
-    # itself and stays uncapped.
+    # an OOM kill.
     mem_limit: 320m
-    # Capped for the same reason as in prod, more so here: the root volume is
-    # shared by every app on the box, and a full one takes all of them down.
+    # Capped because the root volume is shared by every app on the box, and a
+    # full one takes all of them down.
     logging:
       driver: json-file
       options:

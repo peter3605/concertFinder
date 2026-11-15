@@ -25,3 +25,8 @@ dist
 # in /opt/concertfinder, which is also this checkout (docs/shared-box.md).
 .deploy.lock
 .docker/
+
+# The retired old box's Terraform was deleted in CF-B29. Checkouts that ran it
+# still hold its gitignored state and tfvars (old-box secrets) under infra/;
+# keep them ignored so a stray `git add -A` cannot publish them.
+infra/

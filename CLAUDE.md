@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-Phases 1–3 are implemented **and deployed**, serving at `https://concertfinder.app`: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, native iOS client under `/ios`. Production runs on apps-infra's shared box (see Deployment); `/infra` is the retired old box's Terraform, kept as history.
+Phases 1–3 are implemented **and deployed**, serving at `https://concertfinder.app`: Go backend under `/cmd` + `/internal`, React SPA under `/web`, SQL migrations in `/migrations`, native iOS client under `/ios`. Production runs on apps-infra's shared box (see Deployment); the retired old box's Terraform (`/infra`) and its other files were deleted in CF-B29.
 
 ```
 go build ./...      # backend
@@ -47,7 +47,6 @@ Planned Go layout (see design §2.3):
 /internal/http          handlers, middleware
 /migrations             SQL migrations
 /web                    React+TS frontend
-/infra                  Terraform for the retired old box (history, 2026-11-13)
 ```
 
 Each external API has its own package with its own types — **do not introduce a shared "models" package**. External schemas drift independently.
@@ -1029,9 +1028,9 @@ nightly `scripts/backup-db.sh` plus `scripts/watchdog.sh` installed by
 `user_data`, and (history) Postgres on Neon, deleted 2026-11-13 with the rest.
 The instance and the management-account resources were destroyed then too
 (plan step 27), and
-`infra/`'s state was deleted. Those files are still in the tree only because
-`check-deploy-config.sh` reads some of them; none of them describe anything
-that runs, and none should be changed to make the shared box work. Three
+`infra/`'s state was deleted. Those files were deleted from the tree in CF-B29,
+along with the `check-deploy-config.sh` sections that pinned them; git history
+has them. Three
 lessons from that box are worth keeping, because the shared box could repeat
 them:
 
@@ -1061,9 +1060,9 @@ is real: the 2026-09-14 dumps hold 0 rows in `user_subscribed_artists`.
 `pg_restore` refuses an archive produced by a *newer* server, so a `PG_IMAGE`
 that drifts from the image that wrote the dump fails the drill for a reason
 that has nothing to do with the backups. Keep it equal to apps-infra's
-`postgres:<rds_engine_version>-alpine`. `check-deploy-config.sh` still
-compares it with the retired `backup-db.sh`'s pin, which is the only reason
-that script is still in the tree. The restore is `--clean
+`postgres:<rds_engine_version>-alpine`. That file is in another repo, so
+`check-deploy-config.sh` can only assert the pin's shape (`postgres:<major>-alpine`);
+keeping the major equal is a deliberate edit. The restore is `--clean
 --if-exists`, so the drill refuses any target whose name lacks `drill` or
 `scratch`, any database not owned by the RDS master user (every app's database
 is owned by its own login), any target that already holds users, and any
@@ -1083,7 +1082,8 @@ server on 15432 that is not RDS. Without those guards a typo is an outage.
   `size_verdict`, which takes a list of integers and touches neither S3 nor
   docker precisely so `check-deploy-config.sh` can assert both directions in
   CI — a guard that never fires and a guard that always fires are the same
-  bug. Do **not** move any of this into `backup-db.sh`: its `pg_restore --list`
+  bug. Do **not** move any of this into the backup job (apps-infra's
+  `box/apps-backup.sh`, formerly `backup-db.sh`): a `pg_restore --list` there
   is a *structural* read of the archive TOC, it catches a truncated or piped
   archive well, and an empty-but-valid archive passing it is by design.
   Note what the dump's size actually measures: `concert_cache` holds the

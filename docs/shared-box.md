@@ -11,7 +11,7 @@ by redeploying an earlier image (below). Built by
 
 ## What runs where
 
-| | Old box (retired 2026-11-13) | Shared box (live since 2026-11-09) |
+| | Old box (retired 2026-11-13; its files deleted in CF-B29) | Shared box (live since 2026-11-09) |
 |---|---|---|
 | Compose file | `docker-compose.prod.yml` | `docker-compose.box.yml` (project `concertfinder-box`) |
 | Image | built on the instance | pulled from ECR `concertfinder-api:<sha>` (CF-B20 builds it) |
@@ -99,10 +99,18 @@ contain `deploy.sh`, which is every commit from this one on.
 | `render-env.sh` | per app, called by `deploy-box.sh` | Reads this app's SSM path into this app's `.env`. |
 | `verify-deploy.sh` | per app, called by `deploy-box.sh` | Knows this app's health route and its `DATABASE_URL`. |
 | `restore-drill.sh` | per app, operator tool | Restores this app's schema and asserts its tables. Retargeted to the shared RDS and `weekly/concertfinder/` in CF-10. |
-| `backup-db.sh` | **apps-infra, box-level** | The database is now one RDS instance for every app, and the bucket's `weekly/<app>/` layout (apps-infra `backups.tf`) was drawn for a single box job that dumps each app's database. Per-app copies would each need their own `PG_IMAGE` pin, timer and S3 key scheme for what is one operation. Retired with the old box on 2026-11-13; still in the tree because `check-deploy-config.sh` compares its `PG_IMAGE` pin with `restore-drill.sh`'s. |
-| `prune-images.sh` | **apps-infra, box-level** | Disk and the image store are shared by every app; one app's prune cannot reason about the others'. No build happens on the box, so the buildkit half is moot. Rollback targets live in ECR, not in the local cache. Now apps-infra `box/apps-prune-images.sh`; this copy retired with the old box. |
-| `watchdog.sh` | **apps-infra, box-level** | The failure it was built for, a Caddy crash loop beside a healthy api, now happens in the `shared` project, which no app owns. A per-app watchdog would see only `concertfinder-api` and miss exactly that. The logic is already generic (`COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `WATCHDOG_NAMESPACE`); the box job iterates every project. Now apps-infra `box/apps-watchdog.sh`; this copy retired with the old box. |
+| `backup-db.sh` | **apps-infra, box-level** | The database is now one RDS instance for every app, and the bucket's `weekly/<app>/` layout (apps-infra `backups.tf`) was drawn for a single box job that dumps each app's database. Per-app copies would each need their own `PG_IMAGE` pin, timer and S3 key scheme for what is one operation. Retired with the old box on 2026-11-13 and deleted in CF-B29. `restore-drill.sh`'s `PG_IMAGE` must now equal apps-infra's `postgres:<rds_engine_version>-alpine`; `check-deploy-config.sh` can only assert its shape, since that file is in another repo. |
+| `prune-images.sh` | **apps-infra, box-level** | Disk and the image store are shared by every app; one app's prune cannot reason about the others'. No build happens on the box, so the buildkit half is moot. Rollback targets live in ECR, not in the local cache. Now apps-infra `box/apps-prune-images.sh`; this copy retired with the old box and was deleted in CF-B29. |
+| `watchdog.sh` | **apps-infra, box-level** | The failure it was built for, a Caddy crash loop beside a healthy api, now happens in the `shared` project, which no app owns. A per-app watchdog would see only `concertfinder-api` and miss exactly that. The logic is already generic (`COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `WATCHDOG_NAMESPACE`); the box job iterates every project. Now apps-infra `box/apps-watchdog.sh`; this copy retired with the old box and was deleted in CF-B29, with `check-deploy-config.sh`'s watchdog checks. |
 
 All three box-level jobs now exist in apps-infra (`box/apps-backup.sh`,
 `box/apps-prune-images.sh`, `box/apps-watchdog.sh`), alongside RDS's own
 14-day automated backups.
+
+The rest of the old box went in CF-B29 too: `docker-compose.prod.yml`, this
+repo's `Caddyfile` (its headers live on in apps-infra's `caddy/Caddyfile`) and
+`infra/`, the old box's Terraform, whose resources were destroyed on
+2026-11-13. Nothing from the old box remains in the tree; git history has it.
+A checkout that once ran that Terraform may still hold its gitignored
+`infra/terraform.tfvars` and tfstate backups, which carry old-box secrets:
+delete them by hand. The root `.gitignore` keeps `infra/` ignored until then.

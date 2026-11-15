@@ -200,22 +200,23 @@ jobs:
       - name: Frontend build
         run: npm --prefix web run build
 
-  # docker-compose.prod.yml and the Caddyfile are the only files here that
-  # never run locally — docker-compose.yml has no Caddy service and `go run`
-  # reads neither. Both have shipped broken, and the symptom each time was a
-  # Caddy crash loop with a healthy-looking api container beside it. Parsing
-  # them in CI costs seconds; finding out in production costs the site.
+  # docker-compose.box.yml and the scripts the shared box runs never execute
+  # locally — `go run` reads none of them, and docker-compose.yml is a
+  # different stack. Every deploy defect this repo has shipped was in a file
+  # of that kind. Checking them in CI costs seconds; finding out in production
+  # costs the site.
   deploy-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Validate Caddyfile and compose files
+      - name: Validate compose files and box scripts
         run: ./scripts/check-deploy-config.sh
 
   # There is no deploy job here any more. It deployed to the old box in the
   # management account with AWS-RunShellScript, and retired at the cutover
   # (step 26). Production is the shared box in the apps account, deployed by
   # image.yml's push job (ECR image + the concertfinder-deploy SSM document)
-  # while the repo variable DEPLOY_TO_BOX is true. The old box stays up, api
-  # stopped, as the rollback until step 27; apps-infra cutover/cutover.sh
-  # rollback restarts it. Restoring this job is part of a rollback that lasts.
+  # while the repo variable DEPLOY_TO_BOX is true. The old box was destroyed
+  # on 2026-11-13 (step 27) and its files deleted in CF-B29, so there is no
+  # rollback to it: roll back by redeploying an earlier image
+  # (docs/shared-box.md).
