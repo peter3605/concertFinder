@@ -561,12 +561,19 @@ func checkAppChallenge(t db.EmailLoginToken, verifier string) error {
 // createSession writes a session row holding only the token's hash and
 // returns the token, which exists nowhere else.
 func (e *EmailLogin) createSession(ctx context.Context, userID uuid.UUID) (string, time.Time, error) {
+	return issueSession(ctx, e.Pool, userID)
+}
+
+// issueSession is shared by every sign-in that ends in a session it mints
+// itself (email, Apple): a row holding only the token's hash, and the token,
+// which exists nowhere else.
+func issueSession(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (string, time.Time, error) {
 	token, err := RandomString(32)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	expires := time.Now().Add(SessionCreatedTTL)
-	if err := db.CreateSession(ctx, e.Pool, db.Session{
+	if err := db.CreateSession(ctx, pool, db.Session{
 		ID:        uuid.NewString(),
 		TokenHash: HashSessionToken(token),
 		UserID:    userID,
@@ -578,24 +585,33 @@ func (e *EmailLogin) createSession(ctx context.Context, userID uuid.UUID) (strin
 }
 
 func (e *EmailLogin) writeBearerSession(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
-	token, _, err := e.createSession(r.Context(), userID)
-	if err != nil {
-		slog.Error("email sign-in: create session failed", "err", err)
-		writeAuthError(w, http.StatusInternalServerError, "internal error")
-		return
+	if writeBearerSession(w, r, e.Pool, userID, "email sign-in") {
+		e.loginSucceeded(r.Context(), userID)
 	}
-	su, err := db.GetSessionUserByTokenHash(r.Context(), e.Pool, HashSessionToken(token))
+}
+
+// writeBearerSession answers an app sign-in with the same body the mobile
+// exchange returns, so the app decodes one model whichever way it signed in.
+// It reports whether a session was written.
+func writeBearerSession(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, userID uuid.UUID, flow string) bool {
+	token, _, err := issueSession(r.Context(), pool, userID)
 	if err != nil {
-		slog.Error("email sign-in: read session failed", "err", err)
+		slog.Error(flow+": create session failed", "err", err)
 		writeAuthError(w, http.StatusInternalServerError, "internal error")
-		return
+		return false
 	}
-	e.loginSucceeded(r.Context(), userID)
+	su, err := db.GetSessionUserByTokenHash(r.Context(), pool, HashSessionToken(token))
+	if err != nil {
+		slog.Error(flow+": read session failed", "err", err)
+		writeAuthError(w, http.StatusInternalServerError, "internal error")
+		return false
+	}
 	writeJSONResponse(w, http.StatusOK, mobileExchangeResponse{
 		SessionToken: token,
 		ExpiresAt:    su.Session.ExpiresAt,
 		User:         userPayload(su.User),
 	})
+	return true
 }
 
 func (e *EmailLogin) loginSucceeded(ctx context.Context, userID uuid.UUID) {

@@ -418,3 +418,31 @@ func TestReviewLoginEmailIsLowercased(t *testing.T) {
 		t.Fatalf("got %q / %q", c.ReviewLoginEmail, c.ReviewLoginCode)
 	}
 }
+
+// Sign in with Apple is optional (CF-35): a deployment with none of the four
+// set must validate, or every deployment without an Apple account breaks.
+// A partial set is refused for the APNs reason.
+func TestAppleSignInIsOptionalButAllOrNothing(t *testing.T) {
+	if problemsContaining(t, prodConfig(), "Sign in with Apple") {
+		t.Fatalf("no Apple config should validate, got %v", prodConfig().Validate())
+	}
+	if prodConfig().AppleEnabled() {
+		t.Fatal("AppleEnabled with nothing set")
+	}
+
+	c := prodConfig()
+	c.AppleTeamID = "TEAM123"
+	c.AppleServicesID = "com.example.app.web"
+	c.AppleKeyID = "KEY123"
+	if !problemsContaining(t, c, "APPLE_SIGNIN_P8_KEY") {
+		t.Fatalf("expected the partial set to name the missing key, got %v", c.Validate())
+	}
+
+	c.AppleP8Key = "-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----"
+	if problemsContaining(t, c, "Sign in with Apple") {
+		t.Fatalf("a full Apple set should validate, got %v", c.Validate())
+	}
+	if !c.AppleEnabled() {
+		t.Fatal("AppleEnabled false with all four set")
+	}
+}

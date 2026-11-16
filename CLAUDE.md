@@ -174,6 +174,32 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   (200) across everyone, because SES reputation is shared with the digests.
   `/app/auth/email` is in apple-app-site-association ahead of any app build
   that handles it, because iOS caches that file.
+- **Sign in with Apple (CF-35) verifies the token the client presents and
+  revokes on deletion.** `internal/apple`; `auth.AppleLogin`; migration 0029;
+  design in `docs/public-path.md` §4.1. Both routes check signature, `iss`,
+  `aud`, `exp` and `nonce`, and each accepts only its own audience — the
+  Services ID on `POST /api/auth/apple/callback`, the bundle ID
+  (`APNS_BUNDLE_ID`) on `POST /api/auth/apple/native` — so a token minted for
+  one client cannot sign in through the other. The nonce claim is
+  `apple.HashNonce(raw)`; Apple never sees the raw value. The web flow's
+  handshake cookie is its **own**, `cf_apple_handshake`, `SameSite=None`,
+  scoped to `/api/auth/apple`: requesting name or email makes Apple return by
+  a cross-site form POST, and the shared Lax `cf_handshake` would never come
+  back. The code is then exchanged for the refresh token, and the exchanged
+  token's `sub` must equal the verified one, or a code from someone else's
+  authorization would attach their grant to this account. Apple sends the
+  name **once**, so it is read and stored on the first authorization, and a
+  signup refused for want of an invite has already spent it (onboarding asks;
+  removing the app under Apple ID settings resets it). The refresh token is
+  kept in `apple_tokens` with the **client ID that obtained it**, because only
+  that client can revoke it. `DELETE /me/account` goes through `db.DeleteUser`,
+  which moves the token to `apple_revocations` (no FK to `users`, so it
+  outlives the account) and inserts `RevokeAppleTokenArgs` with `InsertTx` in
+  the same transaction; the worker deletes the row on success or
+  `invalid_grant` and retries everything else. The `APPLE_*` set is optional
+  and all-or-nothing; a key that will not parse logs an error and leaves the
+  routes unmounted rather than stopping the process. The web redirect cannot
+  run against a local stack: Apple rejects localhost and IP return URLs.
 - **`users.is_admin` is the only authorization tier, and the gate is welded to
   the routes rather than to the call site.** Before migration 0022 there was no
   role, no permission and no `is_admin` anywhere: `auth.RequireUser` was the
@@ -1108,6 +1134,8 @@ operator contact on `/privacy` and `/terms` and the address in the
 MusicBrainz/Nominatim User-Agent; it used to fall back to a maintainer's
 personal address, which an unset variable then published as a public
 service's operator contact), `SITE_DOMAIN`.
+
+Sign in with Apple (all optional, all-or-nothing; the names are the SSM parameters CF-34 created): `APPLE_TEAM_ID`, `APPLE_SERVICES_ID` (the web client ID), `APPLE_SIGNIN_KEY_ID`, `APPLE_SIGNIN_P8_KEY` (newline-escaped like `APNS_P8_KEY`). The iOS audience reuses `APNS_BUNDLE_ID`.
 
 iOS (all optional; unset means the web app behaves exactly as before): `MOBILE_CALLBACK_URL`, `IOS_APP_ID`, `MIN_IOS_BUILD`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8_KEY`, `APNS_ENVIRONMENT`. Two things `config.Validate` refuses to start on, because both are silent otherwise: a **partial** APNs set — it wires up successfully and then drops every notification, indistinguishable from nobody having opted in — and a `MOBILE_CALLBACK_URL` whose host disagrees with `SITE_BASE_URL`, since iOS fetches `apple-app-site-association` from the link's own domain and a mismatch ends the login in Safari with the app still waiting. Empty `IOS_APP_ID` makes that route 404 **on purpose**: serving an association naming an empty app is worse, because iOS caches it.
 

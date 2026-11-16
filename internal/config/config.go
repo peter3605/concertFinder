@@ -241,6 +241,18 @@ type Config struct {
 	APNSP8Key       string
 	APNSEnvironment string // "sandbox" | "production"
 
+	// Sign in with Apple (CF-35, docs/public-path.md section 4.1). Optional
+	// as a set: all empty disables the Apple routes (they 404), and Validate
+	// refuses a partial set for the APNs reason -- half a configuration wires
+	// up and then fails every sign-in. The names are the SSM parameters CF-34
+	// created; the key is a separate .p8 from APNS_P8_KEY so rotating one
+	// cannot break the other, and it arrives newline-escaped the same way.
+	// The iOS audience is the bundle ID, read from APNSBundleID.
+	AppleTeamID     string
+	AppleServicesID string // the web client_id and the web token's aud
+	AppleKeyID      string
+	AppleP8Key      string
+
 	// IOSAppID is "<TeamID>.<BundleID>", served in the
 	// apple-app-site-association file.
 	IOSAppID string
@@ -372,6 +384,10 @@ func Load() (*Config, error) {
 		// nobody and reports success.
 		c.APNSEnvironment = "production"
 	}
+	c.AppleTeamID = strings.TrimSpace(os.Getenv("APPLE_TEAM_ID"))
+	c.AppleServicesID = strings.TrimSpace(os.Getenv("APPLE_SERVICES_ID"))
+	c.AppleKeyID = strings.TrimSpace(os.Getenv("APPLE_SIGNIN_KEY_ID"))
+	c.AppleP8Key = os.Getenv("APPLE_SIGNIN_P8_KEY")
 	c.IOSAppID = strings.TrimSpace(os.Getenv("IOS_APP_ID"))
 	if c.IOSAppID == "" && c.APNSTeamID != "" && c.APNSBundleID != "" {
 		// The two halves are already configured for APNs; deriving it saves
@@ -670,6 +686,27 @@ func (c Config) Validate() []error {
 		}
 	}
 
+	// Sign in with Apple is all-or-nothing for the same reason as APNs.
+	appleSet := []struct{ name, val string }{
+		{"APPLE_TEAM_ID", c.AppleTeamID},
+		{"APPLE_SERVICES_ID", c.AppleServicesID},
+		{"APPLE_SIGNIN_KEY_ID", c.AppleKeyID},
+		{"APPLE_SIGNIN_P8_KEY", c.AppleP8Key},
+	}
+	set, missing = 0, nil
+	for _, v := range appleSet {
+		if strings.TrimSpace(v.val) != "" {
+			set++
+		} else {
+			missing = append(missing, v.name)
+		}
+	}
+	if set > 0 && len(missing) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"Sign in with Apple is partially configured: %s missing. The routes would mount and then fail every sign-in — set all four or none",
+			strings.Join(missing, ", ")))
+	}
+
 	// The universal link must live on the domain the AASA file is served
 	// from, or iOS will not hand the redirect to the app: it fetches the
 	// association from the link's own host. A mismatch ends the login in
@@ -842,4 +879,10 @@ func isSixDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// AppleEnabled reports whether Sign in with Apple is configured. Validate
+// has already refused a partial set, so one field stands for all four.
+func (c Config) AppleEnabled() bool {
+	return c.AppleTeamID != "" && c.AppleServicesID != "" && c.AppleKeyID != "" && strings.TrimSpace(c.AppleP8Key) != ""
 }

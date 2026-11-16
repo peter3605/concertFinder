@@ -24,13 +24,18 @@ type OAuthHandshake struct {
 	// has no invite gate, and empty for a login that turns out to belong to
 	// an account that already exists -- that path never reads it.
 	InviteCode string
-	ExpiresAt  time.Time
+	// Nonce is set only by the Apple web flow (migration 0029): the raw
+	// value whose SHA-256 the identity token must carry. The Apple callback
+	// refuses a handshake without one, which is also what keeps a Spotify
+	// handshake from being spent there.
+	Nonce     string
+	ExpiresAt time.Time
 }
 
 // PutHandshake inserts a fresh handshake row.
 func PutHandshake(ctx context.Context, pool *pgxpool.Pool, h OAuthHandshake) error {
-	const q = `INSERT INTO oauth_handshakes (handshake_key, verifier, state, expires_at, app_challenge, invite_code) VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''))`
-	_, err := pool.Exec(ctx, q, h.Key, h.Verifier, h.State, h.ExpiresAt, h.AppChallenge, h.InviteCode)
+	const q = `INSERT INTO oauth_handshakes (handshake_key, verifier, state, expires_at, app_challenge, invite_code, nonce) VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''))`
+	_, err := pool.Exec(ctx, q, h.Key, h.Verifier, h.State, h.ExpiresAt, h.AppChallenge, h.InviteCode, h.Nonce)
 	return err
 }
 
@@ -40,10 +45,10 @@ func TakeHandshake(ctx context.Context, pool *pgxpool.Pool, key string) (OAuthHa
 	const q = `
 DELETE FROM oauth_handshakes
 WHERE handshake_key = $1 AND expires_at > now()
-RETURNING handshake_key, verifier, state, expires_at, COALESCE(app_challenge, ''), COALESCE(invite_code, '')
+RETURNING handshake_key, verifier, state, expires_at, COALESCE(app_challenge, ''), COALESCE(invite_code, ''), COALESCE(nonce, '')
 `
 	var h OAuthHandshake
-	err := pool.QueryRow(ctx, q, key).Scan(&h.Key, &h.Verifier, &h.State, &h.ExpiresAt, &h.AppChallenge, &h.InviteCode)
+	err := pool.QueryRow(ctx, q, key).Scan(&h.Key, &h.Verifier, &h.State, &h.ExpiresAt, &h.AppChallenge, &h.InviteCode, &h.Nonce)
 	if err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return OAuthHandshake{}, false, nil
