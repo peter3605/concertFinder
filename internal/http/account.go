@@ -6,10 +6,14 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/jobs"
 )
 
 // AccountHandler exposes account-lifecycle endpoints. Two, and the difference
@@ -34,6 +38,11 @@ type AccountHandler struct {
 	// domain, so clearing without it left the original cookie in the browser
 	// untouched whenever SESSION_COOKIE_DOMAIN was configured.
 	CookieDomain string
+	// River inserts the Apple revocation job inside the deletion's own
+	// transaction. Nil only in tests that do not involve Apple: a deleted
+	// Apple account then leaves its apple_revocations row with no job, which
+	// is logged.
+	River *river.Client[pgx.Tx]
 }
 
 type deleteAccountRequest struct {
@@ -66,10 +75,21 @@ func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	// FKs on sessions, user_locations, affinity_profiles,
 	// user_concert_snapshots, user_saved_concerts, user_subscribed_artists,
-	// user_digest_sent, rate_ledger are all ON DELETE CASCADE — this one
-	// DELETE takes everything with it.
-	const q = `DELETE FROM users WHERE id = $1`
-	if _, err := h.Pool.Exec(r.Context(), q, u.ID); err != nil {
+	// user_digest_sent, rate_ledger are all ON DELETE CASCADE — one DELETE
+	// takes everything with it. An Apple account's refresh token is moved to
+	// apple_revocations first, and the job that revokes it at Apple is
+	// inserted in the same transaction (CF-35): Apple's guidance is that
+	// deleting the account revokes the grant, and a failed call must not
+	// lose the token, so the job retries from the queue row.
+	enqueue := func(tx pgx.Tx, revocationID uuid.UUID) error {
+		if h.River == nil {
+			slog.Warn("apple revocation queued with no job runner", "revocation", revocationID)
+			return nil
+		}
+		_, err := h.River.InsertTx(r.Context(), tx, jobs.RevokeAppleTokenArgs{RevocationID: revocationID}, nil)
+		return err
+	}
+	if err := db.DeleteUser(r.Context(), h.Pool, u.ID, enqueue); err != nil {
 		slog.Error("account delete failed", "err", err, "user", u.ID)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

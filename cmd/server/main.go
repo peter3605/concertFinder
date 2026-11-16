@@ -24,6 +24,7 @@ import (
 	"github.com/riverqueue/river/rivermigrate"
 
 	"github.com/peterho/concertfinder/internal/affinity"
+	"github.com/peterho/concertfinder/internal/apple"
 	"github.com/peterho/concertfinder/internal/auth"
 	"github.com/peterho/concertfinder/internal/concerts"
 	"github.com/peterho/concertfinder/internal/config"
@@ -176,6 +177,7 @@ func main() {
 		genresH      *webhttp.GenrePicksHandler
 		emailPrefsH  *webhttp.EmailPrefsHandler
 		emailLoginH  *auth.EmailLogin
+		appleLoginH  *auth.AppleLogin
 		unsubscribeH *webhttp.UnsubscribeHandler
 		devicesH     *webhttp.DevicesHandler
 		riverClient  *river.Client[pgx.Tx]
@@ -453,6 +455,43 @@ func main() {
 			logger.Warn("only one of REVIEW_LOGIN_EMAIL and REVIEW_LOGIN_CODE is set; App Review sign-in is OFF until both are")
 		}
 
+		// Sign in with Apple (CF-35). Optional: unset, the routes are not
+		// mounted and 404. A key that will not parse disables it loudly
+		// rather than stopping the process -- Apple is one sign-in method
+		// among three, and refusing to boot would take the other two and the
+		// whole site down with it.
+		var appleRevoker jobs.AppleRevoker
+		if cfg.AppleEnabled() {
+			appleClient, err := apple.New(apple.Config{
+				TeamID: cfg.AppleTeamID,
+				KeyID:  cfg.AppleKeyID,
+				P8Key:  cfg.AppleP8Key,
+			})
+			if err != nil {
+				logger.Error("Sign in with Apple is configured but its key did not load; Apple sign-in is OFF", "err", err)
+			} else {
+				appleRevoker = appleClient
+				appleLoginH = &auth.AppleLogin{
+					Pool:           pool,
+					Apple:          appleClient,
+					EncKey:         encKey,
+					ServicesID:     cfg.AppleServicesID,
+					BundleID:       cfg.APNSBundleID,
+					SiteBaseURL:    cfg.SiteBaseURL,
+					CookieDomain:   cfg.SessionCookieDomain,
+					PostLoginURL:   "/",
+					InviteRequired: cfg.InviteRequired,
+					Handshakes:     auth.NewDBHandshakeStore(pool),
+				}
+				if cfg.APNSBundleID == "" {
+					logger.Warn("Sign in with Apple: APNS_BUNDLE_ID is empty, so the app's native route answers 501; web sign-in works")
+				}
+				logger.Info("Sign in with Apple is configured", "callback", cfg.SiteBaseURL+auth.AppleCallbackPath)
+			}
+		} else {
+			logger.Info("Sign in with Apple is not configured; its routes are not mounted")
+		}
+
 		// Background jobs live in the same process — no separate worker
 		// binary. See docs/design.md §10.2 (option 2 rationale in commit).
 		workers := river.NewWorkers()
@@ -517,6 +556,10 @@ func main() {
 		}
 		river.AddWorker(workers, &jobs.SendPushWorker{Pool: pool, APNs: apnsClient})
 		river.AddWorker(workers, &jobs.JanitorWorker{Pool: pool})
+		// Registered whether or not Apple is configured now, so a revocation
+		// queued while it was keeps retrying (and lands once it is again)
+		// instead of failing as an unknown job kind.
+		river.AddWorker(workers, &jobs.RevokeAppleTokenWorker{Pool: pool, Apple: appleRevoker, EncKey: encKey})
 		river.AddWorker(workers, &jobs.SeedDiscoverWorker{
 			Pool:   pool,
 			TM:     tmClient,
@@ -617,7 +660,7 @@ func main() {
 		}
 		savedH = &webhttp.SavedConcertsHandler{Pool: pool, FallbackLocation: fallbackLoc}
 		devicesH = &webhttp.DevicesHandler{Pool: pool}
-		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc, CookieDomain: cfg.SessionCookieDomain}
+		accountH = &webhttp.AccountHandler{Pool: pool, Tokens: tokenSvc, CookieDomain: cfg.SessionCookieDomain, River: riverClient}
 		subscribedH = &webhttp.SubscribedArtistsHandler{
 			Pool:    pool,
 			Spotify: spotifyClient,
@@ -665,6 +708,9 @@ func main() {
 		// An email sign-in is a login like any other; the same pre-warm
 		// rules apply, and LoginPrewarm skips accounts with no Spotify.
 		emailLoginH.OnLoginSuccess = authDeps.OnLoginSuccess
+		if appleLoginH != nil {
+			appleLoginH.OnLoginSuccess = authDeps.OnLoginSuccess
+		}
 	}
 
 	r := chi.NewRouter()
@@ -781,6 +827,9 @@ func main() {
 			// /email/start carries its own, tighter per-IP bucket inside
 			// this one, since every call can send a mail.
 			emailLoginH.MountEmailAuth(r)
+			if appleLoginH != nil {
+				appleLoginH.Mount(r)
+			}
 		})
 		// Unauthenticated: HMAC-signed token in the URL is proof of identity
 		// for one-click unsubscribe from a mobile mail client with no session.

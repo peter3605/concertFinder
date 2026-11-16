@@ -343,7 +343,13 @@ Traps:
   so a failed call cannot lose it.
 
 Verification checks signature, `iss`, `aud`, `exp` and `nonce`, using Apple's
-published keys. `internal/push` already signs ES256 JWTs with the standard
+published keys.
+
+As built (CF-35): the native route answers with the session directly, in the
+same body the mobile exchange returns, rather than through the one-time-code
+exchange the table above names. That exchange exists to keep a session out of
+a redirect URL; the native route is a single JSON POST with nothing in a URL,
+the same reasoning email's `/code` already follows. `internal/push` already signs ES256 JWTs with the standard
 library, so no JWT dependency is needed for the client secret.
 
 ### 4.2 Email sign-in links

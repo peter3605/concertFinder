@@ -21,7 +21,9 @@ type handshake struct {
 	// InviteCode is the admission code presented at /login, redeemed at
 	// /callback and only when the login would create a new user.
 	InviteCode string
-	ExpiresAt  time.Time
+	// Nonce is the Apple web flow's raw nonce; empty for Spotify.
+	Nonce     string
+	ExpiresAt time.Time
 }
 
 // HandshakeStore abstracts handshake persistence. Only the DB-backed
@@ -40,6 +42,7 @@ type PendingHandshake struct {
 	State        string
 	AppChallenge string
 	InviteCode   string
+	Nonce        string
 }
 
 type HandshakeStore interface {
@@ -66,6 +69,7 @@ func (s *DBHandshakeStore) Put(ctx context.Context, h PendingHandshake, ttl time
 		State:        h.State,
 		AppChallenge: h.AppChallenge,
 		InviteCode:   h.InviteCode,
+		Nonce:        h.Nonce,
 		ExpiresAt:    time.Now().Add(ttl),
 	})
 }
@@ -80,6 +84,7 @@ func (s *DBHandshakeStore) Take(ctx context.Context, key string) (*handshake, bo
 		State:        h.State,
 		AppChallenge: h.AppChallenge,
 		InviteCode:   h.InviteCode,
+		Nonce:        h.Nonce,
 		ExpiresAt:    h.ExpiresAt,
 	}, true
 }
