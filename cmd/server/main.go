@@ -801,7 +801,7 @@ func main() {
 		api.With(discoverLimiter.Middleware).Get("/discover", discoverH.Get)
 		api.Get("/site-info", (&webhttp.SiteInfoHandler{
 			ContactEmail:  cfg.ContactEmail,
-			EffectiveDate: "2026-07-29",
+			EffectiveDate: "2026-11-22",
 			MinIOSBuild:   cfg.MinIOSBuild,
 			// Additive field: tells both clients whether to show an invite
 			// box on the sign-in screen. Additive because /api/me/* and this

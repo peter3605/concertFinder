@@ -812,10 +812,15 @@ creation, you must also offer account deletion within the app."
 confirmation dialog. It must be reachable without contacting support and must
 actually delete, not deactivate.
 
-**Privacy nutrition labels.** Declare honestly: Spotify user ID and display
+**Privacy nutrition labels.** Superseded by the table in
+`docs/public-path.md` §6.3, which is what the manifest and CF-18 follow. As
+originally written: Spotify user ID and display
 name (identifiers, linked, app functionality), email (contact info, linked,
 app functionality — used for the digest), coarse location (linked, app
 functionality), and device token (identifiers, linked, app functionality).
+Since then: the user ID is no longer only Spotify's, name and email are
+collected directly from everyone, and artist and genre picks are declared as
+Other User Content (linked, app functionality).
 The strong story here is that raw listening data is *never* persisted — held
 in memory and discarded after profile construction, per the ToS constraints
 in `CLAUDE.md` — and only the derived affinity profile is stored with a
