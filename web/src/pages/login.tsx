@@ -11,7 +11,7 @@ import { useDocumentTitle } from '@/lib/use-document-title';
 import DiscoverSection from '@/pages/discover';
 import { EmailSignIn } from '@/components/email-sign-in';
 
-type SiteInfo = { invite_required?: boolean; spotify_signups_open?: boolean };
+type SiteInfo = { invite_required?: boolean; spotify_signups_open?: boolean; apple_sign_in?: boolean };
 
 type Tab = 'signin' | 'create';
 
@@ -35,6 +35,13 @@ const REFUSALS: Record<string, { tab: Tab; message: string }> = {
     tab: 'create',
     message:
       "ConcertFinder can't take any more Spotify accounts right now. Your invite code hasn't been used, so you can create your account with email instead.",
+  },
+  // The Apple callback's own refusal: a token that would not verify, or an
+  // exchange with Apple that failed. Not an invite problem, so it lands on
+  // whichever tab is open by default.
+  apple_failed: {
+    tab: 'signin',
+    message: "Sign in with Apple didn't complete. Please try again, or use email instead.",
   },
   spotify_not_registered: {
     tab: 'create',
@@ -64,6 +71,10 @@ export default function LoginPage() {
   // show or hide a control, never let anyone in.
   const [inviteRequired, setInviteRequired] = useState(false);
   const [spotifySignupsOpen, setSpotifySignupsOpen] = useState(false);
+  // False until site-info says the Apple routes are mounted, so a deployment
+  // without the APPLE_* set (every local stack) never offers a button that
+  // leads to a 404.
+  const [appleSignIn, setAppleSignIn] = useState(false);
   // Pre-filled from ?invite= so an invite can be sent as a single link. The
   // callback also passes an unspent code back on a refusal, so it is still
   // there when the person tries email instead.
@@ -81,6 +92,7 @@ export default function LoginPage() {
         if (!j) return;
         setInviteRequired(Boolean(j.invite_required));
         setSpotifySignupsOpen(Boolean(j.spotify_signups_open));
+        setAppleSignIn(Boolean(j.apple_sign_in));
       })
       .catch(() => {});
   }, []);
@@ -93,6 +105,11 @@ export default function LoginPage() {
   const signupSpotifyHref = code
     ? `/api/auth/login?invite=${encodeURIComponent(code)}`
     : '/api/auth/login';
+  // Same rule as Spotify's: the code rides to the callback in the handshake
+  // and is spent only if Apple's answer creates an account.
+  const signupAppleHref = code
+    ? `/api/auth/apple/login?invite=${encodeURIComponent(code)}`
+    : '/api/auth/apple/login';
 
   return (
     // Wider than the card so the discover cards below it aren't squeezed into
@@ -126,10 +143,10 @@ export default function LoginPage() {
 
           {tab === 'signin' ? (
             <div role="tabpanel" id="panel-signin" aria-labelledby="tab-signin" className="flex flex-col gap-3">
-              <AppleSlot />
+              <AppleSlot>{appleSignIn && <AppleButton href="/api/auth/apple/login" />}</AppleSlot>
               <EmailSignIn invite="" label="Email" submitLabel="Email me a sign-in link" />
               <Divider />
-              <SpotifyButton href="/api/auth/login" />
+              <SpotifyButton href="/api/auth/login" note="For accounts that were invited to sign in with Spotify." />
             </div>
           ) : (
             <div role="tabpanel" id="panel-create" aria-labelledby="tab-create" className="flex flex-col gap-3">
@@ -152,7 +169,9 @@ export default function LoginPage() {
                   </p>
                 </div>
               )}
-              <AppleSlot />
+              <AppleSlot>
+                {appleSignIn && <AppleButton href={signupAppleHref} disabled={needsCode} />}
+              </AppleSlot>
               {/* The code rides in the email token and is spent only when
                   the link or code is used, so an unclicked email costs
                   nothing. */}
@@ -165,7 +184,11 @@ export default function LoginPage() {
               {spotifySignupsOpen && (
                 <>
                   <Divider />
-                  <SpotifyButton href={signupSpotifyHref} disabled={needsCode} />
+                  <SpotifyButton
+                    href={signupSpotifyHref}
+                    disabled={needsCode}
+                    note="Only a few Spotify accounts can join, and only ones Spotify lets us add. We only read your library and never post, follow, or change anything."
+                  />
                 </>
               )}
             </div>
@@ -223,10 +246,50 @@ function TabButton({
   );
 }
 
-// Reserved for Sign in with Apple (CF-36), above email on both tabs. Empty
-// until then, and `empty:hidden` keeps an empty slot from adding a gap.
-function AppleSlot() {
-  return <div data-slot="apple-sign-in" className="empty:hidden" />;
+// Sign in with Apple, above email on both tabs. `empty:hidden` keeps the slot
+// from adding a gap where Apple is not configured.
+function AppleSlot({ children }: { children?: ReactNode }) {
+  return (
+    <div data-slot="apple-sign-in" className="empty:hidden">
+      {children}
+    </div>
+  );
+}
+
+// Apple's guidelines: black or white, the Apple logo, "Sign in with Apple" or
+// "Continue with Apple", and no smaller than other sign-in buttons. Black on
+// light and white on dark, picked by CSS so there is no flash on first paint.
+// A plain link: /api/auth/apple/login sets the handshake cookie and redirects
+// to Apple, which needs a top-level navigation, not a fetch.
+function AppleButton({ href, disabled = false }: { href: string; disabled?: boolean }) {
+  const cls =
+    'inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-black px-4 text-sm font-medium text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-white dark:text-black';
+  const content = (
+    <>
+      <AppleLogo />
+      Continue with Apple
+    </>
+  );
+  if (disabled) {
+    return (
+      <button type="button" disabled className={cn(cls, 'cursor-not-allowed opacity-50 hover:opacity-50')}>
+        {content}
+      </button>
+    );
+  }
+  return (
+    <a href={href} className={cls}>
+      {content}
+    </a>
+  );
+}
+
+function AppleLogo() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 170 170" className="h-4 w-4" fill="currentColor">
+      <path d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.2-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.27 2.13-9.51 3.24-12.76 3.35-4.92.21-9.84-1.96-14.75-6.52-3.13-2.73-7.05-7.41-11.75-14.04-5.03-7.08-9.17-15.29-12.41-24.65-3.47-10.11-5.21-19.9-5.21-29.38 0-10.86 2.35-20.22 7.04-28.07 3.69-6.3 8.61-11.27 14.76-14.92s12.79-5.51 19.95-5.63c3.91 0 9.05 1.21 15.43 3.59 6.36 2.39 10.45 3.6 12.24 3.6 1.34 0 5.88-1.42 13.57-4.24 7.28-2.62 13.42-3.7 18.45-3.28 13.63 1.1 23.87 6.47 30.68 16.15-12.19 7.39-18.22 17.73-18.1 31 .11 10.34 3.86 18.94 11.23 25.77 3.34 3.17 7.07 5.62 11.22 7.36-.9 2.61-1.85 5.11-2.86 7.51zM119.11 7.24c0 8.1-2.96 15.67-8.86 22.67-7.12 8.32-15.73 13.13-25.07 12.37a25.2 25.2 0 0 1-.19-3.07c0-7.78 3.39-16.1 9.4-22.9 3-3.44 6.82-6.31 11.45-8.6 4.62-2.26 8.99-3.51 13.1-3.72.12 1.08.17 2.17.17 3.25z" />
+    </svg>
+  );
 }
 
 function Divider() {
@@ -239,10 +302,11 @@ function Divider() {
   );
 }
 
-// Secondary on purpose: most people cannot use it. The library line sits
-// beside it because it describes what this button grants and nothing else on
-// the page.
-function SpotifyButton({ href, disabled = false }: { href: string; disabled?: boolean }) {
+// Secondary on purpose: most people cannot use it, which the note under it
+// says in so many words. On Create an account it also carries the library
+// line, because that describes what this button grants and nothing else on
+// the page does.
+function SpotifyButton({ href, note, disabled = false }: { href: string; note: string; disabled?: boolean }) {
   return (
     <div className="space-y-1.5">
       {disabled ? (
@@ -254,10 +318,7 @@ function SpotifyButton({ href, disabled = false }: { href: string; disabled?: bo
           <a href={href}>Continue with Spotify</a>
         </Button>
       )}
-      <p className="text-center text-xs text-muted-foreground">
-        With Spotify we only read your library. We never post, follow, or change
-        anything.
-      </p>
+      <p className="text-center text-xs text-muted-foreground">{note}</p>
     </div>
   );
 }

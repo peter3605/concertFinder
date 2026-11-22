@@ -9,6 +9,7 @@ import LoginPage from '@/pages/login';
 import NotFoundPage from '@/pages/not-found';
 import SavedPage from '@/pages/saved';
 import SettingsPage from '@/pages/settings';
+import WelcomePage from '@/pages/welcome';
 
 // Split out of the main bundle. None of these is on the path to the first
 // paint of the feed — the two policy pages are read once, the subscribe page
@@ -60,6 +61,17 @@ export default function App() {
                 element={
                   <RequireAuth>
                     <SubscribePage />
+                  </RequireAuth>
+                }
+              />
+              {/* First run for an Apple or email account. In the entry chunk
+                  rather than lazy: it is the first page such an account sees,
+                  so splitting it out only adds a round trip in front of it. */}
+              <Route
+                path="/welcome"
+                element={
+                  <RequireAuth>
+                    <WelcomePage />
                   </RequireAuth>
                 }
               />

@@ -41,6 +41,10 @@ type SiteInfoHandler struct {
 	// Pool reports false.
 	Pool            *pgxpool.Pool
 	MaxSpotifyUsers int
+	// AppleSignIn reports whether /api/auth/apple/* is mounted. A rendering
+	// hint like the two above: the routes are what decide, and a client that
+	// guessed wrong would show a button that leads to a 404, not let anyone in.
+	AppleSignIn bool
 }
 
 // spotifySignupsOpen fails closed: an unreadable count hides the Spotify
@@ -76,6 +80,7 @@ func (h *SiteInfoHandler) Get(w http.ResponseWriter, r *http.Request) {
 		"invite_required": h.InviteRequired,
 		// Additive, like invite_required: iOS builds decode this payload.
 		"spotify_signups_open": h.spotifySignupsOpen(r.Context()),
+		"apple_sign_in":        h.AppleSignIn,
 	})
 }
 

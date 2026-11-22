@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Mail, Unplug } from 'lucide-react';
+import { AlertTriangle, Mail, Music2, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -8,9 +8,10 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { mutatingFetch, NETWORK_ERROR_MESSAGE, statusMessage } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import type { Me } from '@/lib/types';
+import { hasSpotify, type Me } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import { EmailAddressForm } from '@/components/email-sign-in';
+import { PicksEditor } from '@/components/picks-editor';
 
 export default function SettingsPage() {
   useDocumentTitle('Settings');
@@ -22,6 +23,7 @@ export default function SettingsPage() {
     return <p className="text-sm text-muted-foreground">Log in to change settings.</p>;
   }
   const me = auth.me;
+  const spotify = hasSpotify(me);
 
   async function update(patch: Partial<Pick<Me, 'digest_opt_in' | 'instant_notify_opt_in'>>) {
     setSaving(true);
@@ -63,14 +65,23 @@ export default function SettingsPage() {
           <CardDescription>Your sign-in identities + email.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Display name</span>
-            <span>{me.display_name || me.spotify_user_id}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Spotify ID</span>
-            <span className="font-mono text-xs">{me.spotify_user_id}</span>
-          </div>
+          {/* A Spotify account's name is rewritten from Spotify at every
+              sign-in, so an edit would be silently undone; only accounts
+              without one get the field. */}
+          {spotify ? (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Display name</span>
+              <span>{me.display_name || me.spotify_user_id}</span>
+            </div>
+          ) : (
+            <DisplayNameRow me={me} setMe={setMe} />
+          )}
+          {spotify && (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Spotify ID</span>
+              <span className="font-mono text-xs">{me.spotify_user_id}</span>
+            </div>
+          )}
           {/* Replaces "Log in again to grant email access", which no
               re-login could satisfy once Spotify stopped returning the
               address. Confirming one also makes it a way to sign in. */}
@@ -81,6 +92,22 @@ export default function SettingsPage() {
               <EmailAddressForm current={me.email ?? ''} onVerified={(email) => setMe({ ...me, email })} />
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Music2 className="h-4 w-4 text-primary" /> Your artists and genres
+          </CardTitle>
+          <CardDescription>
+            {spotify
+              ? 'Add artists your Spotify library misses. These are searched first, then your listening fills the rest of your feed.'
+              : 'Your feed is built from these. Shows appear after the next refresh.'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <PicksEditor />
         </CardContent>
       </Card>
 
@@ -124,9 +151,9 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <DisconnectSpotify />
+      {spotify && <DisconnectSpotify />}
 
-      <DangerZone displayName={me.display_name || me.spotify_user_id} />
+      <DangerZone displayName={me.display_name} />
     </div>
   );
 }
@@ -270,7 +297,11 @@ function DangerZone({ displayName }: { displayName: string }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {!confirming ? (
+        {!displayName ? (
+          // The server confirms deletion against the display name and refuses
+          // an empty one, so without a name there is nothing to type.
+          <p className="text-sm text-muted-foreground">Set a display name above first. You'll type it to confirm.</p>
+        ) : !confirming ? (
           <div>
             <Button variant="destructive" onClick={() => setConfirming(true)}>
               Delete my account
@@ -339,6 +370,65 @@ function PrefRow({
         <p className="text-sm text-muted-foreground">{description}</p>
       </div>
       <Switch id={id} checked={checked} onCheckedChange={onChange} disabled={disabled} />
+    </div>
+  );
+}
+
+function DisplayNameRow({ me, setMe }: { me: Me; setMe: (m: Me) => void }) {
+  const [editing, setEditing] = useState(!me.display_name);
+  const [name, setName] = useState(me.display_name);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await mutatingFetch('/api/me/profile', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: name }),
+      });
+      if (!r.ok) {
+        setErr(statusMessage(r.status, { 400: 'Use 1 to 64 characters, with no line breaks.' }));
+        return;
+      }
+      const j = (await r.json()) as { display_name: string };
+      setMe({ ...me, display_name: j.display_name });
+      setEditing(false);
+    } catch {
+      setErr(NETWORK_ERROR_MESSAGE);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
+      <span className="text-muted-foreground">Display name</span>
+      {editing ? (
+        <form onSubmit={save} className="grid gap-2 sm:w-64">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-label="Display name"
+            autoComplete="name"
+            maxLength={64}
+          />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <Button type="submit" variant="outline" disabled={busy || !name.trim()}>
+            {busy ? 'Saving…' : 'Save'}
+          </Button>
+        </form>
+      ) : (
+        <div className="flex flex-col items-start gap-1 sm:items-end">
+          <span>{me.display_name}</span>
+          <Button variant="link" className="h-auto p-0" onClick={() => setEditing(true)}>
+            Change
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

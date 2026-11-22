@@ -73,6 +73,22 @@ FROM users WHERE id = $1`
 	return u, nil
 }
 
+// SetDisplayName replaces a user's display name. The caller validates it:
+// this is the only writer besides sign-in, and an email account arrives with
+// none at all, which leaves it unable to confirm DELETE /me/account (that
+// check compares against this column and refuses an empty one).
+func SetDisplayName(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, name string) error {
+	const q = `UPDATE users SET display_name = $2, updated_at = now() WHERE id = $1`
+	tag, err := pool.Exec(ctx, q, id, name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoRows
+	}
+	return nil
+}
+
 // SetDigestOptIn updates a user's digest subscription flag.
 func SetDigestOptIn(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, optIn bool) error {
 	const q = `UPDATE users SET digest_opt_in = $2, updated_at = now() WHERE id = $1`
