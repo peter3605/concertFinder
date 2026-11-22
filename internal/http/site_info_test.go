@@ -73,3 +73,20 @@ func TestSiteInfoSpotifySignupsOpenWithoutPool(t *testing.T) {
 		t.Fatal("no pool: want closed")
 	}
 }
+
+// apple_sign_in follows whether the Apple routes are mounted, so the sign-in
+// page never offers a button that leads to a 404.
+func TestSiteInfoAppleSignIn(t *testing.T) {
+	for _, mounted := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		(&SiteInfoHandler{AppleSignIn: mounted}).Get(rec, httptest.NewRequest(http.MethodGet, "/api/site-info", nil))
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := body["apple_sign_in"].(bool)
+		if !ok || got != mounted {
+			t.Errorf("mounted=%v: apple_sign_in = %v (present %v), want %v", mounted, body["apple_sign_in"], ok, mounted)
+		}
+	}
+}

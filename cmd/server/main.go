@@ -811,6 +811,9 @@ func main() {
 			// Spotify only while a new Spotify account could be admitted.
 			Pool:            pool,
 			MaxSpotifyUsers: cfg.SpotifyMaxUsers,
+			// The Apple routes mount only when the APPLE_* set parses, so
+			// the sign-in page offers the button only when it would work.
+			AppleSignIn: appleLoginH != nil,
 		}).Get)
 		// No nil guard on authDeps here any more. There used to be one, and it
 		// was the mechanism by which a bad ENCRYPTION_KEY produced a site with
@@ -887,6 +890,9 @@ func main() {
 			r.Post("/devices", devicesH.Post)
 			r.Delete("/devices/{token}", devicesH.Delete)
 			r.Put("/email-prefs", emailPrefsH.Put)
+			// The display name (CF-36). Email accounts arrive without one,
+			// and account deletion confirms against it.
+			r.Put("/profile", (&webhttp.ProfileHandler{Pool: pool}).Put)
 			// Confirm an address (CF-33): POST /me/email sends the link and
 			// code, POST /me/email/verify takes the code.
 			emailLoginH.MountEmailMe(r)

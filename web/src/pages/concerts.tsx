@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { FilterBar } from '@/components/filter-bar';
@@ -10,10 +10,12 @@ import { SaveSubscribeHint } from '@/components/save-subscribe-hint';
 import { ActionError } from '@/components/action-error';
 import { useConcerts } from '@/hooks/use-concerts';
 import { apiFetch, formatRetry, mutatingFetch, statusMessage } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import {
   EMPTY_FILTERS,
   hasActiveFilters,
+  hasSpotify,
   type FiltersState,
   type Location,
 } from '@/lib/types';
@@ -37,6 +39,8 @@ export default function ConcertsPage() {
     { reloadToken: reloadVersion },
   );
   const refreshing = state.kind === 'loaded' && state.data.refreshing;
+  const { auth } = useAuth();
+  const spotify = auth.kind === 'signed_in' && hasSpotify(auth.me);
 
   async function requestRefresh() {
     setRefreshBusy(true);
@@ -117,13 +121,35 @@ export default function ConcertsPage() {
     return (await r.json()) as Location;
   }
 
+  // Nothing to scan (no Spotify identity, no picks) or no name yet: the
+  // first-run steps cover both. The server queued no scan for needs_picks, so
+  // staying here would show an empty list that never fills.
+  if (
+    (state.kind === 'loaded' && state.data.needs_picks) ||
+    (auth.kind === 'signed_in' && !auth.me.display_name && !hasSpotify(auth.me))
+  ) {
+    return <Navigate to="/welcome" replace />;
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Upcoming concerts</h1>
           <p className="text-sm text-muted-foreground">
-            Built from your Spotify listening. Refreshed daily.
+            {/* Says where the list comes from, so it must not name Spotify
+                to an account that has never connected it. */}
+            {spotify
+              ? 'Built from your Spotify listening, plus any artists you pick in Settings. Refreshed daily.'
+              : (
+                <>
+                  Built from the artists and genres you picked.{' '}
+                  <Link to="/settings" className="text-primary hover:underline">
+                    Change them
+                  </Link>
+                  .
+                </>
+              )}
           </p>
         </div>
         <Button

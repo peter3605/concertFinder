@@ -2,12 +2,47 @@
 
 export type Me = {
   id: string;
+  // Empty for an account that never signed in with Spotify (Apple or email).
   spotify_user_id: string;
+  // Empty until onboarding asks, for an email account and for an Apple one
+  // whose name was not shared.
   display_name: string;
   email?: string;
   digest_opt_in?: boolean;
   instant_notify_opt_in?: boolean;
+  // Providers this account can sign in with: "apple", "email", "spotify".
+  auth_methods?: string[];
 };
+
+// Whether anything this account sees can be Spotify-derived. Decides the
+// "Powered by Spotify" attribution and which artist search to use, so it is
+// the identity, never "has picks": a Spotify account with picks still shows
+// Spotify-derived artists. spotify_user_id is what the server's own Spotify
+// gate (AccessTokenFor) checks. A disconnected account keeps the ID, so it
+// errs toward showing attribution, which is the harmless direction.
+export function hasSpotify(me: Me): boolean {
+  return me.spotify_user_id !== '';
+}
+
+// A name to show for the account. The Spotify ID was the old fallback and is
+// empty for everyone who signed in another way.
+export function accountName(me: Me): string {
+  return me.display_name || me.spotify_user_id || me.email || 'Your account';
+}
+
+// GET /api/me/picks and /api/me/genres. Every name here is Ticketmaster's.
+export type ArtistPick = { attraction_id: string; name: string; genre?: string };
+export type GenrePick = { genre_id: string; name: string };
+export type PickSearchResult = {
+  attraction_id: string;
+  name: string;
+  genre?: string;
+  image_url?: string;
+  upcoming: number;
+  // The name matches the query under folding: the likely answer.
+  exact: boolean;
+};
+export type TMGenre = { id: string; name: string };
 
 export type TicketLink = { source: string; url: string };
 // `id` is a Spotify artist ID. It is absent on /api/discover, whose acts are
@@ -105,6 +140,9 @@ export type ConcertsResponse = {
   // Set when the user's genre picks are a capped listing: genre shows are
   // complete before this venue-local day ("2006-01-02") and absent after it.
   genre_horizon?: string;
+  // An account with no Spotify identity and no artist or genre picks: there
+  // is nothing to scan, so no scan was queued. Onboarding handles it.
+  needs_picks?: boolean;
 };
 
 // GET /api/discover — the signed-out "popular shows near you" list. Same

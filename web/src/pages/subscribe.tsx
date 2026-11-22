@@ -7,11 +7,20 @@ import { Input } from '@/components/ui/input';
 import { ActionError } from '@/components/action-error';
 import { SpotifyAttribution } from '@/components/spotify-attribution';
 import { apiFetch, mutatingFetch } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import { hasSpotify, type PickSearchResult } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/use-document-title';
 
-// Full-fledged subscribe/search page. Any Spotify artist (touring or not)
-// can be followed here; the bell on concert cards is the shortcut for
-// artists already surfacing in your feed.
+// Full-fledged subscribe/search page. Any artist (touring or not) can be
+// followed here; the bell on concert cards is the shortcut for artists
+// already surfacing in your feed.
+//
+// The search depends on who is asking. A Spotify account searches Spotify,
+// and subscribes by Spotify artist ID, which is what its feed's acts carry.
+// Anyone else searches Ticketmaster and subscribes by "tm:<attraction>", the
+// ID a picks feed's acts carry, so the bell and instant alerts match either
+// way. GET /me/artists/search is a 403 without a Spotify identity, and an
+// account that never connected Spotify must not reach it (CF-32).
 type SearchArtist = { id: string; name: string; genres?: string[]; image_url?: string };
 type SubscribedArtist = { id: string; name: string };
 
@@ -34,6 +43,8 @@ export default function SubscribePage() {
   // double-click could put both in flight and let the server's ordering — not
   // the user's — decide the outcome. One change per artist at a time.
   const pendingArtists = useRef(new Set<string>());
+  const { auth } = useAuth();
+  const spotify = auth.kind === 'signed_in' && hasSpotify(auth.me);
 
   useEffect(() => {
     apiFetch('/api/me/subscribed-artists')
@@ -63,15 +74,29 @@ export default function SubscribePage() {
       setSearching(true);
       setSearchErr('');
       try {
-        const r = await apiFetch(`/api/me/artists/search?q=${encodeURIComponent(trimmed)}`);
+        const r = spotify
+          ? await apiFetch(`/api/me/artists/search?q=${encodeURIComponent(trimmed)}`)
+          : await apiFetch(`/api/me/picks/search?q=${encodeURIComponent(trimmed)}`);
         if (my !== generation.current) return;
         if (!r.ok) {
           setSearchErr(`Search failed (${r.status})`);
           setResults([]);
           return;
         }
-        const j = (await r.json()) as { artists: SearchArtist[] };
-        setResults(j.artists ?? []);
+        if (spotify) {
+          const j = (await r.json()) as { artists: SearchArtist[] };
+          setResults(j.artists ?? []);
+        } else {
+          const j = (await r.json()) as { results: PickSearchResult[] };
+          setResults(
+            (j.results ?? []).map((p) => ({
+              id: `tm:${p.attraction_id}`,
+              name: p.name,
+              genres: p.genre ? [p.genre] : [],
+              image_url: p.image_url,
+            })),
+          );
+        }
       } catch (e) {
         if (my !== generation.current) return;
         setSearchErr(e instanceof Error ? e.message : String(e));
@@ -82,7 +107,7 @@ export default function SubscribePage() {
     return () => {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
     };
-  }, [query]);
+  }, [query, spotify]);
 
   const subscribedIDs = new Set(subs.map((s) => s.id));
 
@@ -157,7 +182,7 @@ export default function SubscribePage() {
             <Input
               className="h-11 pl-10 pr-10 text-base"
               type="text"
-              placeholder="Search Spotify for an artist"
+              placeholder={spotify ? 'Search Spotify for an artist' : 'Search for an artist'}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               autoFocus
@@ -222,7 +247,7 @@ export default function SubscribePage() {
               })}
             </ul>
           )}
-          {results.length > 0 && (
+          {spotify && results.length > 0 && (
             <p className="mt-3 text-xs text-muted-foreground">
               <SpotifyAttribution label="Artist results powered by" />
             </p>

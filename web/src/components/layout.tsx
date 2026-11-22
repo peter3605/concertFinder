@@ -13,6 +13,7 @@ import {
 import { SpotifyAttribution } from '@/components/spotify-attribution';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { useAuth } from '@/lib/auth';
+import { accountName, hasSpotify } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const NAV = [
@@ -68,13 +69,13 @@ export function Layout() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm">
-                    {auth.me.display_name || auth.me.spotify_user_id}
+                    {accountName(auth.me)}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuLabel>
                     <div className="flex flex-col">
-                      <span>{auth.me.display_name || auth.me.spotify_user_id}</span>
+                      <span>{accountName(auth.me)}</span>
                       {auth.me.email && (
                         <span className="text-xs font-normal text-muted-foreground">
                           {auth.me.email}
@@ -133,7 +134,16 @@ export function Layout() {
         </Suspense>
       </main>
       <footer className="mx-auto max-w-6xl px-4 pb-8 text-xs text-muted-foreground">
-        <SpotifyAttribution /> · <NavLink to="/privacy" className="hover:underline">Privacy</NavLink> ·{' '}
+        {/* Only for an account with a Spotify identity. Spotify's rules ask
+            for the mark where Spotify-derived data appears, and a signed-out
+            page or an Apple/email account's feed carries none: there it would
+            be a false claim, not a courtesy. */}
+        {auth.kind === 'signed_in' && hasSpotify(auth.me) && (
+          <>
+            <SpotifyAttribution /> ·{' '}
+          </>
+        )}
+        <NavLink to="/privacy" className="hover:underline">Privacy</NavLink> ·{' '}
         <NavLink to="/terms" className="hover:underline">Terms</NavLink>
       </footer>
     </div>
