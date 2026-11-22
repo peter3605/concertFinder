@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiFetch } from '@/lib/api';
 import { useDocumentTitle } from '@/lib/use-document-title';
 
@@ -28,7 +29,14 @@ export default function TermsPage() {
       <h2>Use of the service</h2>
       <ul>
         <li>For personal, non-commercial use. Automated scraping of this service's API is not permitted.</li>
-        <li>You need a Spotify account to log in and agree to Spotify's own terms.</li>
+        <li>
+          You sign in with Apple, with a link sent to your email address, or,
+          for the small number of accounts Spotify allows this app, with
+          Spotify. Using Apple or Spotify to sign in means their own terms
+          apply to that account too.
+        </li>
+        <li>New accounts may need an invite code. Keep your email account secure: anyone who can read it can use a sign-in link sent to it.</li>
+        <li>The artists and genres you pick are used only to search for concerts for you; don't use them to submit anything unlawful or abusive.</li>
         <li>Concert data is aggregated from public third-party APIs. Ticket purchases happen on those third-party sites.</li>
       </ul>
 
@@ -58,8 +66,10 @@ export default function TermsPage() {
 
       <h2>Termination</h2>
       <p>
-        You can log out at any time. Accounts that abuse the service may be
-        terminated without notice.
+        You can sign out at any time, and delete your account in Settings on
+        the web or in the iPhone app; the{' '}
+        <Link to="/privacy">privacy policy</Link> describes what deletion removes.
+        Accounts that abuse the service may be terminated without notice.
       </p>
 
       <h2>Contact</h2>

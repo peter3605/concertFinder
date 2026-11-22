@@ -15,7 +15,8 @@
 	     describes what leaves the device; it feeds the privacy report Xcode
 	     generates and must agree with the App Store Connect privacy labels, so
 	     it is kept here deliberately -- one artifact rather than two that
-	     drift. It mirrors ios-app-plan.md §9 exactly; change both together. -->
+	     drift. It mirrors the table in public-path.md §6.3 exactly (which
+	     supersedes ios-app-plan.md §9); change them together. -->
 
 	<!-- No tracking, in Apple's sense: nothing here is linked with data from
 	     other companies' apps or sites for advertising or measurement, and
@@ -28,8 +29,10 @@
 
 	<key>NSPrivacyCollectedDataTypes</key>
 	<array>
-		<!-- Identity, from Spotify's /me. The user ID is the account key; the
-		     display name is shown in Settings. -->
+		<!-- Identity. The user ID is the account key plus each sign-in
+		     method's identifier (Apple's sub, a Spotify ID, an email
+		     identity). The name comes from Apple's first authorization, a
+		     Spotify display name, or onboarding, and is shown in Settings. -->
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeUserID</string>
@@ -54,9 +57,10 @@
 				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 			</array>
 		</dict>
-		<!-- Only if the user granted user-read-email; it exists to address the
-		     digest and instant-notify mail, and the unsubscribe link ends
-		     both. -->
+		<!-- Collected directly from everyone since CF-33: it is the email
+		     sign-in identity and addresses the digest and instant-notify
+		     mail. With Sign in with Apple it may be a private relay address,
+		     which is still an email address we retain. -->
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
@@ -89,6 +93,21 @@
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Artist and genre picks (CF-30, CF-31): content the user chooses,
+		     stored against the account, used only to decide what to search
+		     for. Apple has no closer category than Other User Content. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherUserContent</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<true/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>
