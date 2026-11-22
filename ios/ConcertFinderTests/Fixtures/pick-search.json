@@ -1,0 +1,20 @@
+{
+  "query": "ghost",
+  "results": [
+    {
+      "attraction_id": "K8vZ9175Tr0",
+      "name": "Ghost",
+      "genre": "Rock",
+      "image_url": "https://s1.ticketm.net/dam/a/ghost.jpg",
+      "upcoming": 14,
+      "exact": true
+    },
+    {
+      "attraction_id": "K8vZ917oWOV",
+      "name": "Ghostface Killah",
+      "genre": "Hip-Hop/Rap",
+      "upcoming": 3,
+      "exact": false
+    }
+  ]
+}

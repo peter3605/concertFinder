@@ -1,0 +1,14 @@
+{
+  "picks": [
+    {
+      "attraction_id": "K8vZ917Gku7",
+      "name": "Brad Mehldau",
+      "genre": "Jazz"
+    },
+    {
+      "attraction_id": "K8vZ9175Tr0",
+      "name": "Ghost"
+    }
+  ],
+  "max": 30
+}

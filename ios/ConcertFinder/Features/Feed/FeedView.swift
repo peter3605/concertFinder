@@ -92,6 +92,9 @@ struct FeedView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            // For UI tests that need "the feed has shows"
+                            // without asserting which: listings change daily.
+                            .accessibilityIdentifier("feed-event")
                         }
                     } header: {
                         Text(section.heading)
@@ -102,9 +105,13 @@ struct FeedView: View {
                     }
                 }
 
-                SpotifyAttribution()
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, Metrics.loose)
+                // Spotify-derived data is on screen only for an account with a
+                // Spotify identity; a picks-only feed carries none (CF-36/37).
+                if auth.hasSpotify {
+                    SpotifyAttribution()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, Metrics.loose)
+                }
             }
             .padding(Metrics.gutter)
         }

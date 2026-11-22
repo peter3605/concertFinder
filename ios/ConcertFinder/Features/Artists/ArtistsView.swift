@@ -16,6 +16,28 @@ final class ArtistsModel {
         }
     }
 
+    /// Which catalogue the search reads. A Spotify account searches Spotify
+    /// and subscribes by Spotify artist ID, which is what its feed's acts
+    /// carry. Everyone else searches Ticketmaster and subscribes by
+    /// "tm:<attraction>", the ID a picks feed's acts carry, so the bell and
+    /// instant alerts match either way. `/me/artists/search` is a 403
+    /// without a Spotify identity, and such an account must never reach it
+    /// (CF-32). Set by the view from the signed-in account.
+    enum SearchSource: Equatable, Sendable {
+        case spotify
+        case ticketmaster
+    }
+
+    /// Defaults to Ticketmaster, the direction that cannot fail: it answers
+    /// every account, while Spotify's answers a 403 to most of them.
+    var searchSource: SearchSource = .ticketmaster {
+        didSet {
+            guard searchSource != oldValue else { return }
+            results = []
+            scheduleSearch()
+        }
+    }
+
     private let api: APIClient
     private var searchTask: Task<Void, Never>?
 
@@ -65,7 +87,12 @@ final class ArtistsModel {
     private func runSearch(_ term: String) async {
         isSearching = true
         do {
-            results = try await api.searchArtists(query: term)
+            switch searchSource {
+            case .spotify:
+                results = try await api.searchArtists(query: term)
+            case .ticketmaster:
+                results = try await api.searchPicks(query: term).map(Self.subscribable)
+            }
             error = nil
         } catch is CancellationError {
             // Superseded by a newer keystroke.
@@ -75,6 +102,16 @@ final class ArtistsModel {
             self.error = .unknown(error.localizedDescription)
         }
         isSearching = false
+    }
+
+    /// A Ticketmaster result in the shape the subscribe list uses, keyed by
+    /// the ID a picks feed's acts carry.
+    nonisolated static func subscribable(_ result: PickSearchResult) -> SubscribedArtist {
+        SubscribedArtist(
+            id: result.subscriptionID,
+            name: result.name,
+            genres: result.genre.map { [$0] } ?? []
+        )
     }
 
     func toggle(_ artist: SubscribedArtist) async {
@@ -109,6 +146,7 @@ final class ArtistsModel {
         searchTask?.cancel()
         searchTask = nil
         query = ""
+        searchSource = .ticketmaster
         subscribed = []
         results = []
         isSearching = false
@@ -118,6 +156,7 @@ final class ArtistsModel {
 
 struct ArtistsView: View {
     @Environment(ArtistsModel.self) private var model
+    @Environment(AuthController.self) private var auth
 
     var body: some View {
         @Bindable var model = model
@@ -172,12 +211,22 @@ struct ArtistsView: View {
                 } footer: {
                     VStack(alignment: .leading, spacing: Metrics.tight) {
                         Text("We'll notify you as soon as one of these artists announces a show near you.")
-                        SpotifyAttribution()
+                        // Only where the search and the list can be
+                        // Spotify's. A picks-only account's artists all come
+                        // from Ticketmaster.
+                        if auth.hasSpotify {
+                            SpotifyAttribution()
+                        }
                     }
                 }
             }
             .navigationTitle("Artists")
-            .searchable(text: $model.query, prompt: "Search artists")
+            .searchable(text: $model.query, prompt: auth.hasSpotify ? "Search Spotify for an artist" : "Search for an artist")
+            // Before the first keystroke can search, and again if the
+            // account changes under this model.
+            .task(id: auth.hasSpotify) {
+                model.searchSource = auth.hasSpotify ? .spotify : .ticketmaster
+            }
             .task { await model.load() }
             .refreshable { await model.load() }
         }

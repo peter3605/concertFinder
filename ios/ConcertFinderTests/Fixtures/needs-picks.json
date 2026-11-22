@@ -1,0 +1,16 @@
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.006,
+    "radius_miles": 25
+  },
+  "count": 0,
+  "events": [],
+  "facets": {
+    "genres": [],
+    "venues": []
+  },
+  "refreshing": false,
+  "complete": true,
+  "needs_picks": true
+}

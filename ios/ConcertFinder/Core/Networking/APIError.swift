@@ -38,6 +38,13 @@ enum APIError: Error, Equatable {
 
     case unknown(String)
 
+    /// The HTTP status of a server refusal, for the few screens that word
+    /// one status differently from the rest.
+    var status: Int? {
+        if case .server(let status, _) = self { return status }
+        return nil
+    }
+
     /// Whether showing a cached snapshot underneath the error makes sense.
     var isTransient: Bool {
         switch self {

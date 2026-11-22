@@ -78,6 +78,16 @@ final class FeedModel {
         }
     }
 
+    /// Raised when a feed read answers `needs_picks`. A closure for the same
+    /// reason LocationModel's is: this model knows nothing about onboarding.
+    var onNeedsPicks: (@MainActor () -> Void)?
+    /// The last response said there is nothing to scan. No scan was queued,
+    /// so nothing will ever arrive by polling.
+    private(set) var needsPicks = false
+    /// The genre part of the feed stops before this venue-local day
+    /// ("2006-01-02"); nil when nothing was cut.
+    private(set) var genreHorizon: String?
+
     private let api: APIClient
     private var pollTask: Task<Void, Never>?
     /// Fires once, at `retryAfter`. See `setRetryAfter` for why a guard
@@ -188,7 +198,10 @@ final class FeedModel {
         // "Settled" means a scan finished, not that it found anything: a user
         // whose area genuinely has no shows has still completed setup, and
         // showing them the waiting screen forever would be the worse failure.
-        if !response.refreshing {
+        // `needs_picks` is not settled: nothing ran, and the account has not
+        // been through setup -- marking it here would skip the first-run
+        // screen for the scan its first pick starts.
+        if !response.refreshing && !response.requiresPicks {
             FirstRunTracker.markCompleted()
         }
     }
@@ -442,6 +455,8 @@ final class FeedModel {
         missingDeepLinkEvent = false
         isShowingPushPrompt = false
         didDeclineLocationStep = false
+        needsPicks = false
+        genreHorizon = nil
         error = nil
         isShowingCachedData = false
         isResetting = true
@@ -458,6 +473,10 @@ final class FeedModel {
         complete = response.complete
         setRetryAfter(response.retryAfter)
         isRefreshing = response.refreshing
+        genreHorizon = response.genreHorizon
+        let needed = response.requiresPicks
+        needsPicks = needed
+        if needed { onNeedsPicks?() }
     }
 
     private func apply(_ entry: SnapshotCache.Entry) {

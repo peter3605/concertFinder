@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/peterho/concertfinder/internal/concerts"
+	"github.com/peterho/concertfinder/internal/db"
+	"github.com/peterho/concertfinder/internal/picks"
+	"github.com/peterho/concertfinder/internal/ticketmaster"
 )
 
 // The contract check between the Go handlers and the Swift client
@@ -52,6 +57,14 @@ func TestGoldenFixtures(t *testing.T) {
 		{"incomplete-scan", goldenIncompleteScan()},
 		{"refresh-throttled", goldenRefreshThrottled()},
 		{"discover", goldenDiscover()},
+		// CF-37: the shapes an account without Spotify meets.
+		{"picks-feed", goldenPicksFeed()},
+		{"needs-picks", goldenNeedsPicks()},
+		{"artist-picks", goldenArtistPicks()},
+		{"pick-search", goldenPickSearch()},
+		{"genre-picks", goldenGenrePicks()},
+		{"genre-catalog", goldenGenreCatalog()},
+		{"site-info", goldenSiteInfo(t)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Indented and newline-terminated so a diff on failure is
@@ -295,4 +308,111 @@ func goldenDiscover() discoverResponse {
 			},
 		}},
 	}
+}
+
+// goldenPicksFeed is a feed built from picks (CF-30, CF-31): acts carry the
+// "tm:<attraction>" ID a pick's subscription uses rather than a Spotify ID,
+// carry no reason line (there is no affinity profile to explain them), and
+// genre_horizon says where the capped genre listing stops.
+func goldenPicksFeed() concertsResponse {
+	computed := time.Date(2026, 11, 20, 4, 30, 0, 0, time.UTC)
+	return concertsResponse{
+		Location: concerts.Location{Latitude: 40.7128, Longitude: -74.006, RadiusMiles: 25},
+		Count:    1,
+		Events: []concerts.Event{{
+			EventKey:  "33445566778899001122334455667788",
+			Date:      time.Date(2026, 12, 4, 0, 30, 0, 0, time.UTC),
+			LocalDate: "2026-12-03",
+			Venue:     "Village Vanguard",
+			City:      "New York",
+			State:     "NY",
+			Country:   "US",
+			Latitude:  40.7359,
+			Longitude: -74.0016,
+			Acts: []concerts.Act{
+				goldenAct("tm:K8vZ917Gku7", "Brad Mehldau", "8899aabbccddeeff0011223344556677", []string{"Jazz"}, false, true, ""),
+			},
+			Links: []concerts.TicketLink{
+				{Source: "ticketmaster", URL: "https://www.ticketmaster.com/event/vanguard"},
+			},
+		}},
+		Facets: facetSet{
+			Genres: []facet{{Value: "Jazz", Count: 1}},
+			Venues: []facet{{Value: "Village Vanguard", Count: 1}},
+		},
+		ComputedAt:   &computed,
+		Refreshing:   false,
+		Complete:     true,
+		GenreHorizon: "2027-01-15",
+	}
+}
+
+// goldenNeedsPicks is an account with no Spotify identity and nothing
+// picked: nothing to scan, nothing queued. The app must route to the picker
+// rather than poll, because refreshing is false and stays false.
+func goldenNeedsPicks() concertsResponse {
+	return concertsResponse{
+		Location:   concerts.Location{Latitude: 40.7128, Longitude: -74.006, RadiusMiles: 25},
+		Count:      0,
+		Events:     []concerts.Event{},
+		Facets:     facetSet{Genres: []facet{}, Venues: []facet{}},
+		Refreshing: false,
+		Complete:   true,
+		NeedsPicks: true,
+	}
+}
+
+func goldenArtistPicks() picksListResponse {
+	return picksListResponse{
+		Picks: []db.ArtistPick{
+			{AttractionID: "K8vZ917Gku7", Name: "Brad Mehldau", Genre: "Jazz"},
+			{AttractionID: "K8vZ9175Tr0", Name: "Ghost"},
+		},
+		Max: db.MaxArtistPicks,
+	}
+}
+
+func goldenPickSearch() pickSearchResponse {
+	return pickSearchResponse{
+		Query: "ghost",
+		Results: []picks.Result{
+			{AttractionID: "K8vZ9175Tr0", Name: "Ghost", Genre: "Rock", ImageURL: "https://s1.ticketm.net/dam/a/ghost.jpg", Upcoming: 14, Exact: true},
+			{AttractionID: "K8vZ917oWOV", Name: "Ghostface Killah", Genre: "Hip-Hop/Rap", Upcoming: 3},
+		},
+	}
+}
+
+func goldenGenrePicks() genrePicksResponse {
+	return genrePicksResponse{
+		Picks: []db.GenrePick{{GenreID: "KnvZfZ7vAvE", Name: "Jazz"}},
+		Max:   db.MaxGenrePicks,
+	}
+}
+
+func goldenGenreCatalog() genreCatalogResponse {
+	return genreCatalogResponse{Genres: []ticketmaster.Genre{
+		{ID: "KnvZfZ7vAvE", Name: "Jazz"},
+		{ID: "KnvZfZ7vAeA", Name: "Rock"},
+	}}
+}
+
+// goldenSiteInfo runs the real handler rather than restating its map, since
+// the payload is a literal inside Get. With no pool, spotify_signups_open is
+// decided by the cap alone, so the fixture needs no database.
+func goldenSiteInfo(t *testing.T) json.RawMessage {
+	t.Helper()
+	h := &SiteInfoHandler{
+		ContactEmail:    "contact@example.com",
+		EffectiveDate:   "2026-11-21",
+		MinIOSBuild:     3,
+		InviteRequired:  true,
+		MaxSpotifyUsers: 5,
+		AppleSignIn:     true,
+	}
+	rec := httptest.NewRecorder()
+	h.Get(rec, httptest.NewRequest(http.MethodGet, "/api/site-info", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("site-info: status %d", rec.Code)
+	}
+	return json.RawMessage(bytes.TrimSpace(rec.Body.Bytes()))
 }

@@ -27,13 +27,18 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 accountSection
+                picksSection
                 appearanceSection
                 notificationsSection
                 NavigationLink { LocationView() } label: {
                     Label("Location", systemImage: "location")
                 }
                 aboutSection
-                connectionSection
+                // Only an account with a Spotify identity has a Spotify
+                // connection to revoke.
+                if auth.hasSpotify {
+                    connectionSection
+                }
                 dangerSection
             }
             .navigationTitle("Settings")
@@ -49,9 +54,19 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section("Account") {
             if let me {
-                LabeledContent("Signed in as", value: me.displayName)
-                if let email = me.email, !email.isEmpty {
-                    LabeledContent("Email", value: email)
+                LabeledContent("Signed in as", value: me.accountName)
+                // Adding an address is also how an account gains a way to
+                // sign in by email, and what turns the email toggles on.
+                NavigationLink {
+                    Form { EmailAddressSections() }
+                        .navigationTitle(me.hasEmail ? "Change email" : "Add email")
+                        .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    if let email = me.email, !email.isEmpty {
+                        LabeledContent("Email", value: email)
+                    } else {
+                        Text("Add an email address")
+                    }
                 }
             }
             Button("Sign out") {
@@ -64,6 +79,20 @@ struct SettingsView: View {
                     await auth.signOut()
                 }
             }
+        }
+    }
+
+    /// The picker, for every account: an account without Spotify builds its
+    /// feed from these, and a Spotify one adds artists its library misses.
+    private var picksSection: some View {
+        Section {
+            NavigationLink { PicksView() } label: {
+                Label("Artists and genres", systemImage: "music.note")
+            }
+        } footer: {
+            Text(auth.hasSpotify
+                 ? "Add artists your Spotify library misses, or genres to fill your feed."
+                 : "Your feed is built from these.")
         }
     }
 
@@ -121,9 +150,9 @@ struct SettingsView: View {
         } footer: {
             if me?.hasEmail != true {
                 // Signing in again cannot help: Spotify no longer returns the
-                // address. Confirming one is a web Settings step until the
-                // app has its own (CF-33).
-                Text("Add and confirm an email address in Settings on the ConcertFinder website to turn on email notifications.")
+                // address, and Apple may have hidden it. Confirming one here
+                // is what fills it in (CF-33, CF-37).
+                Text("Add and confirm an email address under Account to turn on email notifications.")
             } else {
                 Text("We only notify you about artists you follow here.")
             }
@@ -137,7 +166,9 @@ struct SettingsView: View {
             NavigationLink("Privacy Policy") { PolicyView(kind: .privacy, api: api) }
             NavigationLink("Terms of Service") { PolicyView(kind: .terms, api: api) }
             LabeledContent("Version", value: Self.versionString)
-            SpotifyAttribution()
+            if auth.hasSpotify {
+                SpotifyAttribution()
+            }
         }
     }
 
@@ -211,10 +242,14 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This removes your profile, saved shows, artist alerts and your Spotify connection. It cannot be undone.")
+                Text("This removes your profile, saved shows, picks, artist alerts and any Spotify or Apple connection. It cannot be undone.")
             }
         } footer: {
-            Text("Deleting removes everything immediately. Your listening history is never stored — only the artist scores we derive from it.")
+            if auth.hasSpotify {
+                Text("Deleting removes everything immediately. Your listening history is never stored — only the artist scores we derive from it.")
+            } else {
+                Text("Deleting removes everything immediately.")
+            }
         }
     }
 
@@ -363,20 +398,20 @@ struct PolicyView: View {
         case .privacy:
             [
                 ("What we store",
-                 "Your Spotify user ID and display name, your email address if you granted it, the location you set, and a device token if you turned on push notifications."),
+                 "Your name, your email address, the location you set, the artists and genres you pick, your Spotify user ID if you sign in with Spotify, and a device token if you turned on push notifications."),
                 ("What we never store",
-                 "Your listening history. Saved tracks, top artists, recently played and playlists are read to build a profile, held in memory, and discarded. Only the derived artist scores are kept, and they expire after 24 hours."),
+                 "If you sign in with Spotify, your listening history. Saved tracks, top artists, recently played and playlists are read to build a profile, held in memory, and discarded. Only the derived artist scores are kept, and they expire after 24 hours."),
                 ("Your Spotify connection",
                  "The app itself never receives a Spotify token. All Spotify access happens on our server, and the refresh token is encrypted at rest."),
                 ("Deleting your data",
-                 "Delete your account from Settings. It removes everything immediately, including your Spotify connection and any device tokens."),
+                 "Delete your account from Settings. It removes everything immediately, including any Spotify or Apple connection and any device tokens."),
             ]
         case .terms:
             [
                 ("Use of the service",
                  "ConcertFinder is a personal-scale, non-commercial concert-discovery tool for personal use."),
                 ("Spotify",
-                 "You need a Spotify account to sign in, and you agree to Spotify's own terms. ConcertFinder is not affiliated with or endorsed by Spotify."),
+                 "If you sign in with Spotify, you agree to Spotify's own terms. ConcertFinder is not affiliated with or endorsed by Spotify."),
                 ("Concert data",
                  "Listings are aggregated from public third-party APIs and may be incomplete or out of date. Ticket purchases happen on those third-party sites, not here."),
                 ("No warranty",

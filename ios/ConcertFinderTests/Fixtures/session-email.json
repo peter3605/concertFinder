@@ -1,0 +1,16 @@
+{
+  "session_token": "c2Vzc2lvbi10b2tlbi1leGFtcGxlLW5vdC1hLXJlYWwtb25l",
+  "expires_at": "2027-02-19T21:00:00Z",
+  "user": {
+    "auth_methods": [
+      "email"
+    ],
+    "digest_opt_in": true,
+    "display_name": "",
+    "email": "listener@example.com",
+    "id": "6f1c2d3e-4b5a-4c6d-8e7f-901a2b3c4d5e",
+    "instant_notify_opt_in": false,
+    "push_opt_in": false,
+    "spotify_user_id": ""
+  }
+}

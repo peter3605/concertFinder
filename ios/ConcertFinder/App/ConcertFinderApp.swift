@@ -20,6 +20,8 @@ struct ConcertFinderApp: App {
                 .environment(container.location)
                 .environment(container.discover)
                 .environment(container.push)
+                .environment(container.picks)
+                .environment(container.onboarding)
                 .environment(container)
                 .task {
                     appDelegate.container = container
@@ -53,6 +55,8 @@ final class AppContainer {
     let location: LocationModel
     let discover: DiscoverModel
     let push: PushRegistrar
+    let picks: PicksModel
+    let onboarding: OnboardingModel
 
     /// Set when a notification or universal link asks for a specific event.
     var pendingEventKey: String?
@@ -85,6 +89,9 @@ final class AppContainer {
         self.location = LocationModel(api: api)
         self.discover = DiscoverModel(api: api)
         self.push = PushRegistrar(api: api)
+        let picks = PicksModel(api: api)
+        self.picks = picks
+        self.onboarding = OnboardingModel(api: api, picks: picks)
         // `[weak auth]` is what keeps this from being a cycle: the client
         // holds the bridge, the bridge would hold the controller, and the
         // controller holds the client.
@@ -113,11 +120,19 @@ final class AppContainer {
             self.artists.reset()
             self.location.reset()
             self.discover.reset()
+            self.picks.reset()
+            self.onboarding.reset()
             self.selectedTab = .feed
             // Awaited, and last: on the deliberate sign-out path this runs
             // while the session token is still valid, which is the only
             // moment the server will honour a deregistration.
             await self.push.deregister()
+        }
+        // The feed said there is nothing to scan: no Spotify library and no
+        // picks. Back to the picks step rather than a list that never fills.
+        self.feed.onNeedsPicks = { [weak self] in
+            guard let self, case .signedIn(let me) = self.auth.state else { return }
+            Task { await self.onboarding.require(me) }
         }
         self.location.onLocationChanged = { [weak self] in
             guard let self else { return }
@@ -138,6 +153,12 @@ final class AppContainer {
     }
 
     func handle(url: URL) {
+        // An email sign-in or confirmation link. Checked first and returned
+        // from, because its `token` must never be read as anything else.
+        if let token = EmailLink.token(from: url, expectedHost: baseURL.host()) {
+            Task { await auth.handleEmailLink(token: token) }
+            return
+        }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         if let eventKey = components.queryItems?.first(where: { $0.name == "event_key" })?.value {
             pendingEventKey = eventKey

@@ -62,4 +62,20 @@ final class LaunchUITests: XCTestCase {
             "The login screen should state that listening history is not stored"
         )
     }
+
+    /// Email is the sign-in open to everyone, and it needs nothing from the
+    /// server to be offered -- unlike Apple, which waits for site-info to say
+    /// the routes are mounted. A login screen with only Spotify on it is one
+    /// most people cannot get past (Spotify stays at five accounts).
+    @MainActor
+    func testLoginScreenOffersEmailSignIn() {
+        let app = XCUIApplication()
+        app.launch()
+
+        XCTAssertTrue(
+            app.textFields["email-address"].waitForExistence(timeout: 60),
+            "The login screen should offer email sign-in"
+        )
+        XCTAssertTrue(app.buttons["email-send"].exists)
+    }
 }
