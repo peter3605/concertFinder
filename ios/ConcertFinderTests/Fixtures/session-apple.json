@@ -1,0 +1,17 @@
+{
+  "session_token": "c2Vzc2lvbi10b2tlbi1leGFtcGxlLW5vdC1hLXJlYWwtb25l",
+  "expires_at": "2027-02-19T21:00:00Z",
+  "user": {
+    "auth_methods": [
+      "apple",
+      "email"
+    ],
+    "digest_opt_in": false,
+    "display_name": "Sam Rivera",
+    "email": "x7k2p9@privaterelay.appleid.com",
+    "id": "7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "instant_notify_opt_in": false,
+    "push_opt_in": false,
+    "spotify_user_id": ""
+  }
+}

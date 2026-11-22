@@ -28,6 +28,7 @@ import SwiftUI
 ///    nearby, from `/api/discover`. The screen dissolves into the feed
 ///    instead of switching to it.
 struct FirstRunView: View {
+    @Environment(AuthController.self) private var auth
     @Environment(FeedModel.self) private var model
     @Environment(ArtistsModel.self) private var artists
     @Environment(DiscoverModel.self) private var discover
@@ -55,8 +56,12 @@ struct FirstRunView: View {
 
                 nearby
 
-                SpotifyAttribution()
-                    .frame(maxWidth: .infinity, alignment: .center)
+                // Spotify-derived data is on screen only for an account with a
+                // Spotify identity; a picks-only feed carries none (CF-36/37).
+                if auth.hasSpotify {
+                    SpotifyAttribution()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
             }
             .padding(Metrics.gutter)
         }
@@ -170,7 +175,9 @@ struct FirstRunView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Popular shows near you")
                         .font(.headline)
-                    Text("Not from your library — just what's on sale nearby while we build your feed.")
+                    Text(auth.hasSpotify
+                         ? "Not from your library — just what's on sale nearby while we build your feed."
+                         : "Not from your picks — just what's on sale nearby while we build your feed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -252,6 +259,15 @@ struct FirstRunView: View {
         if !model.events.isEmpty {
             return ("Still looking",
                     "We've found \(model.events.count) so far and we're still working through your artists. New shows will appear here as we find them.")
+        }
+        // No library to read for an account built from picks, and saying so
+        // would describe a step that is not happening.
+        if !auth.hasSpotify {
+            return elapsed < 75
+                ? ("Searching for shows",
+                   "Checking the artists and genres you picked against ticket listings near you. This takes a minute or two the first time.")
+                : ("Still searching",
+                   "Some listings take longer to check. You can close the app; we'll keep going.")
         }
         switch elapsed {
         case ..<20:

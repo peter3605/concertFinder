@@ -161,6 +161,13 @@ actor APIClient {
         case 200...299:
             return data
 
+        case 401 where request.value(forHTTPHeaderField: "Authorization") == nil:
+            // No session was presented, so none can have expired. The sign-in
+            // routes answer 401 for a credential they could not verify (an
+            // Apple identity token, say), and routing that through the expiry
+            // path below stamped "your session expired" over a sign-in screen.
+            throw APIError.server(status: 401, message: Self.serverMessage(data))
+
         case 401:
             // Session expired, account deleted, or the Spotify grant was
             // revoked. Handled here so no caller has to.
@@ -172,8 +179,7 @@ actor APIClient {
             // Development Mode rejection arrives as a 403 with an
             // explanatory body. It is a configuration state the user cannot
             // fix by retrying, so it keeps the server's own wording.
-            let message = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let message = Self.serverMessage(data) ?? ""
             if message.localizedCaseInsensitiveContains("development mode") {
                 throw APIError.notOnSpotifyAllowlist(message)
             }
@@ -184,10 +190,23 @@ actor APIClient {
             throw APIError.throttled(retryAfter: throttled?.retryAfter, reason: throttled?.reason)
 
         default:
-            let message = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw APIError.server(status: http.statusCode, message: message?.isEmpty == false ? message : nil)
+            throw APIError.server(status: http.statusCode, message: Self.serverMessage(data))
         }
+    }
+
+    /// The human half of an error body. The auth routes answer
+    /// `{"error": "..."}` while the `/api/me` handlers answer plain text, and
+    /// showing a user the raw JSON of the first is no better than a status
+    /// code. Internal so the parsing is testable.
+    static func serverMessage(_ data: Data) -> String? {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String {
+            let trimmed = error.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text?.isEmpty == false ? text : nil
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -225,6 +244,97 @@ actor APIClient {
             body: Body(code: code, verifier: verifier)
         )
         let data = try await perform(request)
+        return try decode(MobileExchangeResponse.self, from: data)
+    }
+
+    /// POST /api/auth/apple/native, with the credential from
+    /// ASAuthorizationAppleIDCredential. `nonce` is the raw value whose
+    /// SHA-256 the request carried; Apple only ever saw the hash. The name
+    /// arrives on the first authorization only, so it is sent whenever
+    /// present and the server keeps it.
+    func signInWithApple(
+        identityToken: String,
+        authorizationCode: String,
+        nonce: String,
+        givenName: String?,
+        familyName: String?,
+        invite: String?
+    ) async throws -> MobileExchangeResponse {
+        struct Body: Encodable, Sendable {
+            let identityToken: String
+            let authorizationCode: String
+            let nonce: String
+            let givenName: String?
+            let familyName: String?
+            let invite: String?
+        }
+        // Unauthenticated for the same reason as the mobile exchange: a stale
+        // token on the sign-in screen would turn this into a 401.
+        let request = try await makeRequest(
+            "POST", "api/auth/apple/native",
+            body: Body(identityToken: identityToken, authorizationCode: authorizationCode, nonce: nonce,
+                       givenName: givenName, familyName: familyName, invite: invite),
+            authenticated: false
+        )
+        return try decode(MobileExchangeResponse.self, from: try await perform(request))
+    }
+
+    /// POST /api/auth/email/start. Always a 202 for a well-formed address,
+    /// whether or not it has an account; the mail carries a link back to this
+    /// app and a 6-digit code. `appChallenge` binds the session to this app,
+    /// so a link forwarded to anyone else is useless without the verifier.
+    func startEmailSignIn(email: String, invite: String?, appChallenge: String) async throws {
+        struct Body: Encodable, Sendable {
+            let email: String
+            let invite: String?
+            let client: String
+            let appChallenge: String
+        }
+        _ = try await perform(try await makeRequest(
+            "POST", "api/auth/email/start",
+            body: Body(email: email, invite: invite, client: "ios", appChallenge: appChallenge),
+            authenticated: false
+        ))
+    }
+
+    /// What POST /api/auth/email/consume answered: a session for a sign-in
+    /// link, or a bare confirmation for an address-verification link (which
+    /// needs no session and no verifier).
+    enum EmailLinkResult: Sendable {
+        case signedIn(MobileExchangeResponse)
+        case addressVerified
+    }
+
+    func consumeEmailLink(token: String, verifier: String?) async throws -> EmailLinkResult {
+        struct Body: Encodable, Sendable {
+            let token: String
+            let verifier: String?
+        }
+        struct Verified: Decodable { let verified: Bool? }
+        let data = try await perform(try await makeRequest(
+            "POST", "api/auth/email/consume",
+            body: Body(token: token, verifier: verifier),
+            authenticated: false
+        ))
+        if let v = try? Self.decoder.decode(Verified.self, from: data), v.verified == true {
+            return .addressVerified
+        }
+        return .signedIn(try decode(MobileExchangeResponse.self, from: data))
+    }
+
+    /// POST /api/auth/email/code: the 6-digit code, for a mail opened on
+    /// another device or a link that did not reach the app.
+    func signInWithEmailCode(email: String, code: String, verifier: String) async throws -> MobileExchangeResponse {
+        struct Body: Encodable, Sendable {
+            let email: String
+            let code: String
+            let verifier: String
+        }
+        let data = try await perform(try await makeRequest(
+            "POST", "api/auth/email/code",
+            body: Body(email: email, code: code, verifier: verifier),
+            authenticated: false
+        ))
         return try decode(MobileExchangeResponse.self, from: data)
     }
 
@@ -316,6 +426,66 @@ actor APIClient {
         return response.artists ?? []
     }
 
+    // MARK: - Picks
+
+    func artistPicks() async throws -> ArtistPicksResponse {
+        try await get("api/me/picks", as: ArtistPicksResponse.self)
+    }
+
+    /// Ticketmaster search, charged to the caller's daily allowance. The only
+    /// artist search an account without a Spotify identity may use.
+    func searchPicks(query: String) async throws -> [PickSearchResult] {
+        let response = try await get(
+            "api/me/picks/search",
+            query: [URLQueryItem(name: "q", value: query)],
+            as: PickSearchResponse.self
+        )
+        return response.results ?? []
+    }
+
+    /// Only the ID is sent: the server takes the name from Ticketmaster,
+    /// because it becomes part of the shared dedup key.
+    @discardableResult
+    func addPick(attractionID: String) async throws -> ArtistPick {
+        struct Body: Encodable, Sendable { let attractionId: String }
+        let data = try await perform(try await makeRequest(
+            "POST", "api/me/picks", body: Body(attractionId: attractionID)
+        ))
+        return try decode(ArtistPick.self, from: data)
+    }
+
+    func removePick(attractionID: String) async throws {
+        _ = try await perform(try await makeRequest("DELETE", "api/me/picks/\(Self.pathSegment(attractionID))"))
+    }
+
+    func genrePicks() async throws -> GenrePicksResponse {
+        try await get("api/me/genres", as: GenrePicksResponse.self)
+    }
+
+    func availableGenres() async throws -> [TMGenre] {
+        try await get("api/me/genres/available", as: GenreCatalogResponse.self).genres ?? []
+    }
+
+    @discardableResult
+    func addGenre(genreID: String) async throws -> GenrePick {
+        struct Body: Encodable, Sendable { let genreId: String }
+        let data = try await perform(try await makeRequest(
+            "POST", "api/me/genres", body: Body(genreId: genreID)
+        ))
+        return try decode(GenrePick.self, from: data)
+    }
+
+    func removeGenre(genreID: String) async throws {
+        _ = try await perform(try await makeRequest("DELETE", "api/me/genres/\(Self.pathSegment(genreID))"))
+    }
+
+    /// One path segment, with `/` escaped too -- `.urlPathAllowed` keeps it.
+    private static func pathSegment(_ raw: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove("/")
+        return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+    }
+
     func subscribe(artistID: String) async throws {
         _ = try await perform(try await makeRequest("POST", "api/me/subscribed-artists/\(artistID)"))
     }
@@ -353,6 +523,37 @@ actor APIClient {
             body: Body(query: query, radiusMiles: radiusMiles)
         )
         return try decode(UserLocation.self, from: try await perform(request))
+    }
+
+    // MARK: - Profile and email address
+
+    /// PUT /api/me/profile. Offered only to accounts without a Spotify
+    /// identity: a Spotify account's name is rewritten at each sign-in.
+    func setDisplayName(_ name: String) async throws -> String {
+        struct Body: Codable, Sendable { let displayName: String }
+        let data = try await perform(try await makeRequest(
+            "PUT", "api/me/profile", body: Body(displayName: name)
+        ))
+        return try decode(Body.self, from: data).displayName
+    }
+
+    /// POST /api/me/email: mails a confirmation link and code. Nothing about
+    /// the account changes until one of them is used.
+    func requestEmailVerification(email: String) async throws {
+        struct Body: Encodable, Sendable { let email: String }
+        _ = try await perform(try await makeRequest("POST", "api/me/email", body: Body(email: email)))
+    }
+
+    /// POST /api/me/email/verify: the code from that mail. Success makes the
+    /// address the account's email and a way to sign in.
+    func verifyEmail(email: String, code: String) async throws {
+        struct Body: Encodable, Sendable {
+            let email: String
+            let code: String
+        }
+        _ = try await perform(try await makeRequest(
+            "POST", "api/me/email/verify", body: Body(email: email, code: code)
+        ))
     }
 
     // MARK: - Preferences and account

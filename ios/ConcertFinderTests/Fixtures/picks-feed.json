@@ -1,0 +1,58 @@
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.006,
+    "radius_miles": 25
+  },
+  "count": 1,
+  "events": [
+    {
+      "event_key": "33445566778899001122334455667788",
+      "date": "2026-12-04T00:30:00Z",
+      "local_date": "2026-12-03",
+      "venue": "Village Vanguard",
+      "city": "New York",
+      "state": "NY",
+      "country": "US",
+      "latitude": 40.7359,
+      "longitude": -74.0016,
+      "acts": [
+        {
+          "artist": {
+            "id": "tm:K8vZ917Gku7",
+            "name": "Brad Mehldau",
+            "genres": [
+              "Jazz"
+            ]
+          },
+          "dedup_key": "8899aabbccddeeff0011223344556677",
+          "subscribed": true
+        }
+      ],
+      "links": [
+        {
+          "source": "ticketmaster",
+          "url": "https://www.ticketmaster.com/event/vanguard"
+        }
+      ]
+    }
+  ],
+  "facets": {
+    "genres": [
+      {
+        "value": "Jazz",
+        "count": 1
+      }
+    ],
+    "venues": [
+      {
+        "value": "Village Vanguard",
+        "count": 1
+      }
+    ]
+  },
+  "computed_at": "2026-11-20T04:30:00Z",
+  "refreshing": false,
+  "complete": true,
+  "genre_horizon": "2027-01-15"
+}

@@ -10,6 +10,7 @@ import UIKit
 /// endpoint, and adding one would spend a round trip on data the feed
 /// response already carried.
 struct EventDetailView: View {
+    @Environment(AuthController.self) private var auth
     /// The event as the list that pushed this screen had it. Identity and
     /// fallback, never the source of the save/subscribe state — see `event`.
     private let pushed: Event
@@ -59,8 +60,12 @@ struct EventDetailView: View {
                 lineup
                 if !event.links.isEmpty { tickets }
                 actions
-                SpotifyAttribution()
-                    .frame(maxWidth: .infinity, alignment: .center)
+                // Spotify-derived data is on screen only for an account with a
+                // Spotify identity; a picks-only feed carries none (CF-36/37).
+                if auth.hasSpotify {
+                    SpotifyAttribution()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
             }
             .padding(Metrics.gutter)
         }

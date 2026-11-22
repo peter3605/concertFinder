@@ -168,6 +168,17 @@ struct ConcertsResponse: Codable, Sendable {
     /// Set when the shortfall was the daily upstream quota, which resets at
     /// this time. Absent when another scan could help sooner.
     let retryAfter: Date?
+    /// The account has no Spotify identity and no artist or genre picks, so
+    /// there is nothing to scan and the server queued nothing. Polling would
+    /// wait forever: onboarding's picks step is the answer. Omitted when
+    /// false, so optional.
+    var needsPicks: Bool? = nil
+    /// The genre part of this feed is a capped, date-sorted listing holding
+    /// every genre show before this venue-local day ("2006-01-02") and none
+    /// on or after it. Omitted when nothing was cut.
+    var genreHorizon: String? = nil
+
+    var requiresPicks: Bool { needsPicks ?? false }
 }
 
 struct SavedConcertsResponse: Codable, Sendable {
@@ -202,17 +213,103 @@ struct ArtistSearchResponse: Codable, Sendable {
 /// The current user.
 struct Me: Codable, Sendable, Equatable {
     let id: String
+    /// Empty for an account that never signed in with Spotify (Apple or
+    /// email). A disconnected Spotify account keeps it.
     let spotifyUserId: String
-    let displayName: String
-    let email: String?
+    /// Empty until onboarding asks, for an email account and for an Apple one
+    /// whose name was not shared.
+    var displayName: String
+    var email: String?
     var digestOptIn: Bool?
     var instantNotifyOptIn: Bool?
     var pushOptIn: Bool?
+    /// Providers this account can sign in with: "apple", "email", "spotify".
+    /// Optional because a cached profile written by an older build has none.
+    var authMethods: [String]?
 
     var hasEmail: Bool { !(email ?? "").isEmpty }
+
+    /// Whether anything this account sees can be Spotify-derived. Decides
+    /// the "Powered by Spotify" attribution and which artist search to use.
+    /// It is the identity, never "has picks": a Spotify account with picks
+    /// still sees Spotify-derived artists, and `/me/artists/search` is a 403
+    /// for everyone else (CF-32). Mirrors `hasSpotify` in web types.ts.
+    var hasSpotify: Bool { !spotifyUserId.isEmpty }
+
+    /// A name to show for the account. The Spotify ID was the old fallback
+    /// and is empty for everyone who signed in another way.
+    var accountName: String {
+        if !displayName.isEmpty { return displayName }
+        if !spotifyUserId.isEmpty { return spotifyUserId }
+        if let email, !email.isEmpty { return email }
+        return "Your account"
+    }
 }
 
-/// Response from POST /api/auth/mobile/exchange.
+// MARK: - Picks (CF-30, CF-31)
+
+/// `GET /api/me/picks` row. The name is Ticketmaster's, never the client's.
+struct ArtistPick: Codable, Hashable, Identifiable, Sendable {
+    let attractionId: String
+    let name: String
+    let genre: String?
+
+    var id: String { attractionId }
+}
+
+struct ArtistPicksResponse: Codable, Sendable {
+    let picks: [ArtistPick]?
+    let max: Int
+}
+
+/// `GET /api/me/picks/search` result.
+struct PickSearchResult: Codable, Hashable, Identifiable, Sendable {
+    let attractionId: String
+    let name: String
+    let genre: String?
+    let imageUrl: String?
+    let upcoming: Int
+    /// The name matches the query under folding: the likely answer.
+    let exact: Bool
+
+    var id: String { attractionId }
+
+    /// The subscription ID a picks feed's acts carry, so the bell and
+    /// instant alerts match. A Spotify account subscribes by Spotify ID.
+    var subscriptionID: String { "tm:\(attractionId)" }
+}
+
+struct PickSearchResponse: Codable, Sendable {
+    let query: String
+    let results: [PickSearchResult]?
+}
+
+/// `GET /api/me/genres` row.
+struct GenrePick: Codable, Hashable, Identifiable, Sendable {
+    let genreId: String
+    let name: String
+
+    var id: String { genreId }
+}
+
+struct GenrePicksResponse: Codable, Sendable {
+    let picks: [GenrePick]?
+    let max: Int
+}
+
+/// A top-level Ticketmaster music genre from `GET /api/me/genres/available`.
+struct TMGenre: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let name: String
+}
+
+struct GenreCatalogResponse: Codable, Sendable {
+    let genres: [TMGenre]?
+}
+
+/// Response from POST /api/auth/mobile/exchange, and the same body from
+/// every other app sign-in: Apple native, the email link and the email code
+/// (`writeBearerSession`), so one model covers all of them.
 struct MobileExchangeResponse: Codable, Sendable {
     let sessionToken: String
     let expiresAt: Date
@@ -235,6 +332,12 @@ struct SiteInfo: Codable, Sendable {
     /// tell a signup from a returning user, so a client that got this wrong
     /// would show or hide a field and could never admit anybody.
     let inviteRequired: Bool?
+    /// Whether `/api/auth/apple/*` is mounted. A rendering hint: absent or
+    /// false hides the button, since tapping it would only reach a 501.
+    var appleSignIn: Bool? = nil
+    /// Whether a new Spotify account could still be created. Spotify stays
+    /// capped at five, so this is false almost always; it only decides copy.
+    var spotifySignupsOpen: Bool? = nil
 }
 
 /// A 429 from the refresh endpoint.

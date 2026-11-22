@@ -51,9 +51,35 @@ struct RootView: View {
         case .updateRequired:
             UpdateRequiredView()
 
-        case .signedIn:
-            MainTabView(api: container.api, baseURL: container.baseURL)
+        case .signedIn(let me):
+            SignedInRoot(me: me)
         }
+    }
+}
+
+/// Between sign-in and the tabs: an account with nothing to build a feed
+/// from goes through the welcome steps first (OnboardingModel).
+private struct SignedInRoot: View {
+    let me: Me
+    @Environment(AppContainer.self) private var container
+    @Environment(OnboardingModel.self) private var onboarding
+
+    var body: some View {
+        Group {
+            switch onboarding.phase {
+            case .unknown, .checking:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.screenBackground)
+            case .active:
+                WelcomeView()
+            case .done:
+                MainTabView(api: container.api, baseURL: container.baseURL)
+            }
+        }
+        // Keyed on the account, so a different account signing in on this
+        // device is asked its own questions.
+        .task(id: me.id) { await onboarding.evaluate(me) }
     }
 }
 
@@ -183,94 +209,5 @@ enum AppStoreLink {
     static func url(appID: String?) -> URL? {
         guard let appID, !appID.isEmpty, appID.allSatisfy(\.isNumber) else { return nil }
         return URL(string: "itms-apps://apps.apple.com/app/id\(appID)")
-    }
-}
-
-struct LoginView: View {
-    @Environment(AuthController.self) private var auth
-    @State private var isSigningIn = false
-    @State private var inviteCode = ""
-
-    var body: some View {
-        VStack(spacing: Metrics.loose) {
-            Spacer()
-
-            VStack(spacing: Metrics.tight) {
-                Image(systemName: "music.mic")
-                    // A relative style rather than .system(size: 56): a fixed
-                    // point size ignores Dynamic Type, so at the largest
-                    // accessibility sizes the icon stays tiny while the text
-                    // around it triples.
-                    .font(.system(.largeTitle, design: .default))
-                    .imageScale(.large)
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityHidden(true) // decorative; the title says it
-                Text("ConcertFinder")
-                    .font(.largeTitle.weight(.bold))
-                Text("Shows near you, from the artists you already listen to.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Spacer()
-
-            VStack(spacing: Metrics.gutter) {
-                if auth.inviteRequired {
-                    VStack(alignment: .leading, spacing: Metrics.tight) {
-                        TextField("Invite code", text: $inviteCode)
-                            .textFieldStyle(.roundedBorder)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .submitLabel(.done)
-                            .accessibilityLabel("Invite code")
-                        // Names which half of the flow needs a code. Without
-                        // it an existing user reads the field as a wall and
-                        // never presses the button they are entitled to.
-                        Text("New accounts need an invite while ConcertFinder is in early access. Already have an account? Just continue — you don't need a code.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Button {
-                    isSigningIn = true
-                    Task {
-                        await auth.signIn(inviteCode: inviteCode)
-                        isSigningIn = false
-                    }
-                } label: {
-                    if isSigningIn {
-                        ProgressView().frame(maxWidth: .infinity)
-                    } else {
-                        Text("Continue with Spotify").frame(maxWidth: .infinity)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(isSigningIn)
-
-                if let error = auth.authError {
-                    // Development Mode gets the server's own wording — it is
-                    // a configuration state the user cannot retry past, and
-                    // "try again" would be wrong advice.
-                    Text(error.userMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-
-                Text("We never see your Spotify password, and your listening history is never stored.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-
-                SpotifyAttribution()
-            }
-            .padding(.bottom, Metrics.loose)
-        }
-        .padding(Metrics.loose)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.screenBackground)
     }
 }

@@ -14,6 +14,16 @@
 	     over valid TLS with no redirect. The association only starts working
 	     once IOS_APP_ID is set on the server — until then that route 404s by
 	     design, rather than serving an association naming an empty app. -->
+	<!-- Sign in with Apple (CF-37). The capability must also be enabled on
+	     the App ID com.concertfinder.ph in the developer portal; a device
+	     build whose provisioning profile lacks it fails to sign. The
+	     identity token this produces carries aud = the bundle ID, which is
+	     what POST /api/auth/apple/native accepts (APNS_BUNDLE_ID). -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:concertfinder.app</string>

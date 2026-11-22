@@ -53,6 +53,16 @@ each records a trap that recurs on any rebuild.*
 reaches the public through the manual-picks path. See `docs/public-path.md`,
 which also replaces §10.1.4's review notes and §10.2 below.*
 
+*2026-11-21 (CF-37): the app now has that path -- native Sign in with Apple,
+email sign-in (universal link and 6-digit code), and the artist and genre
+picker, with onboarding for accounts that have no Spotify. The build carries
+the `com.apple.developer.applesignin` entitlement, so **Sign in with Apple must
+also be enabled on the App ID** below (it lists only Push and Associated
+Domains), or a device build will not sign. `EmailWalkUITests` is the
+end-to-end check and skips without its environment variables; its header
+records two harness traps (unsigned simulator builds cannot use the Keychain,
+and parallel UI testing runs on a throwaway clone).*
+
 **1. Spotify Extended Quota Mode ([§3.2](#32-spotify-development-mode)) —
 start this first.** Multi-week turnaround, approval not guaranteed, and
 nothing downstream shortens it. Until it is granted, only allowlisted accounts

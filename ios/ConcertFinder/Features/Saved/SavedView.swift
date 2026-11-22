@@ -107,6 +107,7 @@ final class SavedModel {
 extension SavedModel: EventStore {}
 
 struct SavedView: View {
+    @Environment(AuthController.self) private var auth
     @Environment(SavedModel.self) private var model
 
     var body: some View {
@@ -166,9 +167,13 @@ struct SavedView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                SpotifyAttribution()
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, Metrics.loose)
+                // Spotify-derived data is on screen only for an account with a
+                // Spotify identity; a picks-only feed carries none (CF-36/37).
+                if auth.hasSpotify {
+                    SpotifyAttribution()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, Metrics.loose)
+                }
             }
             .padding(Metrics.gutter)
         }
