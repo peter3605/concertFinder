@@ -111,4 +111,19 @@ struct AppBundleTests {
         #expect(!iPhone.contains("UIInterfaceOrientationPortraitUpsideDown"))
         #expect(iPhone.contains("UIInterfaceOrientationPortrait"))
     }
+
+    /// The App Store listing exists (CF-15), so the update-required screen's
+    /// "Open App Store" button must have somewhere to go. `AppStoreLink`
+    /// returns nil -- hiding the button -- for an empty or unresolved
+    /// setting, and that fallback is silent by design, so only a test on the
+    /// built bundle notices the ID failing to make it through `project.yml`
+    /// and `Info.plist`. The ID is App Store Connect's Apple ID for
+    /// com.concertfinder.ph, which never changes once assigned.
+    @Test func appStoreLinkPointsAtTheListing() throws {
+        let url = try #require(
+            AppStoreLink.url(),
+            "CFAppStoreAppID is empty or unresolved in the built bundle, so the update-required screen hides its App Store button."
+        )
+        #expect(url.absoluteString == "itms-apps://apps.apple.com/app/id6838972709")
+    }
 }

@@ -191,10 +191,11 @@ struct UpdateRequiredView: View {
 
 /// The App Store listing for this app, if there is one yet.
 ///
-/// The app ID is assigned by App Store Connect on first submission, which has
-/// not happened — so `CFAppStoreAppID` is an empty build setting today. It is
-/// read rather than hardcoded so that filling it in is a one-line change in
-/// `project.yml` with no Swift touched.
+/// The app ID is App Store Connect's Apple ID for the listing (CF-15), set as
+/// `CF_APP_STORE_APP_ID` in `project.yml`. It is read rather than hardcoded so
+/// that it stays a build setting with no Swift touched, and an empty or
+/// unresolved value still hides the button instead of opening the store to
+/// nothing.
 enum AppStoreLink {
     static func url(bundle: Bundle = .main) -> URL? {
         url(appID: bundle.object(forInfoDictionaryKey: "CFAppStoreAppID") as? String)
