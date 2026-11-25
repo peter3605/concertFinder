@@ -1025,6 +1025,11 @@ milestone on either reading.
 
 ### 10.1.4 Review-notes text, ready to paste
 
+*Superseded 2026-11-25 (CF-20): **do not paste this.** It claims the 4.8
+exemption, which was withdrawn when Spotify became optional. The notes that
+ship are the `review_notes` block in `docs/store-copy.md`, checked by
+`scripts/release/check-store-copy.sh`. Kept for the reasoning only.*
+
 > ConcertFinder is a client for the user's own Spotify listening data. Users
 > sign in to Spotify to access their own content — their followed artists,
 > saved music and listening history — which is the entire product, so we
