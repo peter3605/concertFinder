@@ -126,7 +126,7 @@ final class ArtistsModel {
             if wasSubscribed {
                 try await api.unsubscribe(artistID: artist.id)
             } else {
-                try await api.subscribe(artistID: artist.id)
+                try await api.subscribe(artistID: artist.id, displayName: artist.name)
             }
         } catch {
             // Put it back — a control that lies about what it did is worse
@@ -241,7 +241,7 @@ private struct ArtistRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(artist.name)
+                Text(artist.displayName)
                 if let genres = artist.genres, !genres.isEmpty {
                     Text(genres.prefix(2).joined(separator: " · "))
                         .font(.caption)
@@ -255,8 +255,8 @@ private struct ArtistRow: View {
             .buttonStyle(.plain)
             .foregroundStyle(isSubscribed ? Color.accentColor : Color.secondary)
             .accessibilityLabel(isSubscribed
-                                ? "Stop alerts for \(artist.name)"
-                                : "Get alerts for \(artist.name)")
+                                ? "Stop alerts for \(artist.displayName)"
+                                : "Get alerts for \(artist.displayName)")
         }
     }
 }

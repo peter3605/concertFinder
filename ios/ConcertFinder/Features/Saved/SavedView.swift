@@ -66,7 +66,7 @@ final class SavedModel {
         setSubscribed(target, forArtist: act.artist.id)
         do {
             if target {
-                try await api.subscribe(artistID: act.artist.id)
+                try await api.subscribe(artistID: act.artist.id, displayName: act.artist.name)
             } else {
                 try await api.unsubscribe(artistID: act.artist.id)
             }

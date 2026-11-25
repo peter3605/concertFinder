@@ -486,8 +486,18 @@ actor APIClient {
         return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
     }
 
-    func subscribe(artistID: String) async throws {
-        _ = try await perform(try await makeRequest("POST", "api/me/subscribed-artists/\(artistID)"))
+    /// The name is sent because the server cannot look it up: the ID is
+    /// Spotify's or a `tm:` one, and the Artists screen lists whatever was
+    /// stored here. A POST without it stores a blank row (CF-42), which the
+    /// next `load()` renders with no name. Re-subscribing with a name fills a
+    /// blank row in, since the server keeps the existing name only when the
+    /// new one is empty.
+    func subscribe(artistID: String, displayName: String) async throws {
+        struct Body: Encodable, Sendable { let displayName: String }
+        _ = try await perform(try await makeRequest(
+            "POST", "api/me/subscribed-artists/\(artistID)",
+            body: Body(displayName: displayName)
+        ))
     }
 
     func unsubscribe(artistID: String) async throws {

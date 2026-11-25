@@ -204,6 +204,17 @@ struct SubscribedArtist: Codable, Hashable, Identifiable, Sendable {
     let id: String
     let name: String
     let genres: [String]?
+
+    /// What the Artists screen shows. Builds up to 1.0.0 (2) subscribed with
+    /// no name, and the server answers those rows with `""`; until the user
+    /// re-subscribes from a fixed build they stay blank, so the row must not
+    /// trust the data (CF-42).
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.unnamedFallback : trimmed
+    }
+
+    static let unnamedFallback = "Unnamed artist"
 }
 
 struct ArtistSearchResponse: Codable, Sendable {

@@ -23,6 +23,35 @@ final class StubURLProtocol: URLProtocol {
 
     nonisolated(unsafe) static var routes: [String: Route] = [:]
 
+    /// Every request this stub answered, in order, with its body. A test that
+    /// asserts on what was *sent* resets this first.
+    struct Recorded: Sendable {
+        let method: String
+        let path: String
+        let body: Data?
+    }
+
+    nonisolated(unsafe) static var recorded: [Recorded] = []
+
+    /// `URLSession` moves `httpBody` into `httpBodyStream` before a protocol
+    /// sees the request, so reading `httpBody` alone sees no body for every
+    /// request — which would make a "the body is missing" test pass on a
+    /// client that sends one.
+    private static func bodyData(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
+
     /// A session wired to this stub and nothing else. Ephemeral so no response
     /// is cached between tests.
     static func session() -> URLSession {
@@ -49,6 +78,11 @@ final class StubURLProtocol: URLProtocol {
         // An unrouted path answers 500 rather than hanging: a test that
         // forgot a route should fail, not time out.
         let route = Self.routes[url.path] ?? Route(status: 500)
+        Self.recorded.append(Recorded(
+            method: request.httpMethod ?? "GET",
+            path: url.path,
+            body: Self.bodyData(of: request)
+        ))
         let response = HTTPURLResponse(
             url: url,
             statusCode: route.status,
@@ -641,5 +675,63 @@ struct SessionLifecycleTests {
 
         #expect(store?.event(withKey: "evt-saved-only")?.acts.first?.isSubscribed == true)
         #expect(saved.error == nil)
+    }
+
+    // MARK: - CF-42: a subscription carries the artist's name
+
+    /// The `display_name` of every subscribe POST, in order. Failing to decode
+    /// one counts as no name, so a POST without a body reads as `nil`.
+    private static func subscribedNames() -> [String?] {
+        struct Body: Decodable { let display_name: String? }
+        return StubURLProtocol.recorded
+            .filter { $0.method == "POST" && $0.path.hasPrefix("/api/me/subscribed-artists/") }
+            .map { record in
+                record.body.flatMap { try? JSONDecoder().decode(Body.self, from: $0) }?.display_name
+            }
+    }
+
+    /// The feed card and the event detail screen both subscribe through
+    /// `FeedModel`. Build 2 sent no body here, and the Artists screen then
+    /// listed the subscription with no name.
+    @Test @MainActor func subscribingFromTheFeedSendsTheArtistsName() async throws {
+        Self.signedInRoutes()
+        StubURLProtocol.routes["/api/me/subscribed-artists/a1"] = .init(status: 200)
+        let feed = FeedModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+        await feed.load()
+        let act = try #require(feed.event(withKey: "evt-1")?.acts.first)
+        StubURLProtocol.recorded = []
+
+        await feed.toggleSubscribe(act: act)
+
+        #expect(Self.subscribedNames() == ["Turnstile"])
+        #expect(feed.error == nil)
+    }
+
+    @Test @MainActor func subscribingFromSavedSendsTheArtistsName() async throws {
+        let (_, saved) = await Self.loadedModels()
+        StubURLProtocol.routes["/api/me/subscribed-artists/a9"] = .init(status: 200)
+        let act = try #require(saved.event(withKey: "evt-saved-only")?.acts.first)
+        StubURLProtocol.recorded = []
+
+        await saved.toggleSubscribe(act: act)
+
+        #expect(Self.subscribedNames() == ["Bikini Kill"])
+    }
+
+    /// The trap path. The Artists screen *looked* fixed on build 2, because
+    /// `toggle` appends the search result (which has the name) to its own
+    /// list. The POST was as bare as the feed's, so the next `load()` read a
+    /// blank row back. Asserting on `model.subscribed` right after the tap
+    /// passes on the broken build; what was sent is what survives a reload.
+    @Test @MainActor func subscribingFromArtistsSearchSendsTheArtistsName() async {
+        Self.signedInRoutes()
+        StubURLProtocol.routes["/api/me/subscribed-artists/tm:K8vZ9171"] = .init(status: 200)
+        let model = ArtistsModel(api: StubURLProtocol.makeClient(tokens: StubTokenStore()))
+        StubURLProtocol.recorded = []
+
+        await model.toggle(SubscribedArtist(id: "tm:K8vZ9171", name: "Fugazi", genres: nil))
+
+        #expect(Self.subscribedNames() == ["Fugazi"])
+        #expect(model.error == nil)
     }
 }
