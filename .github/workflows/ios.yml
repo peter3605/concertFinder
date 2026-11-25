@@ -28,6 +28,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Every plist, privacy manifest and entitlements file under ios/, parsed as
+  # strict XML. App Store processing rejected build 1.0.0 (2) with ITMS-91056
+  # because PrivacyInfo.xcprivacy had a double hyphen inside a comment, which
+  # XML forbids, and NOTHING here noticed: plutil -lint, xcodebuild and the
+  # build job below all accept it, because Apple's own parser is lenient and
+  # the manifest is copied into the bundle verbatim (CF-43). Python's expat is
+  # not lenient, which is the point. On ubuntu because it needs no Xcode and a
+  # macOS runner bills at roughly ten times the rate.
+  plist-xml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse every plist as strict XML
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find ios -type f \( -name '*.plist' \
+            -o -name '*.xcprivacy' -o -name '*.entitlements' \) -print0)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::found no plist files under ios/; the find is wrong"
+            exit 1
+          fi
+          python3 -B scripts/release/lib/release_kit.py strict-xml "${files[@]}"
+
   build:
     runs-on: macos-latest
     steps:

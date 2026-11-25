@@ -12,7 +12,8 @@
 #   - ExportOptions.plist names a team, exports for App Store Connect, and
 #     leaves the build number alone
 #   - Info.plist declares ITSAppUsesNonExemptEncryption
-#   - the privacy manifest exists and gives a reason for every API it declares
+#   - the privacy manifest exists, is well-formed XML as written (no "--" in a
+#     comment: CF-43), and gives a reason for every API it declares
 #   - each bundle's .entitlements file asks for what REQUIRED_ENTITLEMENTS needs
 #   - store copy fits App Store Connect's limits
 #   - no log line is un-redacted outside the allowlist

@@ -11,6 +11,7 @@ where it can be tested without a Mac.
     release_kit.py export-options PLIST
     release_kit.py info-plist     PLIST
     release_kit.py privacy-manifest PLIST
+    release_kit.py strict-xml     FILE...              parse each as XML with no leniency
 
 Every subcommand prints what it checked and exits 1 on a failure, 0 otherwise,
 2 on bad usage.
@@ -146,7 +147,7 @@ def check_entitlements(ents, specs, source=False):
 COMMENT_RE = re.compile(rb"<!--.*?-->", re.DOTALL)
 
 
-def load_plist(path):
+def load_plist(path, strict=False):
     with open(path, "rb") as f:
         data = f.read()
     # codesign prints a blob header before the XML on some macOS versions.
@@ -157,11 +158,31 @@ def load_plist(path):
         return {}
     try:
         return plistlib.loads(data)
-    except ExpatError:
+    except ExpatError as e:
+        if strict:
+            raise ValueError(f"{os.path.basename(path)} is not well-formed XML ({e}). "
+                             "App Store processing parses a bundled privacy manifest strictly, "
+                             "and a double hyphen inside a comment is the usual cause: it was "
+                             "rejected as ITMS-91056 (CF-43)") from e
         # Apple's parser accepts "--" inside an XML comment and expat does not,
         # and a hand-commented Info.plist uses it as a dash. Comments carry
-        # nothing a check reads, so drop them and parse what is left.
+        # nothing a check reads, so drop them and parse what is left. That is
+        # safe only for a file Xcode re-serialises (Info.plist, entitlements):
+        # a privacy manifest is copied into the bundle byte for byte, so it is
+        # loaded with strict=True instead. This fallback is exactly what hid
+        # the defect that got build 1.0.0 (2) rejected.
         return plistlib.loads(COMMENT_RE.sub(b"", data))
+
+
+def strict_xml(paths):
+    """[(path, error)] for each file expat will not parse as written."""
+    bad = []
+    for path in paths:
+        try:
+            load_plist(path, strict=True)
+        except (ValueError, plistlib.InvalidFileException) as e:
+            bad.append((path, str(e)))
+    return bad
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +361,7 @@ def main(argv=None):
     p.add_argument("--dirs", nargs="+", required=True); p.add_argument("--allow", nargs="*", default=[])
     for name in ("export-options", "info-plist", "privacy-manifest"):
         p = sub.add_parser(name); p.add_argument("plist")
+    p = sub.add_parser("strict-xml"); p.add_argument("files", nargs="+")
     a = ap.parse_args(argv)
 
     try:
@@ -382,7 +404,15 @@ def main(argv=None):
         if a.cmd == "info-plist":
             return _report(check_info_plist(load_plist(a.plist)), os.path.basename(a.plist))
         if a.cmd == "privacy-manifest":
-            return _report(check_privacy_manifest(load_plist(a.plist)), os.path.basename(a.plist))
+            return _report(check_privacy_manifest(load_plist(a.plist, strict=True)),
+                           os.path.basename(a.plist))
+        if a.cmd == "strict-xml":
+            bad = strict_xml(a.files)
+            for path, err in bad:
+                print(f"!! {err}")
+            if not bad:
+                print(f"   strict XML: {len(a.files)} file(s) parse as written")
+            return 1 if bad else 0
     except (OSError, ValueError, plistlib.InvalidFileException, ExpatError) as e:
         print(f"!! {e}")
         return 1
