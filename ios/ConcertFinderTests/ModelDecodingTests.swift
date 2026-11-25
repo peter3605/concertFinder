@@ -239,6 +239,26 @@ struct ModelDecodingTests {
         #expect(TicketLink(source: "ticketmaster", url: nil).label == "Ticketmaster")
         #expect(TicketLink(source: "official", url: nil).label == "Official site")
     }
+
+    /// CF-42: rows subscribed from build 2 come back with `"name": ""`, and
+    /// they stay that way until the user re-subscribes from a fixed build.
+    /// The Artists screen renders `displayName`, so a blank row is impossible
+    /// whatever the data says.
+    @Test func aSubscriptionWithNoNameStillHasALabel() throws {
+        let json = Data("""
+        {"artists": [
+          {"id": "a1", "name": ""},
+          {"id": "a2", "name": "   "},
+          {"id": "a3", "name": " Turnstile "}
+        ]}
+        """.utf8)
+        let artists = try Self.decoder.decode(ArtistSearchResponse.self, from: json).artists
+
+        #expect(artists.map(\.displayName) == [
+            SubscribedArtist.unnamedFallback, SubscribedArtist.unnamedFallback, "Turnstile",
+        ])
+        #expect(!SubscribedArtist.unnamedFallback.isEmpty)
+    }
 }
 
 /// Anchors `Bundle(for:)` to the test bundle so fixtures resolve.
