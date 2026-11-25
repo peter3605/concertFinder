@@ -79,6 +79,7 @@ struct FeedView: View {
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Metrics.cardSpacing, pinnedViews: [.sectionHeaders]) {
+                updatedLine
                 banners
 
                 ForEach(model.sections, id: \.key) { section in
@@ -235,6 +236,27 @@ struct FeedView: View {
         return true
     }
 
+    /// When the feed was computed, e.g. "Updated 12 min. ago".
+    ///
+    /// In the content, not the toolbar. It was a leading ToolbarItem, and on
+    /// iOS 26 a toolbar item is drawn in a glass capsule sized for an icon,
+    /// so it read "Upd…" for good on every iPhone (CF-B31) -- while the
+    /// trailing Search again and Filters buttons, which it was competing with,
+    /// cannot give up their room. Here it gets the full width under the large
+    /// title on every OS this app supports. Do not hide it to save space: it is
+    /// the only on-screen clue to when the 15-minute manual-refresh throttle,
+    /// measured from this instant, lifts.
+    @ViewBuilder
+    private var updatedLine: some View {
+        if let computedAt = model.computedAt {
+            Text("Updated \(computedAt.relativeDescription)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("feed-updated")
+        }
+    }
+
     private var emptyState: some View {
         ContentUnavailableView {
             Label(emptyTitle, systemImage: hasLoadFailure ? "exclamationmark.triangle" : "music.mic")
@@ -248,6 +270,10 @@ struct FeedView: View {
             } else {
                 Text("Nothing coming up near you yet. We check daily and will notify you when something lands.")
             }
+            // The toolbar showed this on the empty screen too, and the
+            // throttle it explains applies here just the same.
+            updatedLine
+                .padding(.top, 4)
         } actions: {
             // ContentUnavailableView does not scroll, so "pull to refresh" was
             // advice the user could not follow from the only screen that
@@ -292,13 +318,6 @@ struct FeedView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            if let computedAt = model.computedAt {
-                Text("Updated \(computedAt.relativeDescription)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 Task { await model.requestRescan() }
