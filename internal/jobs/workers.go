@@ -200,16 +200,7 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 			"rate_capped", incomplete.RateCapped,
 			"found", len(found),
 		}
-		for _, s := range reservations.Stats() {
-			// granted < wanted means the day's cap was already partly spent
-			// when this scan started. denied > 0 means a call was actually
-			// turned away. They are different failures with different fixes —
-			// raise the cap versus stop scanning so often — and the old line
-			// could not tell them apart.
-			attrs = append(attrs, string(s.Source), fmt.Sprintf(
-				"granted=%d/%d used=%d denied=%d", s.Granted, s.Wanted, s.Used, s.Denied,
-			))
-		}
+		attrs = append(attrs, quotaAttrs(reservations)...)
 		slog.Warn("scan_concerts incomplete", attrs...)
 	default:
 		return searchErr
@@ -229,13 +220,18 @@ func (w *ScanConcertsWorker) Work(ctx context.Context, job *river.Job[ScanConcer
 	if err := persistScanResults(ctx, w.Pool, user.ID, loc, found, incomplete == nil, retryAfter, genreHorizon); err != nil {
 		return err
 	}
-	slog.Info("scan_concerts done",
+	// Quota accounting goes on the success line too (read before the deferred
+	// Release zeroes it). A Songkick refusal no longer makes a scan incomplete
+	// (CF-B30), so without this the only record that the fallback ran short of
+	// its per-user cap would be gone -- and "how close is TM to its cap on a
+	// normal night" is the number a cap change is decided on.
+	slog.Info("scan_concerts done", append([]any{
 		"user", user.ID,
 		"location", LocationKey(loc),
 		"concerts", len(found),
 		"complete", incomplete == nil,
 		"retry_after", retryAfter,
-	)
+	}, quotaAttrs(reservations)...)...)
 
 	// Notification hooks. Both fire only when the user opted into that
 	// channel AND is subscribed to at least one artist that had a net-new
@@ -415,6 +411,24 @@ func persistScan(ctx context.Context, store concertStore, rows []db.ConcertRow, 
 		return err
 	}
 	return store.UpsertConcertSnapshot(persistCtx, snap)
+}
+
+// quotaAttrs renders a scan's per-source accounting as log attributes, one
+// "granted=G/W used=U denied=D" value per source.
+//
+// granted < wanted means the day's cap was already partly spent when this scan
+// started. denied > 0 means a call was actually turned away. They are
+// different failures with different fixes — raise the cap versus stop
+// scanning so often — and a bare rate_capped boolean could not tell them
+// apart. Call before Release, which zeroes granted and used.
+func quotaAttrs(rs *rate.Reservations) []any {
+	var attrs []any
+	for _, s := range rs.Stats() {
+		attrs = append(attrs, string(s.Source), fmt.Sprintf(
+			"granted=%d/%d used=%d denied=%d", s.Granted, s.Wanted, s.Used, s.Denied,
+		))
+	}
+	return attrs
 }
 
 // isOnlyRateCapped reports whether quota exhaustion was the sole reason a

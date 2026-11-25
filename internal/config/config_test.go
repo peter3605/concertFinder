@@ -45,6 +45,15 @@ func loadDefaults(t *testing.T) *Config {
 // version compared against MaxScoredArtists alone, which is the WARM cost, so
 // it passed a 250 cap that covered 125 of 200 artists. Ticketmaster
 // resolution is two-stage and a first-ever scan pays for both stages.
+//
+// Ticketmaster alone, deliberately. Songkick's cap (100) is below what a scan
+// can ask of it -- every escalating artist costs 2 permits and a normal scan
+// escalates more than 50 -- and that is fine because the cap bounds Songkick
+// by refusing: a refused lookup falls through to Tier B and is the fallback
+// running short, which never makes a scan incomplete. Only Ticketmaster
+// exhaustion does (rate.Reservations.PrimaryExhausted, CF-B30). The earlier
+// reason given here, that Songkick "only sees escalating artists", was true
+// and not enough: until CF-B30 a Songkick refusal locked refresh for the day.
 func TestDailyCapsCoverAColdScan(t *testing.T) {
 	cfg := loadDefaults(t)
 	coldScanCost := spotify.MaxScoredArtists * ticketmaster.CallsPerArtistColdScan
