@@ -14,9 +14,18 @@
 	     checked mechanically against the binary. NSPrivacyCollectedDataTypes
 	     describes what leaves the device; it feeds the privacy report Xcode
 	     generates and must agree with the App Store Connect privacy labels, so
-	     it is kept here deliberately -- one artifact rather than two that
+	     it is kept here deliberately: one artifact rather than two that
 	     drift. It mirrors the table in public-path.md §6.3 exactly (which
-	     supersedes ios-app-plan.md §9); change them together. -->
+	     supersedes ios-app-plan.md §9); change them together.
+
+	     Never write a double hyphen anywhere in these comments, not even as a
+	     dash. XML forbids it inside a comment. `plutil -lint` and every build
+	     accept it, because Apple's plist parser is lenient and this file is
+	     copied into the bundle verbatim, but App Store processing parses it
+	     strictly and rejected build 1.0.0 (2) for it with ITMS-91056 ("Invalid
+	     privacy manifest"), after upload (CF-43). The release kit's
+	     privacy-manifest check and ios.yml's plist-xml job now parse it
+	     strictly too. -->
 
 	<!-- No tracking, in Apple's sense: nothing here is linked with data from
 	     other companies' apps or sites for advertising or measurement, and
@@ -118,9 +127,9 @@
 			</array>
 		</dict>
 		<!-- Deliberately absent: the Spotify listening data the feed is built
-		     from. It is never persisted anywhere -- held in memory on the
+		     from. It is never persisted anywhere; it is held in memory on the
 		     server and discarded once the affinity profile is derived, per the
-		     ToS constraints in CLAUDE.md -- so there is no data type to
+		     ToS constraints in CLAUDE.md, so there is no data type to
 		     declare. This is a real property of the system, not an omission. -->
 	</array>
 

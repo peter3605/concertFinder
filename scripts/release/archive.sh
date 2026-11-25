@@ -100,6 +100,21 @@ done
 
 "$SCRIPT_DIR/verify-entitlements.sh" --app "$APP"
 
+# Every privacy manifest in the export, the app's and any a dependency bundles,
+# parsed strictly. They are copied into the bundle verbatim and App Store
+# processing rejects one that is not well-formed XML (ITMS-91056), after the
+# upload and with nothing local having complained: plutil and Xcode both accept
+# a double hyphen inside a comment, which is what got 1.0.0 (2) rejected (CF-43).
+echo "==> Checking the privacy manifests in the export"
+manifests=()
+while IFS= read -r -d '' f; do manifests+=("$f"); done \
+  < <(find "$APP" -name 'PrivacyInfo.xcprivacy' -print0)
+if [[ ${#manifests[@]} -eq 0 ]]; then
+  echo "!! The export carries no PrivacyInfo.xcprivacy"
+  exit 1
+fi
+"${KIT_PY[@]}" strict-xml "${manifests[@]}"
+
 # All of BUILD_DIR: the unpacked export, the archive, and the derived data
 # where xcodebuild writes the environment of every task.
 "$SCRIPT_DIR/check-build-secrets.sh" "$BUILD_DIR"
