@@ -162,3 +162,44 @@ func TestReservationsAnyExhausted(t *testing.T) {
 		t.Error("unlimited source should still allow after another source capped")
 	}
 }
+
+// CF-B30. A normal scan escalates more artists to the fallback than the
+// per-user Songkick cap covers, so a refused Songkick permit is routine. It
+// must not read as a lost feed: that stamped complete=false and a retry_after
+// of next midnight, and locked manual refresh for the day, while Ticketmaster
+// still had most of its block unspent. Ticketmaster running out still must.
+func TestPrimaryExhaustedIgnoresSongkick(t *testing.T) {
+	rs := &Reservations{blocks: map[Source]*Reservation{
+		SourceTicketmaster: {granted: 400},
+		SourceSongkick:     {granted: 100},
+	}}
+	// Spend Songkick exactly as the fallback does: two permits per lookup,
+	// until the cap refuses one.
+	for rs.TakeN(SourceSongkick, 2) {
+	}
+	if !rs.Exhausted(SourceSongkick) {
+		t.Fatal("setup: Songkick should have refused a lookup")
+	}
+	if got := rs.Stats(); got[1].Used != 100 {
+		t.Fatalf("Songkick spend must stop at the cap: used=%d, want 100", got[1].Used)
+	}
+	if rs.PrimaryExhausted() {
+		t.Error("a Songkick-only refusal made the scan read as quota-capped; " +
+			"that sets retry_after to midnight and locks refresh for the day")
+	}
+	if !rs.AnyExhausted() {
+		t.Error("AnyExhausted should still see the Songkick refusal")
+	}
+
+	rs.TakeN(SourceTicketmaster, 401) // more than the block holds
+	if !rs.PrimaryExhausted() {
+		t.Error("a refused Ticketmaster permit is a lost artist and must still mark the scan capped")
+	}
+}
+
+func TestPrimaryExhaustedNilAllowsEverything(t *testing.T) {
+	var rs *Reservations
+	if rs.PrimaryExhausted() {
+		t.Error("nil reservations are unlimited and can never be exhausted")
+	}
+}

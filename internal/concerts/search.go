@@ -342,7 +342,10 @@ func Search(ctx context.Context, d SearchDeps, artists []Target, loc Location) (
 
 	out := m.All()
 	nSkipped := int(skipped.Load())
-	capped := rate.FromContext(ctx).AnyExhausted()
+	// Ticketmaster only. A refused Songkick permit is the fallback running
+	// short, which by the reasoning below is logged rather than treated as
+	// incompleteness (CF-B30; see rate.Reservations.PrimaryExhausted).
+	capped := rate.FromContext(ctx).PrimaryExhausted()
 
 	// Falling short on fallback coverage is expected on a cold profile and is
 	// deliberately NOT an incompleteness signal. The fallback is best-effort
@@ -570,7 +573,7 @@ func loadOrFetchTM(ctx context.Context, d SearchDeps, artistID, attractionID str
 	//
 	// A refusal is not an error here: page 0 already succeeded, so there are
 	// real events to return. It is recorded as a denial on the reservation,
-	// which rate.Reservations.AnyExhausted reports at the top of Search and
+	// which rate.Reservations.PrimaryExhausted reports at the end of Search and
 	// which becomes IncompleteError.RateCapped — so the snapshot is marked
 	// incomplete and retried after the UTC day rolls over, without this call
 	// site having to say anything.

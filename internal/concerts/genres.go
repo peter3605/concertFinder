@@ -129,7 +129,10 @@ func SearchGenres(ctx context.Context, d SearchDeps, genres []GenreTarget, loc L
 	out := Near(m.All(), loc)
 	out, horizon = capGenreFeed(out, horizon, MaxGenreFeedConcerts)
 
-	capped := rate.FromContext(ctx).AnyExhausted()
+	// Ticketmaster only, as in Search: genre listings never touch Songkick,
+	// and a Songkick refusal elsewhere in the same scan is not this listing's
+	// shortfall (CF-B30).
+	capped := rate.FromContext(ctx).PrimaryExhausted()
 	if skipped > 0 || capped {
 		return out, horizon, &IncompleteError{
 			SkippedArtists: skipped,

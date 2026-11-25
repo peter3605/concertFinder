@@ -518,6 +518,30 @@ func (r *Reservations) AnyExhausted() bool {
 	return false
 }
 
+// PrimaryExhausted reports whether a source whose exhaustion makes a scan
+// INCOMPLETE ran out. That is Ticketmaster alone, and the distinction from
+// AnyExhausted is what CF-B30 fixed.
+//
+// Ticketmaster is the primary source: a refused TM permit is an artist whose
+// shows were never asked for, so the scan really is short and the only remedy
+// is the UTC day rolling over -- which is what complete=false plus a
+// retry_after of next midnight says. Songkick is the first tier of the
+// fallback chain. A refused Songkick permit drops that artist through to Tier
+// B, the same as a spent FallbackBudget, and running the fallback short has
+// never been incompleteness (concerts.Search explains why: flagging it would
+// mark nearly every cold scan stale). Counting Songkick here did exactly that:
+// a normal 200-artist scan escalated ~73 artists x 2 permits past the 100/day
+// Songkick cap, the whole scan was stamped rate_capped with Ticketmaster 217
+// permits under its own cap, and manual refresh said "daily limit reached"
+// for the rest of the day.
+//
+// The per-user Songkick cap still bounds the spend -- TakeN refuses past it --
+// so a scan can never spend more Songkick than the cap allows; it just no
+// longer reports that refusal as a lost feed. Stats still records it.
+func (r *Reservations) PrimaryExhausted() bool {
+	return r.Exhausted(SourceTicketmaster)
+}
+
 // Stat is one source's accounting for a single scan.
 type Stat struct {
 	Source  Source
