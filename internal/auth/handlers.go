@@ -119,13 +119,9 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
-			// A sentence rather than JSON for the app: it reaches /login
-			// through a web view, not URLSession. The web flow goes back to
-			// the sign-in page instead, which can say the same thing beside
-			// the field the code was typed into.
-			d.refuse(w, r, appChallenge != "", LoginErrorInviteInvalid, "",
-				"That invite code is not valid. It may have already been used, or it may have expired. "+
-					"Check it for typos, or ask whoever sent it for another.")
+			// A redirect rather than JSON for both clients: /login is reached
+			// through a browser or ASWebAuthenticationSession, not URLSession.
+			d.refuse(w, r, appChallenge != "", LoginErrorInviteInvalid, "")
 			return
 		}
 	}
@@ -222,9 +218,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 				"remedy", "add the account under User Management at https://developer.spotify.com/dashboard")
 			// Nothing was admitted, so an invite this person brought is
 			// unspent and goes back to the page with them.
-			d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyNotRegistered, hs.InviteCode,
-				"This app is still in Spotify's development mode, so only accounts the operator "+
-					"has added can sign in. Ask them to add your Spotify account email, then try again.")
+			d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyNotRegistered, hs.InviteCode)
 			return
 		}
 		slog.Error("spotify /me failed", "err", err)
@@ -259,11 +253,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// unspent. Like the other refusals it names nobody: no user row was
 		// written, so there is nothing of theirs to log.
 		slog.Info("signup refused: spotify user cap reached")
-		d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyFull, hs.InviteCode,
-			"ConcertFinder can't take any more Spotify accounts right now. "+
-				"If you have an invite code it has not been used, so you can still sign up another way. "+
-				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
-				"existing accounts are never affected.")
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorSpotifyFull, hs.InviteCode)
 		return
 	case errors.Is(err, db.ErrInviteRequired):
 		// A refusal, not a fault, and the same shape as the Development Mode
@@ -275,11 +265,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// hold Spotify-derived data for a non-user. The event is the useful
 		// part: it tells the operator people are arriving without codes.
 		slog.Info("signup refused: no invite code")
-		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteRequired, "",
-			"ConcertFinder is invite-only at the moment, so creating a new account needs an invite code. "+
-				"If you have one, start again from the sign-in page and enter it there. "+
-				"If you already have a ConcertFinder account, sign in with that Spotify account instead — "+
-				"existing accounts never need a code.")
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteRequired, "")
 		return
 	case errors.Is(err, db.ErrInviteInvalid):
 		// Distinct from the above on purpose. "Your code did not work" and
@@ -293,9 +279,7 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// "why didn't my invite work", and unlike the Spotify ID it names
 		// something they issued rather than somebody who was turned away.
 		slog.Info("signup refused: invite not redeemable", "code", hs.InviteCode)
-		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteInvalid, "",
-			"That invite code is no longer valid — it may have just been used up, or expired. "+
-				"Ask whoever sent it for another.")
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteInvalid, "")
 		return
 	case err != nil:
 		slog.Error("upsert user failed", "err", err)
@@ -388,10 +372,11 @@ func (d *Deps) handleMe(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(userPayload(full))
 }
 
-// Refusal codes the web sign-in page understands, carried as
-// /login?error=<code>. web/src/pages/login.tsx maps each to a message and to
-// the tab it belongs on, so renaming one here strands it there as a generic
-// error. Like the refusals themselves they describe the attempt, never the
+// Refusal codes both clients understand, carried as /login?error=<code> on
+// the web and as MOBILE_CALLBACK_URL?error=<code> to the app.
+// web/src/pages/login.tsx and the iOS AuthController.refusal each map them
+// to a message, so renaming one here strands it in both as a generic error
+// (and the iOS copy is on phones that never update). Like the refusals themselves they describe the attempt, never the
 // person: no Spotify ID or name ever rides in the URL.
 const (
 	LoginErrorInviteRequired       = "invite_required"
@@ -411,26 +396,45 @@ const loginPagePath = "/login"
 // no way back, reached after Spotify's consent screen, which is the moment a
 // new person is least likely to try again.
 //
-// An app-initiated login keeps the sentence. It runs inside
-// ASWebAuthenticationSession, which ends only on the universal link; a
-// redirect to a web page would strand the app on a page it never returns
-// from.
+// An app-initiated login goes back to the app the same way: to
+// MOBILE_CALLBACK_URL with error=<code> in place of code=<one-time code>.
+// It runs inside ASWebAuthenticationSession, which ends only on that
+// universal link. Until CF-44 it ended on a text/plain 403 instead, a bare
+// page whose only exit was Cancel — which the app reads as the user
+// dismissing the sheet, so the reason was shown nowhere. Each client owns
+// the wording for a code (login.tsx's REFUSALS, AuthController.refusal);
+// the server sends only the code.
 //
 // invite is passed back only when the refusal spent nothing, so a person
-// holding a valid code does not have to find and retype it.
-func (d *Deps) refuse(w http.ResponseWriter, r *http.Request, appFlow bool, code, invite, message string) {
+// holding a valid code does not have to find and retype it. Nothing else
+// rides in either URL: the refusal describes the attempt, never the person.
+func (d *Deps) refuse(w http.ResponseWriter, r *http.Request, appFlow bool, code, invite string) {
 	if appFlow {
-		http.Error(w, message, http.StatusForbidden)
+		http.Redirect(w, r, d.mobileRefusalURL(code, invite), http.StatusFound)
 		return
 	}
 	http.Redirect(w, r, loginRefusalURL(code, invite), http.StatusFound)
 }
 
 func loginRefusalURL(code, invite string) string {
+	return loginPagePath + "?" + refusalQuery(code, invite)
+}
+
+// mobileRefusalURL is mobileCallbackURL's refusal twin. It carries no code,
+// so the app has nothing to send to /mobile/exchange.
+func (d *Deps) mobileRefusalURL(code, invite string) string {
+	sep := "?"
+	if strings.Contains(d.MobileCallbackURL, "?") {
+		sep = "&"
+	}
+	return d.MobileCallbackURL + sep + refusalQuery(code, invite)
+}
+
+func refusalQuery(code, invite string) string {
 	q := url.Values{}
 	q.Set("error", code)
 	if invite != "" {
 		q.Set("invite", invite)
 	}
-	return loginPagePath + "?" + q.Encode()
+	return q.Encode()
 }

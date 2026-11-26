@@ -183,6 +183,46 @@ struct SignInAndPicksTests {
         #expect(APIClient.serverMessage(Data()) == nil)
     }
 
+    // CF-44: a refused Spotify sign-in comes back on the universal link as
+    // error=<code> rather than code=<one-time code>.
+    @Test func callbackCarryingACodeIsExchanged() throws {
+        let url = try #require(URL(string: "https://concertfinder.app/app/auth/callback?code=abc123"))
+        #expect(AuthController.callbackOutcome(url) == .code("abc123"))
+    }
+
+    @Test(arguments: ["spotify_not_registered", "spotify_full", "invite_required", "invite_invalid"])
+    func callbackRefusalIsReadAndWorded(code: String) throws {
+        let url = try #require(URL(string:
+            "https://concertfinder.app/app/auth/callback?error=\(code)&invite=CF-ABCD-EFGH"))
+        #expect(AuthController.callbackOutcome(url) == .refused(code))
+        let message = AuthController.refusalMessage(code)
+        #expect(message != AuthController.refusalMessage("something_new"))
+        #expect(!message.contains(code))
+    }
+
+    @Test func spotifyRefusalsPointElsewhere() {
+        for code in ["spotify_not_registered", "spotify_full"] {
+            let message = AuthController.refusalMessage(code)
+            #expect(message.contains("Spotify sign-in is limited"))
+            #expect(message.contains("email"))
+            #expect(message.contains("Apple"))
+        }
+    }
+
+    @Test func unknownRefusalFallsBackToGenericMessage() throws {
+        let url = try #require(URL(string: "https://concertfinder.app/app/auth/callback?error=something_new"))
+        #expect(AuthController.callbackOutcome(url) == .refused("something_new"))
+        #expect(AuthController.refusalMessage("something_new") == "Sign-in didn't complete. Please try again.")
+    }
+
+    @Test func errorWinsOverCodeAndEmptyIsNeither() throws {
+        // Never sent together, but if they were the exchange must not run.
+        let both = try #require(URL(string: "https://concertfinder.app/app/auth/callback?code=abc&error=invite_required"))
+        #expect(AuthController.callbackOutcome(both) == .refused("invite_required"))
+        let empty = try #require(URL(string: "https://concertfinder.app/app/auth/callback?error=&code="))
+        #expect(AuthController.callbackOutcome(empty) == .empty)
+    }
+
     @Test func inviteRefusalsAreWorded() {
         let required = AuthController.signInError(.server(status: 403, message: "invite_required"))
         #expect(required.userMessage.contains("invite"))

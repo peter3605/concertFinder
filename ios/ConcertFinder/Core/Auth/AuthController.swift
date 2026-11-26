@@ -172,14 +172,17 @@ final class AuthController: NSObject {
 
         do {
             let callbackURL = try await presentWebAuth(startingAt: loginURL)
-            guard let code = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "code" })?.value
-            else {
+            switch Self.callbackOutcome(callbackURL) {
+            case .code(let code):
+                let result = try await api.exchangeMobileCode(code: code, verifier: verifier)
+                await finishSignIn(result)
+            case .refused(let reason):
+                // The server turned the sign-in down and said why. Nothing
+                // was minted, so there is nothing to exchange.
+                authError = .unknown(Self.refusalMessage(reason))
+            case .empty:
                 authError = .unknown("Sign-in finished without a code. Please try again.")
-                return
             }
-            let result = try await api.exchangeMobileCode(code: code, verifier: verifier)
-            await finishSignIn(result)
         } catch let error as APIError {
             authError = error
         } catch is CancellationError {
@@ -365,6 +368,52 @@ final class AuthController: NSObject {
             return .unknown("Too many sign-in attempts. Wait a few minutes and try again.")
         default:
             return error
+        }
+    }
+
+    /// What the universal link that ended the auth sheet carries.
+    enum CallbackOutcome: Equatable {
+        /// A one-time code to exchange at /api/auth/mobile/exchange.
+        case code(String)
+        /// A refusal code from the server's `refuse()` (CF-44).
+        case refused(String)
+        /// Neither, which the server never sends.
+        case empty
+    }
+
+    /// Reads the callback URL. `error` is checked first and wins: a refusal
+    /// must never reach the exchange, and must not be mistaken for the user
+    /// dismissing the sheet, which is what the old bare 403 page turned
+    /// every refusal into.
+    nonisolated static func callbackOutcome(_ url: URL) -> CallbackOutcome {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? {
+            guard let raw = items.first(where: { $0.name == name })?.value,
+                  !raw.isEmpty else { return nil }
+            return raw
+        }
+        if let error = value("error") { return .refused(error) }
+        if let code = value("code") { return .code(code) }
+        return .empty
+    }
+
+    /// The sign-in screen's wording for each refusal code. The codes are the
+    /// server's `LoginError*` constants, and the wording follows the web's
+    /// REFUSALS map in web/src/pages/login.tsx so the two clients say the
+    /// same thing. An unknown code gets a generic line rather than the raw
+    /// code: builds on phones outlive the server's list of codes.
+    nonisolated static func refusalMessage(_ code: String) -> String {
+        switch code {
+        case "invite_required":
+            "Creating an account needs an invite code while ConcertFinder is in early access. Enter yours and try again. Already have an account? Accounts never need a code."
+        case "invite_invalid":
+            "That invite code isn't valid. It may have been used up or expired. Check it for typos, or ask whoever sent it for another."
+        case "spotify_full":
+            "Spotify sign-in is limited, and ConcertFinder can't take any more Spotify accounts right now. Your invite code hasn't been used, so you can create your account with email or Sign in with Apple instead."
+        case "spotify_not_registered":
+            "Spotify sign-in is limited to accounts the operator has added. Your invite code hasn't been used, so you can create your account with email or Sign in with Apple instead."
+        default:
+            "Sign-in didn't complete. Please try again."
         }
     }
 
