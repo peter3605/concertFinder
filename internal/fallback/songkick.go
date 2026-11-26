@@ -33,6 +33,11 @@ const (
 	songkickUserAgent = "ConcertFinder/1.0 (+https://concertfinder.app)"
 )
 
+// ErrSongkickUnauthorized is a 401 or 403: Songkick refused the API key.
+// No retry or later artist can fix that, so the chain treats the source as
+// dead for the rest of the scan.
+var ErrSongkickUnauthorized = errors.New("songkick refused the API key")
+
 // SongkickCallsPerLookup is how many upstream requests one
 // SearchArtistEvents costs: an artist-ID resolution plus a calendar fetch,
 // with no cache in between. Quota call sites charge this rather than 1.
@@ -298,6 +303,10 @@ func (c *SongkickClient) get(ctx context.Context, u string) ([]byte, error) {
 				return nil, fmt.Errorf("songkick %s: %w", path, lastErr)
 			}
 			continue
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			// The credential, not the artist. Typed so the chain can stop
+			// asking for the rest of the scan (CF-B34). Path only, as below.
+			return nil, fmt.Errorf("songkick %s: %d: %w", path, resp.StatusCode, ErrSongkickUnauthorized)
 		default:
 			// The URL used to be interpolated here verbatim, api key and all.
 			return nil, fmt.Errorf("songkick %s: %d", path, resp.StatusCode)

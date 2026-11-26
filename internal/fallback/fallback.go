@@ -49,27 +49,8 @@ func (c *Chain) FindEvents(ctx context.Context, artist concerts.Target, loc conc
 	// designs collapsed into Tier B once the URL resolver got its own
 	// two-tier cache — Tier B is now cache-first-then-fetch by construction.)
 	if c.Songkick.Enabled() {
-		// Per-user daily quota (design §8.3) rides on the context as a
-		// pre-charged reservation taken out by the scan worker.
-		//
-		// SongkickCallsPerLookup permits, not one: SearchArtistEvents is two
-		// HTTP requests (resolve the artist ID, then fetch its calendar) and
-		// there is no cache between them, so charging a single permit made
-		// RATE_CAP_SONGKICK_PER_USER_DAILY mean twice its stated number.
-		if !rate.AllowN(ctx, rate.SourceSongkick, SongkickCallsPerLookup) {
-			// Over the per-user Songkick cap; skip and fall through.
-		} else {
-			evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)
-			if err != nil && !errors.Is(err, ErrNoAPIKey) && !isCtxErr(err) {
-				slog.Warn("songkick failed", "artist", artist.Name, "err", err)
-			}
-			out := filterByRadius(ctx, evs, loc, c.VenueGeo)
-			for i := range out {
-				out[i].Artist.ID = artist.ID
-			}
-			if len(out) > 0 {
-				return out
-			}
+		if out := c.trySongkick(ctx, artist, loc); len(out) > 0 {
+			return out
 		}
 	}
 	// Tier B — resolve an official URL (default MusicBrainz, cached in
@@ -88,6 +69,55 @@ func (c *Chain) FindEvents(ctx context.Context, artist concerts.Target, loc conc
 	// Terminal fallback (§5.4.2): a prefilled Google search link. Not yielded
 	// as a Concert — the frontend can surface this out-of-band if desired.
 	return nil
+}
+
+// trySongkick is Tier A. It returns nil whenever Songkick has nothing to
+// offer this artist — no results, a refused permit, or a key Songkick has
+// stopped accepting — and the caller falls through to Tier B in every one
+// of those cases.
+func (c *Chain) trySongkick(ctx context.Context, artist concerts.Target, loc concerts.Location) []concerts.Concert {
+	// Checked before the permit, so an artist skipped because the key is
+	// dead spends nothing. Every production Songkick call answered 401 for
+	// a whole day while each scan still spent its entire allowance on them
+	// (CF-B34) — the Bandsintown failure again: a source contributing
+	// nothing while costing quota.
+	gate := concerts.FallbackScanStateFrom(ctx).SongkickGate()
+	ok, report := gate.Enter(ctx)
+	if !ok {
+		return nil
+	}
+	// Per-user daily quota (design §8.3) rides on the context as a
+	// pre-charged reservation taken out by the scan worker.
+	//
+	// SongkickCallsPerLookup permits, not one: SearchArtistEvents is two
+	// HTTP requests (resolve the artist ID, then fetch its calendar) and
+	// there is no cache between them, so charging a single permit made
+	// RATE_CAP_SONGKICK_PER_USER_DAILY mean twice its stated number.
+	if !rate.AllowN(ctx, rate.SourceSongkick, SongkickCallsPerLookup) {
+		// Over the per-user Songkick cap. Says nothing about the key, so
+		// the gate opens for whoever is waiting on it.
+		report(false)
+		return nil
+	}
+	evs, err := c.Songkick.SearchArtistEvents(ctx, artist.Name)
+	unauthorized := errors.Is(err, ErrSongkickUnauthorized)
+	report(unauthorized)
+	switch {
+	case unauthorized:
+		// One line for the scan rather than one per artist; the summary's
+		// songkick_unauthorized field carries it from here. err names the
+		// path only — the key rides in the query string and is redacted.
+		slog.Warn("songkick refused the API key; skipping it for the rest of this scan",
+			"artist", artist.Name, "err", err)
+		return nil
+	case err != nil && !errors.Is(err, ErrNoAPIKey) && !isCtxErr(err):
+		slog.Warn("songkick failed", "artist", artist.Name, "err", err)
+	}
+	out := filterByRadius(ctx, evs, loc, c.VenueGeo)
+	for i := range out {
+		out[i].Artist.ID = artist.ID
+	}
+	return out
 }
 
 // tryOfficialSite fetches an artist's homepage + a few well-known tour
