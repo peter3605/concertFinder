@@ -301,6 +301,12 @@ func Search(ctx context.Context, d SearchDeps, artists []Target, loc Location) (
 
 	fallbackCtx, cancelFallback := fallbackContext(ctx, budget)
 	defer cancelFallback()
+	// What the chain learns about its sources during this scan, such as a
+	// Songkick key that answers 401 (CF-B34). Per scan rather than per
+	// process: the summary below reports what this scan saw, never a
+	// verdict some earlier scan reached.
+	fbState := &FallbackScanState{}
+	fallbackCtx = WithFallbackScanState(fallbackCtx, fbState)
 
 	m := NewMerger()
 	sem := make(chan struct{}, d.Parallelism)
@@ -369,6 +375,9 @@ func Search(ctx context.Context, d SearchDeps, artists []Target, loc Location) (
 			"produced_events", fbStats.produced.Load(),
 			"skipped_no_budget", fbStats.skipped.Load(),
 			"total_artists", len(usable),
+			// A dead key is this one field, once per scan, rather than a
+			// per-artist WARN for every escalation (CF-B34).
+			"songkick_unauthorized", fbState.Songkick.Dead(),
 		)
 	}
 
