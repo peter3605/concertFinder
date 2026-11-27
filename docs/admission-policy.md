@@ -157,6 +157,62 @@ An invite can be sent as a single link — the web login page pre-fills from
 https://concertfinder.app/login?invite=CF-ABCD-EFGH
 ```
 
+### Spotify invites: letting someone sign up with Spotify (CF-B33)
+
+There are two kinds of code. An **ordinary** invite admits an email or Apple
+signup. A **Spotify invite** admits those and a Spotify signup too. A Spotify
+signup redeems **only** a Spotify invite, because Spotify's Development Mode
+allowlist is permanent here (`docs/public-path.md` §7) and only you can edit
+it, by hand, in Spotify's dashboard. An ordinary code says nothing about that
+allowlist, so before this its holder could pick Continue with Spotify, go
+through Spotify's consent screen, and come back refused
+(`spotify_not_registered`). Minting a Spotify invite is you saying "I have
+added this person on Spotify's side".
+
+The runbook, in this order:
+
+1. **Add them to the allowlist** in the Spotify developer dashboard (the app's
+   *User Management* page), using **the email address their Spotify account
+   uses**. Ask them for it, and say why: it is often not the address you know
+   them by, and a mismatch is the one failure this cannot catch.
+2. **Mint a Spotify invite** for them: tick *Spotify invite* on `/admin`, or
+   ```bash
+   docker compose exec api /server -mint-invite -spotify -note "alex (spotify)"
+   ```
+   `-list-invites` and the `/admin` list show each code's kind.
+3. **Send it**, e.g. as `https://concertfinder.app/login?invite=CF-ABCD-EFGH`.
+   On the Create an account tab (web and iOS) Continue with Spotify appears
+   only once a Spotify invite has been entered, and only while
+   `SPOTIFY_MAX_USERS` has a place free.
+
+How it holds together:
+
+- `/login` checks the code's kind **read-only**, as it already checks
+  usability, and refuses an ordinary code with `invite_not_spotify` before the
+  Spotify round trip. The code goes back with the refusal, unspent, so the
+  sign-up page can carry it to email or Apple.
+- `db.UpsertUserWithAdmission` checks again on the signup branch, **before**
+  `redeemInviteTx` and after the `SPOTIFY_MAX_USERS` check, so a race or a
+  hand-built callback ends on the same refusal and still spends nothing. An
+  unknown code is reported as `invite_invalid`, never as the wrong kind.
+- Only codes someone actually presents are checked. A blank code still passes
+  `/login`, because `/login` cannot tell a newcomer from a returning Spotify
+  user, and a returning user never needs a code.
+- `GET /api/auth/invite?code=` is how the sign-up screens decide whether to
+  show the Spotify button. It reports `{usable, spotify}`, is read-only, sits
+  behind the `/api/auth` per-IP bucket, and tells nobody anything `/login`
+  with `?invite=` does not already.
+- With `INVITE_REQUIRED` off there are no codes to check, and Spotify signups
+  are bounded by `SPOTIFY_MAX_USERS` and the allowlist alone, as before.
+
+**Codes minted before migration 0030 are all ordinary.** A code already given to
+someone you *did* allowlist must be re-minted as a Spotify invite, or flipped
+by hand:
+
+```sql
+UPDATE invite_codes SET spotify = true WHERE code = 'CF-ABCD-EFGH';
+```
+
 ### The console at `/admin`
 
 Everything above is also available in the browser, at
@@ -237,6 +293,10 @@ That line is the only thing standing between "the flag was never granted" and
   with Spotify, Apple or an emailed link — so a code read out of a backup is worth one signup slot, not one
   account. Against that, the operator has to be able to answer "which code did
   I give to whom" and re-send one lost in a spam folder.
+- **A Spotify invite cannot prove the allowlist entry exists.** It records
+  that you meant to add the person, not that you did, or that you used the
+  email their Spotify account uses. Either mistake still ends on
+  `spotify_not_registered`, after the consent screen, with the code unspent.
 - **`invite_required` in `/api/site-info` is a rendering hint.** It tells a
   client whether to draw a text box. A client that gets it wrong shows or hides
   a field; it can never admit anybody, because the gate is in the callback.

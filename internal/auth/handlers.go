@@ -73,7 +73,45 @@ func Mount(r chi.Router, d *Deps) {
 	// have. Replay and forgery are handled by the one-time code and its
 	// challenge, not by a session.
 	r.Post("/mobile/exchange", d.handleMobileExchange)
+	// Unauthenticated and read-only: the sign-up screens ask what kind of
+	// code they hold before offering Continue with Spotify (CF-B33).
+	r.Get("/invite", d.handleInviteCheck)
 	r.With(RequireUser(d.Pool)).Get("/me", d.handleMe)
+}
+
+// handleInviteCheck answers GET /api/auth/invite?code=... with
+// {"usable": bool, "spotify": bool}: whether the code would be accepted now
+// and whether it admits a Spotify signup. The sign-up screens use it to offer
+// Continue with Spotify only to someone holding a Spotify invite.
+//
+// It reveals nothing /login does not already: /login with ?invite= answers a
+// refusal or a redirect to Spotify according to the same two facts. It sits
+// behind the same per-IP /api/auth bucket, and against ~39 bits of code that
+// bucket is what makes guessing pointless. It never reserves or spends
+// anything, and an unknown or blank code is simply usable=false rather than
+// an error, since a half-typed code is the ordinary case for a screen that
+// asks as the person types.
+//
+// With INVITE_REQUIRED off there is no gate to describe, so every code is
+// reported usable and Spotify-capable, matching what /login and the callback
+// would then do with it.
+func (d *Deps) handleInviteCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	out := db.InviteCheck{Usable: true, Spotify: true}
+	if d.InviteRequired {
+		out = db.InviteCheck{}
+		if code := db.NormalizeInviteCode(r.URL.Query().Get("code")); code != "" {
+			check, err := db.CheckInviteCode(r.Context(), d.Pool, code)
+			if err != nil {
+				slog.Error("invite check failed", "err", err)
+				writeAuthError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			out = check
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]bool{"usable": out.Usable, "spotify": out.Spotify})
 }
 
 func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -112,16 +150,27 @@ func (d *Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// place that does.
 	invite := db.NormalizeInviteCode(r.URL.Query().Get("invite"))
 	if d.InviteRequired && invite != "" {
-		ok, err := db.InviteCodeUsable(r.Context(), d.Pool, invite)
+		check, err := db.CheckInviteCode(r.Context(), d.Pool, invite)
 		if err != nil {
 			slog.Error("invite pre-check failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if !ok {
+		if !check.Usable {
 			// A redirect rather than JSON for both clients: /login is reached
 			// through a browser or ASWebAuthenticationSession, not URLSession.
 			d.refuse(w, r, appChallenge != "", LoginErrorInviteInvalid, "")
+			return
+		}
+		if !check.Spotify {
+			// A good code of the wrong kind (CF-B33): it admits email and
+			// Apple signups, and nothing says its holder is on Spotify's
+			// allowlist, so sending them through consent would end on
+			// spotify_not_registered. Refused here, before the round trip,
+			// and echoed back unspent so the sign-up page can carry it to
+			// email. db.UpsertUserWithAdmission repeats the check at
+			// redemption, which is the authority; this is the courtesy.
+			d.refuse(w, r, appChallenge != "", LoginErrorInviteNotSpotify, invite)
 			return
 		}
 	}
@@ -281,6 +330,14 @@ func (d *Deps) handleCallback(w http.ResponseWriter, r *http.Request) {
 		slog.Info("signup refused: invite not redeemable", "code", hs.InviteCode)
 		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteInvalid, "")
 		return
+	case errors.Is(err, db.ErrInviteNotSpotify):
+		// /login refuses this before the round trip, so arriving here means
+		// the callback was reached some other way -- a hand-built handshake,
+		// or a code whose kind changed in between. Decided before the
+		// redemption, so the code is unspent and goes back with the refusal.
+		slog.Info("signup refused: invite is not a Spotify invite", "code", hs.InviteCode)
+		d.refuse(w, r, hs.AppChallenge != "", LoginErrorInviteNotSpotify, hs.InviteCode)
+		return
 	case err != nil:
 		slog.Error("upsert user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -381,6 +438,7 @@ func (d *Deps) handleMe(w http.ResponseWriter, r *http.Request) {
 const (
 	LoginErrorInviteRequired       = "invite_required"
 	LoginErrorInviteInvalid        = "invite_invalid"
+	LoginErrorInviteNotSpotify     = "invite_not_spotify"
 	LoginErrorSpotifyFull          = "spotify_full"
 	LoginErrorSpotifyNotRegistered = "spotify_not_registered"
 )

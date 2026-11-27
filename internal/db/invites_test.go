@@ -138,7 +138,7 @@ func TestInviteCodeUsable(t *testing.T) {
 func mintTestInvite(t *testing.T, pool *pgxpool.Pool, uses int, expires *time.Time) InviteCode {
 	t.Helper()
 	code := "CF-TEST-" + uuid.NewString()[:8]
-	c, err := CreateInviteCode(context.Background(), pool, code, "test", uses, expires)
+	c, err := CreateInviteCode(context.Background(), pool, code, "test", uses, expires, true)
 	if err != nil {
 		t.Fatalf("mint invite: %v", err)
 	}
@@ -460,4 +460,101 @@ FROM user_identities WHERE provider = 'spotify' AND subject = $1`, spotifyID).Sc
 	if owner, rows := identity(); rows != 1 || owner != created.ID {
 		t.Fatalf("after repair: %d rows owned by %s, want 1 owned by %s", rows, owner, created.ID)
 	}
+}
+
+// mintKindInvite mints a one-use code of the given kind (CF-B33).
+func mintKindInvite(t *testing.T, pool *pgxpool.Pool, spotify bool) InviteCode {
+	t.Helper()
+	code := "CF-KIND-" + uuid.NewString()[:8]
+	c, err := CreateInviteCode(context.Background(), pool, code, "kind", 1, nil, spotify)
+	if err != nil {
+		t.Fatalf("mint invite: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx, `UPDATE users SET invited_with = NULL WHERE invited_with = $1`, c.Code)
+		_, _ = pool.Exec(ctx, `DELETE FROM invite_codes WHERE code = $1`, c.Code)
+	})
+	if c.Spotify != spotify {
+		t.Fatalf("minted Spotify = %v, want %v", c.Spotify, spotify)
+	}
+	return c
+}
+
+// A Spotify signup redeems only a Spotify invite. An ordinary code is refused
+// before the redemption, so it is still unspent and still usable for the
+// email or Apple signup it was minted for, and no user row is left behind.
+func TestAdmissionRefusesOrdinaryInviteForSpotifySignup(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	invite := mintKindInvite(t, pool, false)
+	spotifyID := "spotify-ordinary-" + uuid.NewString()
+	dropUser(t, pool, spotifyID)
+
+	_, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), invite.Code, true, NoSpotifyCap)
+	if !errors.Is(err, ErrInviteNotSpotify) {
+		t.Fatalf("err = %v, want ErrInviteNotSpotify", err)
+	}
+	assertUserCount(t, pool, spotifyID, 0)
+	assertRedemptions(t, pool, invite.Code, 0)
+
+	check, err := CheckInviteCode(ctx, pool, invite.Code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !check.Usable || check.Spotify {
+		t.Fatalf("CheckInviteCode = %+v, want usable and not Spotify", check)
+	}
+}
+
+// An unknown code is still "not valid", not "the wrong kind": a typo must be
+// told it is a typo.
+func TestAdmissionUnknownCodeIsInvalidNotWrongKind(t *testing.T) {
+	pool := testPool(t)
+	spotifyID := "spotify-unknown-kind-" + uuid.NewString()
+	dropUser(t, pool, spotifyID)
+	_, err := UpsertUserWithAdmission(context.Background(), pool, newTestUser(spotifyID), "CF-ZZZZ-ZZZZ", true, NoSpotifyCap)
+	if !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("err = %v, want ErrInviteInvalid", err)
+	}
+}
+
+// With the gate off there is no code to check the kind of, as before.
+func TestAdmissionOffIgnoresInviteKind(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	invite := mintKindInvite(t, pool, false)
+	spotifyID := "spotify-gateoff-" + uuid.NewString()
+	dropUser(t, pool, spotifyID)
+	if _, err := UpsertUserWithAdmission(ctx, pool, newTestUser(spotifyID), invite.Code, false, NoSpotifyCap); err != nil {
+		t.Fatalf("gate off refused: %v", err)
+	}
+	assertRedemptions(t, pool, invite.Code, 0)
+}
+
+// A Spotify invite is the stronger kind: it also admits an Apple signup. The
+// email path redeems through the same redeemInviteTx with no kind check, and
+// internal/auth's email tests drive it end to end with both kinds.
+func TestSpotifyInviteAdmitsAppleSignup(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	invite := mintKindInvite(t, pool, true)
+	subject := "001.kind-" + uuid.NewString()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM users WHERE id IN (SELECT user_id FROM user_identities WHERE provider = 'apple' AND subject = $1)`, subject)
+	})
+	_, created, err := AdmitApple(ctx, pool, AppleSignIn{
+		Subject:               subject,
+		ClientID:              "com.example.app.web",
+		EncryptedRefreshToken: []byte("ct"),
+		RefreshTokenNonce:     []byte("nonce-123456"),
+	}, invite.Code, true)
+	if err != nil {
+		t.Fatalf("apple signup with a Spotify invite: %v", err)
+	}
+	if !created {
+		t.Fatal("apple signup did not create an account")
+	}
+	assertRedemptions(t, pool, invite.Code, 1)
 }

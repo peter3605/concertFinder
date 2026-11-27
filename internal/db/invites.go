@@ -26,6 +26,11 @@ type InviteCode struct {
 	ExpiresAt  *time.Time
 	DisabledAt *time.Time
 	CreatedAt  time.Time
+	// Spotify marks a code that admits a Spotify signup (migration 0030):
+	// minting one says the operator has added its holder to Spotify's
+	// Development Mode allowlist. An ordinary code admits email and Apple
+	// signups only; a Spotify code admits all three.
+	Spotify bool
 }
 
 // The four words an operator sees for a code's state, and the only four.
@@ -78,6 +83,13 @@ var (
 	ErrInviteRequired = errors.New("an invite code is required to sign up")
 	ErrInviteInvalid  = errors.New("invite code is not valid")
 )
+
+// ErrInviteNotSpotify means a Spotify signup presented a usable code that is
+// not a Spotify invite. The code is fine; it just admits email and Apple
+// signups, because nothing says its holder is on Spotify's allowlist. Like
+// ErrSpotifyFull it is decided before anything is spent, so the person can
+// still use the code to sign up another way.
+var ErrInviteNotSpotify = errors.New("invite code does not admit Spotify signups")
 
 // ErrSpotifyFull means a new Spotify signup arrived while the deployment
 // already holds SPOTIFY_MAX_USERS Spotify accounts (docs/public-path.md §7).
@@ -208,8 +220,10 @@ func NormalizeInviteCode(s string) string {
 }
 
 // CreateInviteCode mints a code. maxRedemptions must be at least 1; expiresAt
-// nil means it never expires.
-func CreateInviteCode(ctx context.Context, pool *pgxpool.Pool, code, note string, maxRedemptions int, expiresAt *time.Time) (InviteCode, error) {
+// nil means it never expires; spotify mints a Spotify invite (migration 0030),
+// which is a positional bool rather than a default so that every mint says
+// which kind it means.
+func CreateInviteCode(ctx context.Context, pool *pgxpool.Pool, code, note string, maxRedemptions int, expiresAt *time.Time, spotify bool) (InviteCode, error) {
 	code = NormalizeInviteCode(code)
 	if code == "" {
 		return InviteCode{}, errors.New("create invite: code is empty")
@@ -218,10 +232,10 @@ func CreateInviteCode(ctx context.Context, pool *pgxpool.Pool, code, note string
 		return InviteCode{}, fmt.Errorf("create invite: max redemptions must be at least 1, got %d", maxRedemptions)
 	}
 	const q = `
-INSERT INTO invite_codes (code, note, max_redemptions, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING code, note, max_redemptions, redemptions, expires_at, disabled_at, created_at`
-	return scanInvite(pool.QueryRow(ctx, q, code, note, maxRedemptions, expiresAt))
+INSERT INTO invite_codes (code, note, max_redemptions, expires_at, spotify)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING ` + inviteColumns
+	return scanInvite(pool.QueryRow(ctx, q, code, note, maxRedemptions, expiresAt, spotify))
 }
 
 // ListInviteCodes returns every code, newest first. The table is an operator's
@@ -229,7 +243,7 @@ RETURNING code, note, max_redemptions, redemptions, expires_at, disabled_at, cre
 // deployment where the count justifies it.
 func ListInviteCodes(ctx context.Context, pool *pgxpool.Pool) ([]InviteCode, error) {
 	const q = `
-SELECT code, note, max_redemptions, redemptions, expires_at, disabled_at, created_at
+SELECT ` + inviteColumns + `
 FROM invite_codes ORDER BY created_at DESC`
 	rows, err := pool.Query(ctx, q)
 	if err != nil {
@@ -262,6 +276,34 @@ func DisableInviteCode(ctx context.Context, pool *pgxpool.Pool, code string) err
 		return ErrNoRows
 	}
 	return nil
+}
+
+// InviteCheck is the read-only answer about a presented code: whether it
+// would be accepted right now and, if so, whether it admits a Spotify signup.
+type InviteCheck struct {
+	Usable  bool
+	Spotify bool
+}
+
+// CheckInviteCode is InviteCodeUsable that also reports the code's kind. It
+// is what /login runs for a Spotify signup and what the sign-up screens ask
+// before offering Continue with Spotify. Read-only for the same reason as
+// InviteCodeUsable, and Spotify is false whenever Usable is, so a caller
+// testing Spotify alone cannot be handed a spent code that happens to be a
+// Spotify one.
+func CheckInviteCode(ctx context.Context, pool *pgxpool.Pool, code string) (InviteCheck, error) {
+	code = NormalizeInviteCode(code)
+	const q = `SELECT spotify FROM invite_codes WHERE code = $1 AND ` + inviteUsableSQL
+	var c InviteCheck
+	err := pool.QueryRow(ctx, q, code).Scan(&c.Spotify)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return InviteCheck{}, nil
+	case err != nil:
+		return InviteCheck{}, fmt.Errorf("check invite: %w", err)
+	}
+	c.Usable = true
+	return c, nil
 }
 
 // InviteCodeUsable is the read-only pre-check run at /login, before the
@@ -358,6 +400,15 @@ func UpsertUserWithAdmission(ctx context.Context, pool *pgxpool.Pool, u User, in
 			if invite == "" {
 				return User{}, ErrInviteRequired
 			}
+			// The kind check, the authority behind /login's read-only one:
+			// a race, or a callback reached without passing /login, ends
+			// here. Like the cap it runs before redeemInviteTx, so an
+			// ordinary code refused for a Spotify signup is still unspent.
+			// FOR UPDATE holds the row so the kind read here is the kind of
+			// the code redeemed below.
+			if err := requireSpotifyInviteTx(ctx, tx, invite); err != nil {
+				return User{}, err
+			}
 			if err := redeemInviteTx(ctx, tx, invite); err != nil {
 				return User{}, err
 			}
@@ -427,13 +478,34 @@ WHERE code = $1 AND ` + inviteUsableSQL
 	return nil
 }
 
+// requireSpotifyInviteTx refuses a code that is not a Spotify invite. An
+// unknown code passes through so that redeemInviteTx reports it as
+// ErrInviteInvalid -- one place decides "not valid", and a typo is not told
+// it is the wrong kind of code.
+func requireSpotifyInviteTx(ctx context.Context, tx pgx.Tx, code string) error {
+	var spotify bool
+	err := tx.QueryRow(ctx, `SELECT spotify FROM invite_codes WHERE code = $1 FOR UPDATE`, code).Scan(&spotify)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("invite kind: %w", err)
+	case !spotify:
+		return ErrInviteNotSpotify
+	}
+	return nil
+}
+
+// inviteColumns is the column list scanInvite reads, in its order.
+const inviteColumns = `code, note, max_redemptions, redemptions, expires_at, disabled_at, created_at, spotify`
+
 // rowScanner is satisfied by both pgx.Row and pgx.Rows.
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanInvite(r rowScanner) (InviteCode, error) {
 	var c InviteCode
 	if err := r.Scan(&c.Code, &c.Note, &c.MaxRedemptions, &c.Redemptions,
-		&c.ExpiresAt, &c.DisabledAt, &c.CreatedAt); err != nil {
+		&c.ExpiresAt, &c.DisabledAt, &c.CreatedAt, &c.Spotify); err != nil {
 		return InviteCode{}, fmt.Errorf("scan invite: %w", err)
 	}
 	return c, nil

@@ -1,0 +1,25 @@
+-- A Spotify invite (CF-B33): a code that admits a Spotify signup.
+--
+-- An ordinary invite says the operator wants this person in. It says nothing
+-- about Spotify's Development Mode allowlist, which is permanent here
+-- (docs/public-path.md §7) and which only the operator can edit, by hand, in
+-- Spotify's dashboard. So an ordinary code holder who chose Continue with
+-- Spotify went through Spotify's consent screen and came back refused
+-- (spotify_not_registered) -- the server had no way to know beforehand.
+--
+-- A Spotify invite means "the operator has added this person to the
+-- allowlist". A Spotify signup redeems only one of these, which makes the
+-- gate the server can see match the one it cannot. It still cannot prove the
+-- allowlist entry exists, or that it names the email the person's Spotify
+-- account uses; a mismatch still ends on spotify_not_registered.
+--
+-- DEFAULT false: every code minted before this migration is ordinary. Any of
+-- them already given to someone who was allowlisted needs re-minting, or an
+-- UPDATE by hand (docs/admission-policy.md).
+--
+-- A Spotify invite still works for an email or Apple signup. It is the
+-- stronger of the two -- the operator vetted this person and then some -- and
+-- refusing it would only strand someone whose Spotify sign-in failed for a
+-- reason the allowlist does not explain.
+ALTER TABLE invite_codes
+  ADD COLUMN IF NOT EXISTS spotify BOOLEAN NOT NULL DEFAULT false;
