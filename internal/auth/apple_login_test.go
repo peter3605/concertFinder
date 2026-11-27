@@ -137,7 +137,7 @@ func newInvite(t *testing.T, pool *pgxpool.Pool, uses int) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateInviteCode(context.Background(), pool, code, "apple test", uses, nil); err != nil {
+	if _, err := db.CreateInviteCode(context.Background(), pool, code, "apple test", uses, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	return code

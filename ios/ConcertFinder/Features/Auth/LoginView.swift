@@ -20,6 +20,16 @@ struct LoginView: View {
 
     @State private var tab: Tab = .signIn
     @State private var inviteCode = ""
+    /// Whether `inviteCode` is a Spotify invite (CF-B33). Spotify sign-up is
+    /// offered only for one, since an ordinary invite says nothing about
+    /// Spotify's allowlist. A rendering hint: the server checks the kind.
+    @State private var spotifyInvite = false
+
+    /// Whether the create tab offers Spotify: a place must be free and, while
+    /// codes are required, the code must be a Spotify invite.
+    private var offersSpotifySignup: Bool {
+        auth.spotifySignupsOpen && (!auth.inviteRequired || spotifyInvite)
+    }
 
     /// Whether the create tab still needs a code before anything can start.
     /// A rendering hint like the flags it reads: the server decides.
@@ -66,8 +76,13 @@ struct LoginView: View {
                     )
                     .disabled(needsCode)
 
-                    if tab == .signIn || auth.spotifySignupsOpen {
+                    if tab == .signIn || offersSpotifySignup {
                         spotifySection
+                    } else if auth.spotifySignupsOpen && auth.inviteRequired {
+                        Text("Spotify sign-up needs a Spotify invite, for the few people the operator has added on Spotify's side. Enter one above to continue with Spotify.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
                 }
 
@@ -85,6 +100,17 @@ struct LoginView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(Color.screenBackground)
+        // Re-asked as the code changes, debounced: .task(id:) cancels the
+        // previous check when the next keystroke arrives, so only a code the
+        // person has paused on reaches the server's per-IP auth bucket.
+        .task(id: inviteCode) {
+            spotifyInvite = false
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            let result = await auth.isSpotifyInvite(inviteCode)
+            guard !Task.isCancelled else { return }
+            spotifyInvite = result
+        }
     }
 
     private var header: some View {
@@ -130,7 +156,9 @@ struct LoginView: View {
                 .disabled(needsCode)
             Text(tab == .signIn
                  ? "For accounts that were invited to sign in with Spotify."
-                 : "Only a few Spotify accounts can join, and only ones Spotify lets us add. We only read your library and never post, follow, or change anything.")
+                 : auth.inviteRequired
+                    ? "Your invite is a Spotify invite. We only read your library and never post, follow, or change anything."
+                    : "Only a few Spotify accounts can join, and only ones Spotify lets us add. We only read your library and never post, follow, or change anything.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

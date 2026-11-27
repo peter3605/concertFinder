@@ -31,6 +31,14 @@ const REFUSALS: Record<string, { tab: Tab; message: string }> = {
     message:
       "That invite code isn't valid. It may have been used up or expired. Check it for typos, or ask whoever sent it for another.",
   },
+  // An ordinary invite presented for a Spotify signup (CF-B33). The code
+  // comes back with the refusal, unspent, so the email form below is already
+  // filled in.
+  invite_not_spotify: {
+    tab: 'create',
+    message:
+      "That invite is for creating an account with email or Apple, not Spotify. It hasn't been used, so you can use it below. Spotify sign-up needs a Spotify invite, which is only for people the operator has added on Spotify's side.",
+  },
   spotify_full: {
     tab: 'create',
     message:
@@ -102,6 +110,38 @@ export default function LoginPage() {
   // through the query string helps nobody.
   const code = inviteRequired ? invite.trim() : '';
   const needsCode = inviteRequired && !code;
+
+  // Whether the code typed so far is a Spotify invite (CF-B33), from
+  // GET /api/auth/invite. Spotify sign-up is offered only for one: an
+  // ordinary invite holder is not on Spotify's allowlist, and sending them
+  // through consent ends on a refusal. Like the site-info flags this decides
+  // what is shown, not who gets in; /login and the callback check the kind
+  // again. With the gate off there is no code to ask about.
+  const [spotifyInvite, setSpotifyInvite] = useState(false);
+  useEffect(() => {
+    if (!inviteRequired || !code) {
+      setSpotifyInvite(false);
+      return;
+    }
+    let cancelled = false;
+    // Debounced: the check runs as the person types, and /api/auth's
+    // per-IP bucket is shared with the sign-in itself.
+    const timer = window.setTimeout(() => {
+      apiFetch(`/api/auth/invite?code=${encodeURIComponent(code)}`, {}, { publicEndpoint: true })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j: { usable?: boolean; spotify?: boolean } | null) => {
+          if (!cancelled) setSpotifyInvite(Boolean(j?.usable && j?.spotify));
+        })
+        .catch(() => {
+          if (!cancelled) setSpotifyInvite(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [inviteRequired, code]);
+  const offerSpotifySignup = spotifySignupsOpen && (!inviteRequired || spotifyInvite);
   const signupSpotifyHref = code
     ? `/api/auth/login?invite=${encodeURIComponent(code)}`
     : '/api/auth/login';
@@ -181,15 +221,25 @@ export default function LoginPage() {
                 submitLabel="Email me a link to create my account"
                 disabled={needsCode}
               />
-              {spotifySignupsOpen && (
+              {offerSpotifySignup && (
                 <>
                   <Divider />
                   <SpotifyButton
                     href={signupSpotifyHref}
-                    disabled={needsCode}
-                    note="Only a few Spotify accounts can join, and only ones Spotify lets us add. We only read your library and never post, follow, or change anything."
+                    note={
+                      inviteRequired
+                        ? 'Your invite is a Spotify invite. We only read your library and never post, follow, or change anything.'
+                        : 'Only a few Spotify accounts can join, and only ones Spotify lets us add. We only read your library and never post, follow, or change anything.'
+                    }
                   />
                 </>
+              )}
+              {spotifySignupsOpen && inviteRequired && !spotifyInvite && (
+                <p className="text-center text-xs text-muted-foreground">
+                  Spotify sign-up needs a Spotify invite, for the few people
+                  the operator has added on Spotify&apos;s side. Enter one
+                  above to continue with Spotify.
+                </p>
               )}
             </div>
           )}

@@ -39,6 +39,9 @@ type Invite = {
   expires_at: string | null;
   disabled_at: string | null;
   created_at: string;
+  // A Spotify invite (CF-B33): admits a Spotify signup as well as email and
+  // Apple. Optional so a server that predates the field reads as ordinary.
+  spotify?: boolean;
 };
 
 // Access is one of three things, and "forbidden" is a real answer rather than
@@ -68,6 +71,7 @@ export default function AdminPage() {
   const [note, setNote] = useState('');
   const [uses, setUses] = useState('1');
   const [expiresDays, setExpiresDays] = useState('0');
+  const [spotify, setSpotify] = useState(false);
   const [minting, setMinting] = useState(false);
   // The code from the most recent mint, held so it can be copied. It is also
   // in the table below, but a freshly minted code is the one thing on this
@@ -112,6 +116,7 @@ export default function AdminPage() {
           note: note.trim(),
           uses: Number(uses) || 1,
           expires_days: Number(expiresDays) || 0,
+          spotify,
         }),
       });
       if (!r.ok) {
@@ -129,6 +134,9 @@ export default function AdminPage() {
       setJustMinted(created.code);
       setCopied(false);
       setNote('');
+      // Back to ordinary: a Spotify invite is the exception, minted only
+      // after the dashboard step, so it should never carry over by accident.
+      setSpotify(false);
       setInvites((prev) => [created, ...prev]);
     } catch {
       setErr(NETWORK_ERROR_MESSAGE);
@@ -247,6 +255,23 @@ export default function AdminPage() {
                 <p className="text-xs text-muted-foreground">0 means it never expires.</p>
               </div>
             </div>
+            <div className="flex items-start gap-2">
+              <input
+                id="invite-spotify"
+                type="checkbox"
+                checked={spotify}
+                onChange={(e) => setSpotify(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
+              />
+              <div className="grid gap-0.5">
+                <Label htmlFor="invite-spotify">Spotify invite</Label>
+                <p className="text-xs text-muted-foreground">
+                  Lets them create an account with Spotify as well as email or Apple. Add them to
+                  the Spotify dashboard&rsquo;s allowlist first, using the email their Spotify
+                  account uses.
+                </p>
+              </div>
+            </div>
             <div>
               <Button type="submit" disabled={minting}>
                 {minting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
@@ -288,6 +313,7 @@ export default function AdminPage() {
                 <thead>
                   <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="py-2 pr-4 font-medium">Code</th>
+                    <th className="py-2 pr-4 font-medium">Kind</th>
                     <th className="py-2 pr-4 font-medium">Used</th>
                     <th className="py-2 pr-4 font-medium">State</th>
                     <th className="py-2 pr-4 font-medium">Expires</th>
@@ -299,6 +325,13 @@ export default function AdminPage() {
                   {invites.map((c) => (
                     <tr key={c.code} className="border-b last:border-0">
                       <td className="py-2 pr-4 font-mono text-xs whitespace-nowrap">{c.code}</td>
+                      <td className="py-2 pr-4 whitespace-nowrap">
+                        {c.spotify ? (
+                          <Badge variant="outline">Spotify</Badge>
+                        ) : (
+                          <span className="text-muted-foreground">Standard</span>
+                        )}
+                      </td>
                       <td className="py-2 pr-4 whitespace-nowrap tabular-nums">
                         {c.redemptions}/{c.max_redemptions}
                       </td>

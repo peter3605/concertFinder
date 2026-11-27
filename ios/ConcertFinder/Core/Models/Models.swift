@@ -351,6 +351,18 @@ struct SiteInfo: Codable, Sendable {
     var spotifySignupsOpen: Bool? = nil
 }
 
+/// `GET /api/auth/invite`: whether a code would be accepted now and whether
+/// it is a Spotify invite (CF-B33). Optional fields so a malformed or older
+/// answer decodes as "no", which hides Spotify sign-up rather than offering a
+/// path that ends in a refusal.
+struct InviteCheck: Codable, Sendable, Equatable {
+    var usable: Bool? = nil
+    var spotify: Bool? = nil
+
+    /// Spotify sign-up is offered only for a usable Spotify invite.
+    var admitsSpotify: Bool { usable == true && spotify == true }
+}
+
 /// A 429 from the refresh endpoint.
 struct RefreshThrottled: Codable, Sendable {
     let retryAfter: Date?

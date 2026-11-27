@@ -53,6 +53,16 @@ final class AuthController: NSObject {
     /// at five accounts, so the create-account tab hides that path unless a
     /// place is free; the sign-in tab always offers it to returning users.
     private(set) var spotifySignupsOpen = false
+    /// Asks the server whether `code` is a Spotify invite. Any failure reads
+    /// as "no": the cost is a hidden button for someone who could have used
+    /// it, while the other direction sends them through Spotify's consent
+    /// screen to be refused. The callback checks the kind again either way.
+    func isSpotifyInvite(_ code: String) async -> Bool {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard inviteRequired, !trimmed.isEmpty else { return false }
+        return (try? await api.checkInvite(trimmed))?.admitsSpotify ?? false
+    }
+
     /// An email sign-in this app started and has not finished. Drives the
     /// "enter the code" step, and outlives the process (see
     /// PendingEmailSignIn) because the link arrives while the app is away.
@@ -408,6 +418,8 @@ final class AuthController: NSObject {
             "Creating an account needs an invite code while ConcertFinder is in early access. Enter yours and try again. Already have an account? Accounts never need a code."
         case "invite_invalid":
             "That invite code isn't valid. It may have been used up or expired. Check it for typos, or ask whoever sent it for another."
+        case "invite_not_spotify":
+            "Spotify sign-in is limited, and that invite is for creating an account with email or Sign in with Apple. It hasn't been used, so you can use it for either. Spotify needs a Spotify invite, which is only for people the operator has added on Spotify's side."
         case "spotify_full":
             "Spotify sign-in is limited, and ConcertFinder can't take any more Spotify accounts right now. Your invite code hasn't been used, so you can create your account with email or Sign in with Apple instead."
         case "spotify_not_registered":

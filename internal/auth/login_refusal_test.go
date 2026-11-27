@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -117,13 +118,15 @@ VALUES (gen_random_uuid(), 'existing-'||$1::int, '', 'ct'::bytea, 'n'::bytea)`, 
 	}
 }
 
-func (f *refusalFixture) invite(t *testing.T) string {
+// invite mints a one-use code; spotify picks a Spotify invite (CF-B33),
+// which is the only kind a Spotify signup redeems.
+func (f *refusalFixture) invite(t *testing.T, spotify bool) string {
 	t.Helper()
 	code, err := db.NewInviteCode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateInviteCode(context.Background(), f.pool, code, "test", 1, nil); err != nil {
+	if _, err := db.CreateInviteCode(context.Background(), f.pool, code, "test", 1, nil, spotify); err != nil {
 		t.Fatal(err)
 	}
 	return code
@@ -184,7 +187,7 @@ func TestCallbackRefusalsRedirectBothClients(t *testing.T) {
 		}},
 		{"invite spent between /login and /callback", func(t *testing.T, app bool) (*refusalFixture, *httptest.ResponseRecorder, string, string) {
 			f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 5)
-			code := f.invite(t)
+			code := f.invite(t, true)
 			// /login's pre-check is read-only, so the last seat can go to
 			// someone else before this callback redeems it.
 			rec := httptest.NewRecorder()
@@ -207,10 +210,59 @@ func TestCallbackRefusalsRedirectBothClients(t *testing.T) {
 			f.r.ServeHTTP(out, req)
 			return f, out, LoginErrorInviteInvalid, ""
 		}},
+		{"ordinary invite at /login", func(t *testing.T, app bool) (*refusalFixture, *httptest.ResponseRecorder, string, string) {
+			f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 5)
+			code := f.invite(t, false)
+			q := "invite=" + url.QueryEscape(code)
+			if app {
+				q += "&" + ios
+			}
+			rec := f.signIn(t, q)
+			assertInviteUnspent(t, f, code)
+			return f, rec, LoginErrorInviteNotSpotify, db.NormalizeInviteCode(code)
+		}},
+		{"ordinary invite at the callback", func(t *testing.T, app bool) (*refusalFixture, *httptest.ResponseRecorder, string, string) {
+			// /login passes a Spotify code; the kind changes before the
+			// callback, standing in for any callback that never passed
+			// /login's check. The redemption's own check must refuse it.
+			f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 5)
+			code := f.invite(t, true)
+			rec := httptest.NewRecorder()
+			q := "invite=" + url.QueryEscape(code)
+			if app {
+				q += "&" + ios
+			}
+			f.r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/login?"+q, nil))
+			if _, err := f.pool.Exec(context.Background(),
+				`UPDATE invite_codes SET spotify = false WHERE code = $1`, db.NormalizeInviteCode(code)); err != nil {
+				t.Fatal(err)
+			}
+			u, _ := url.Parse(rec.Header().Get("Location"))
+			if !strings.HasPrefix(u.String(), spotifyAuthorizeURL) {
+				t.Fatalf("/login did not reach Spotify with a Spotify invite: %d %q", rec.Code, u)
+			}
+			req := httptest.NewRequest(http.MethodGet,
+				"/api/auth/callback?code=c&state="+url.QueryEscape(u.Query().Get("state")), nil)
+			for _, c := range rec.Result().Cookies() {
+				req.AddCookie(c)
+			}
+			out := httptest.NewRecorder()
+			f.r.ServeHTTP(out, req)
+			assertInviteUnspent(t, f, code)
+			var n int
+			if err := f.pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM users WHERE spotify_user_id = 'newcomer'`).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != 0 {
+				t.Fatalf("refused signup wrote %d user rows", n)
+			}
+			return f, out, LoginErrorInviteNotSpotify, db.NormalizeInviteCode(code)
+		}},
 		{"spotify cap reached", func(t *testing.T, app bool) (*refusalFixture, *httptest.ResponseRecorder, string, string) {
 			f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 2)
 			f.spotifyUsers(t, 2)
-			code := f.invite(t)
+			code := f.invite(t, true)
 			q := "invite=" + url.QueryEscape(code)
 			if app {
 				q += "&" + ios
@@ -219,7 +271,7 @@ func TestCallbackRefusalsRedirectBothClients(t *testing.T) {
 		}},
 		{"development mode", func(t *testing.T, app bool) (*refusalFixture, *httptest.ResponseRecorder, string, string) {
 			f := newRefusalFixture(t, &fakeSpotify{meStatus: http.StatusForbidden}, true, 5)
-			code := f.invite(t)
+			code := f.invite(t, true)
 			q := "invite=" + url.QueryEscape(code)
 			if app {
 				q += "&" + ios
@@ -280,12 +332,104 @@ func wantAppRefusal(t *testing.T, f *refusalFixture, rec *httptest.ResponseRecor
 	}
 }
 
+func assertInviteUnspent(t *testing.T, f *refusalFixture, code string) {
+	t.Helper()
+	var n int
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT redemptions FROM invite_codes WHERE code = $1`, db.NormalizeInviteCode(code)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("refused signup spent the invite: %d redemptions", n)
+	}
+}
+
+// A Spotify invite admits a Spotify signup and is spent by it.
+func TestCallbackAdmitsSpotifySignupWithSpotifyInvite(t *testing.T) {
+	f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 5)
+	code := f.invite(t, true)
+	rec := f.signIn(t, "invite="+url.QueryEscape(code))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+		t.Fatalf("status %d Location %q, want 302 to /", rec.Code, rec.Header().Get("Location"))
+	}
+	var n int
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT redemptions FROM invite_codes WHERE code = $1`, db.NormalizeInviteCode(code)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("redemptions = %d, want 1", n)
+	}
+}
+
+// A returning Spotify user signs in with no code at all, with the gate on:
+// /login cannot tell them from a newcomer, so a blank code must pass it, and
+// the callback finds their row and never consults an invite.
+func TestCallbackReturningSpotifyUserNeedsNoCode(t *testing.T) {
+	f := newRefusalFixture(t, &fakeSpotify{meID: "existing-0"}, true, 1)
+	f.spotifyUsers(t, 1)
+	rec := f.signIn(t, "")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+		t.Fatalf("status %d Location %q, want 302 to /", rec.Code, rec.Header().Get("Location"))
+	}
+	if sessionCookie(rec) == "" {
+		t.Fatal("returning user got no session cookie")
+	}
+}
+
+// GET /api/auth/invite reports usability and kind, read-only.
+func TestInviteCheckEndpoint(t *testing.T) {
+	f := newRefusalFixture(t, &fakeSpotify{}, true, 5)
+	spotifyCode := f.invite(t, true)
+	plainCode := f.invite(t, false)
+	check := func(code string) (bool, bool) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		f.r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/invite?code="+url.QueryEscape(code), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d for %q", rec.Code, code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q", got)
+		}
+		var out struct{ Usable, Spotify bool }
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Usable, out.Spotify
+	}
+	cases := []struct {
+		code             string
+		usable, spotifyK bool
+	}{
+		{spotifyCode, true, true},
+		{strings.ToLower(spotifyCode), true, true},
+		{plainCode, true, false},
+		{"CF-NOPE-NOPE", false, false},
+		{"", false, false},
+	}
+	for _, c := range cases {
+		if u, s := check(c.code); u != c.usable || s != c.spotifyK {
+			t.Errorf("%q: usable=%v spotify=%v, want %v %v", c.code, u, s, c.usable, c.spotifyK)
+		}
+	}
+	// A spent Spotify code is not usable and so not Spotify either.
+	if _, err := f.pool.Exec(context.Background(),
+		`UPDATE invite_codes SET redemptions = max_redemptions WHERE code = $1`, db.NormalizeInviteCode(spotifyCode)); err != nil {
+		t.Fatal(err)
+	}
+	if u, s := check(spotifyCode); u || s {
+		t.Errorf("spent code: usable=%v spotify=%v, want false false", u, s)
+	}
+	assertInviteUnspent(t, f, plainCode)
+}
+
 // Below the cap the same Spotify signup is admitted and lands on the app,
 // so the cap test above is refusing because of the cap and nothing else.
 func TestCallbackAdmitsSpotifySignupBelowCap(t *testing.T) {
 	f := newRefusalFixture(t, &fakeSpotify{meID: "newcomer"}, true, 2)
 	f.spotifyUsers(t, 1)
-	code := f.invite(t)
+	code := f.invite(t, true)
 	rec := f.signIn(t, "invite="+url.QueryEscape(code))
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
 		t.Fatalf("status %d Location %q, want 302 to /", rec.Code, rec.Header().Get("Location"))

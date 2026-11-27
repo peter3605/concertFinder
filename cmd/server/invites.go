@@ -21,6 +21,7 @@ type inviteAdminArgs struct {
 	note    string
 	uses    int
 	days    int
+	spotify bool
 }
 
 // runInviteAdmin performs one invite operation and returns a process exit
@@ -68,7 +69,7 @@ func runInviteAdmin(a inviteAdminArgs) int {
 		}
 		now := time.Now()
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "CODE\tUSED\tSTATE\tEXPIRES\tNOTE")
+		fmt.Fprintln(tw, "CODE\tKIND\tUSED\tSTATE\tEXPIRES\tNOTE")
 		for _, c := range codes {
 			// db.InviteCode.State, not a switch of our own. The admin console
 			// renders the same four words from the same function, so a code
@@ -78,8 +79,8 @@ func runInviteAdmin(a inviteAdminArgs) int {
 			if c.ExpiresAt != nil {
 				expires = c.ExpiresAt.UTC().Format("2006-01-02")
 			}
-			fmt.Fprintf(tw, "%s\t%d/%d\t%s\t%s\t%s\n",
-				c.Code, c.Redemptions, c.MaxRedemptions, state, expires, c.Note)
+			fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%s\t%s\t%s\n",
+				c.Code, inviteKind(c.Spotify), c.Redemptions, c.MaxRedemptions, state, expires, c.Note)
 		}
 		return flushOrFail(tw)
 
@@ -94,19 +95,28 @@ func runInviteAdmin(a inviteAdminArgs) int {
 			fmt.Fprintf(os.Stderr, "invite: generate: %v\n", err)
 			return 1
 		}
-		created, err := db.CreateInviteCode(ctx, pool, code, a.note, a.uses, expiresAt)
+		created, err := db.CreateInviteCode(ctx, pool, code, a.note, a.uses, expiresAt, a.spotify)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invite: mint: %v\n", err)
 			return 1
 		}
 		// The code itself on stdout and alone on its line, so this is safe to
 		// pipe. Everything else goes to stderr.
-		fmt.Fprintf(os.Stderr, "minted for %q — %d use(s), expires %s\n",
-			created.Note, created.MaxRedemptions, expiresDescription(created.ExpiresAt))
+		fmt.Fprintf(os.Stderr, "minted %s invite for %q — %d use(s), expires %s\n",
+			inviteKind(created.Spotify), created.Note, created.MaxRedemptions, expiresDescription(created.ExpiresAt))
 		fmt.Println(created.Code)
 		return 0
 	}
 	return 0
+}
+
+// inviteKind names a code's kind for the operator. "spotify" admits a Spotify
+// signup as well as email and Apple; "standard" admits email and Apple only.
+func inviteKind(spotify bool) string {
+	if spotify {
+		return "spotify"
+	}
+	return "standard"
 }
 
 func expiresDescription(t *time.Time) string {

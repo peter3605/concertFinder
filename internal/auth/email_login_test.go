@@ -320,14 +320,27 @@ func TestEmailConsumeRefusesCrossSiteForm(t *testing.T) {
 // An unknown address is a signup. Without a code nothing is sent; with one,
 // the code is spent in the transaction that creates the user, and only when
 // the link is used.
+//
+// Both kinds of invite admit an email signup (CF-B33): a Spotify invite is
+// the stronger kind, not a narrower one.
 func TestEmailSignupRedeemsInviteAtConsumption(t *testing.T) {
+	for _, spotify := range []bool{false, true} {
+		name := "ordinary"
+		if spotify {
+			name = "spotify"
+		}
+		t.Run(name, func(t *testing.T) { testEmailSignupRedeemsInvite(t, spotify) })
+	}
+}
+
+func testEmailSignupRedeemsInvite(t *testing.T, spotify bool) {
 	f := newEmailFixture(t, true)
 	ctx := context.Background()
 	code, err := db.NewInviteCode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateInviteCode(ctx, f.pool, code, "email test", 1, nil); err != nil {
+	if _, err := db.CreateInviteCode(ctx, f.pool, code, "email test", 1, nil, spotify); err != nil {
 		t.Fatalf("create invite: %v", err)
 	}
 
@@ -364,7 +377,7 @@ func TestEmailSignupRefusedWhenInviteSpentBeforeClick(t *testing.T) {
 	f := newEmailFixture(t, true)
 	ctx := context.Background()
 	code, _ := db.NewInviteCode()
-	if _, err := db.CreateInviteCode(ctx, f.pool, code, "race", 1, nil); err != nil {
+	if _, err := db.CreateInviteCode(ctx, f.pool, code, "race", 1, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	f.start(t, "first@example.com", code)

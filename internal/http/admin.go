@@ -99,6 +99,9 @@ type adminInvite struct {
 	ExpiresAt      *string `json:"expires_at"`
 	DisabledAt     *string `json:"disabled_at"`
 	CreatedAt      string  `json:"created_at"`
+	// Spotify marks a Spotify invite (CF-B33), which admits a Spotify signup
+	// as well as email and Apple ones.
+	Spotify bool `json:"spotify"`
 }
 
 func toAdminInvite(c db.InviteCode, now time.Time) adminInvite {
@@ -109,6 +112,7 @@ func toAdminInvite(c db.InviteCode, now time.Time) adminInvite {
 		Redemptions:    c.Redemptions,
 		State:          c.State(now),
 		CreatedAt:      c.CreatedAt.UTC().Format(time.RFC3339),
+		Spotify:        c.Spotify,
 	}
 	if c.ExpiresAt != nil {
 		s := c.ExpiresAt.UTC().Format(time.RFC3339)
@@ -147,6 +151,9 @@ type mintInviteRequest struct {
 	// refused rather than quietly turned into 1.
 	Uses        *int `json:"uses"`
 	ExpiresDays int  `json:"expires_days"`
+	// Spotify mints a Spotify invite. Omitted means an ordinary one, so a
+	// console that predates the field cannot mint a Spotify code by accident.
+	Spotify bool `json:"spotify"`
 }
 
 // maxInviteNoteLen bounds the operator's own note. It is free text on a row
@@ -202,7 +209,7 @@ func (h *AdminHandler) MintInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	created, err := db.CreateInviteCode(r.Context(), h.Pool, code, note, uses, expiresAt)
+	created, err := db.CreateInviteCode(r.Context(), h.Pool, code, note, uses, expiresAt, req.Spotify)
 	if err != nil {
 		slog.Error("admin: mint invite failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

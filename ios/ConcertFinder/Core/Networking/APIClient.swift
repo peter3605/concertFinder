@@ -357,6 +357,20 @@ actor APIClient {
         try await get("api/site-info", timeout: Self.siteInfoTimeout, as: SiteInfo.self)
     }
 
+    /// What kind of invite a code is (CF-B33), with no session, for the same
+    /// reason as `discover`: it runs on the sign-in screen, where a stale
+    /// token turning a public read into a 401 would sign the user out.
+    /// Read-only on the server; it never reserves or spends the code.
+    func checkInvite(_ code: String) async throws -> InviteCheck {
+        try await get(
+            "api/auth/invite",
+            query: [URLQueryItem(name: "code", value: code)],
+            authenticated: false,
+            timeout: Self.siteInfoTimeout,
+            as: InviteCheck.self
+        )
+    }
+
     // MARK: - Discover
 
     /// "Popular shows near you", with no session.

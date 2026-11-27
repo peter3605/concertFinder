@@ -60,6 +60,10 @@ func main() {
 	inviteNote := flag.String("note", "", "with -mint-invite: who the code is for (operator's own reference)")
 	inviteUses := flag.Int("uses", 1, "with -mint-invite: how many signups the code admits")
 	inviteDays := flag.Int("expires-days", 0, "with -mint-invite: days until the code expires (0 = never)")
+	// A Spotify invite admits a Spotify signup as well as email and Apple
+	// ones (CF-B33). Mint one only after adding the person to the Spotify
+	// dashboard's allowlist; docs/admission-policy.md has the runbook.
+	inviteSpotify := flag.Bool("spotify", false, "with -mint-invite: mint a Spotify invite (add the person to the Spotify dashboard allowlist first)")
 	// Admin administration, and the bootstrap for the whole authorization
 	// tier: the web console can only be reached by an admin, and migration
 	// 0022 leaves every account a non-admin, so the first grant has to come
@@ -88,6 +92,7 @@ func main() {
 			note:    *inviteNote,
 			uses:    *inviteUses,
 			days:    *inviteDays,
+			spotify: *inviteSpotify,
 		}))
 	}
 	if *grantAdmin != "" || *revokeAdmin != "" || *listAdmins {

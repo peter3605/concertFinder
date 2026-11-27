@@ -190,7 +190,7 @@ struct SignInAndPicksTests {
         #expect(AuthController.callbackOutcome(url) == .code("abc123"))
     }
 
-    @Test(arguments: ["spotify_not_registered", "spotify_full", "invite_required", "invite_invalid"])
+    @Test(arguments: ["spotify_not_registered", "spotify_full", "invite_required", "invite_invalid", "invite_not_spotify"])
     func callbackRefusalIsReadAndWorded(code: String) throws {
         let url = try #require(URL(string:
             "https://concertfinder.app/app/auth/callback?error=\(code)&invite=CF-ABCD-EFGH"))
@@ -201,12 +201,26 @@ struct SignInAndPicksTests {
     }
 
     @Test func spotifyRefusalsPointElsewhere() {
-        for code in ["spotify_not_registered", "spotify_full"] {
+        for code in ["spotify_not_registered", "spotify_full", "invite_not_spotify"] {
             let message = AuthController.refusalMessage(code)
             #expect(message.contains("Spotify sign-in is limited"))
             #expect(message.contains("email"))
             #expect(message.contains("Apple"))
         }
+    }
+
+    // CF-B33: only a usable Spotify invite offers Spotify sign-up, and an
+    // answer missing either field reads as no.
+    @Test func inviteCheckAdmitsSpotifyOnlyForAUsableSpotifyInvite() throws {
+        let decoder = JSONDecoder()
+        func check(_ json: String) throws -> Bool {
+            try decoder.decode(InviteCheck.self, from: Data(json.utf8)).admitsSpotify
+        }
+        #expect(try check(#"{"usable":true,"spotify":true}"#))
+        #expect(try !check(#"{"usable":true,"spotify":false}"#))
+        #expect(try !check(#"{"usable":false,"spotify":true}"#))
+        #expect(try !check(#"{"usable":false,"spotify":false}"#))
+        #expect(try !check("{}"))
     }
 
     @Test func unknownRefusalFallsBackToGenericMessage() throws {

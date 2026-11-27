@@ -40,7 +40,7 @@ func TestSpotifyCapRefusesNewSignupsBeforeSpendingAnInvite(t *testing.T) {
 	ctx := context.Background()
 	const limit = 2
 
-	invite, err := db.CreateInviteCode(ctx, pool, "CF-CAPT-"+uuid.NewString()[:4], "cf32", 10, nil)
+	invite, err := db.CreateInviteCode(ctx, pool, "CF-CAPT-"+uuid.NewString()[:4], "cf32", 10, nil, true)
 	if err != nil {
 		t.Fatalf("mint invite: %v", err)
 	}

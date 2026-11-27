@@ -123,6 +123,13 @@ These come from the design doc and from third-party ToS; getting them wrong has 
   not be granted (CF-09 was re-scoped on 2026-11-08; `docs/public-path.md`).
   Growth past five accounts comes through sign-ins that are not Spotify, and
   this gate is what bounds those.
+  **A Spotify signup redeems only a Spotify invite** (`invite_codes.spotify`,
+  migration 0030, CF-B33), minted after the operator adds the person to the
+  dashboard allowlist; an ordinary code admits email and Apple signups, and a
+  Spotify code admits all three. The kind is checked read-only at `/login`
+  (`invite_not_spotify`) and again in `UpsertUserWithAdmission` before
+  `redeemInviteTx`, so a refusal spends nothing; an unknown code stays
+  `invite_invalid`, and a blank one still passes `/login` for returning users.
 
 - **Spotify stays at five accounts, and nobody else reaches Spotify (CF-32,
   `docs/public-path.md` §7).** `SPOTIFY_MAX_USERS` (default 5; `0` means no new
